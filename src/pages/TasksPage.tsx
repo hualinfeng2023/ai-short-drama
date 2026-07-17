@@ -9,6 +9,7 @@ import {
 } from '../api/client'
 import { Button, PageHeader, ProgressBar, StatusBadge } from '../components/ui'
 import { useStudio } from '../store/StudioContext'
+import { useToast } from '../store/ToastContext'
 import type { Job, JobStatus } from '../types'
 import { getCompletedJobCta, getFailedJobGuidance } from '../utils/jobCta'
 import { elapsedJobSeconds, formatElapsedTime } from '../utils/jobTiming'
@@ -79,6 +80,7 @@ function taskSourceLabel(job: Job) {
 }
 
 export function TasksPage() {
+  const { notify } = useToast()
   const { project, jobs: contextJobs, apiStatus } = useStudio()
   const [searchParams] = useSearchParams()
   const projectId = searchParams.get('project')
@@ -190,6 +192,7 @@ export function TasksPage() {
         ? await cancelPersistedJob(jobId)
         : await retryPersistedJob(jobId)
       setJobs((current) => current.map((job) => job.id === jobId ? updated : job))
+      notify(action === 'cancel' ? '已发送取消请求，任务会在安全点停止。' : '任务已重新排队。', action === 'cancel' ? 'info' : 'success')
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '任务操作失败')
     } finally {

@@ -15,6 +15,7 @@ import { useNavigate } from 'react-router'
 import { Button, StatusBadge } from '../components/ui'
 import { fetchProject, updateProjectDraft, uploadProjectAsset } from '../api/client'
 import { useStudio } from '../store/StudioContext'
+import { useToast } from '../store/ToastContext'
 
 const examples = [
   '一名被裁员的产品经理接手旧工作室，在第一位客户上门时发现合伙人的秘密。',
@@ -23,6 +24,7 @@ const examples = [
 ]
 
 export function NewProjectPage() {
+  const { notify } = useToast()
   const [idea, setIdea] = useState(() => localStorage.getItem('drama-draft-idea') ?? '')
   const [mode, setMode] = useState<'chat' | 'template'>('chat')
   const [asset, setAsset] = useState<{
@@ -62,6 +64,7 @@ export function NewProjectPage() {
   function saveDraft() {
     localStorage.setItem('drama-draft-idea', idea)
     setSaved(true)
+    notify('故事草稿已保存到浏览器。')
   }
 
   async function confirmProject() {

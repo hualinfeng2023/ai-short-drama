@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { AlertTriangle, ArrowRight, CalendarDays, Clapperboard, Clock3, LoaderCircle, Plus, RotateCcw, Trash2 } from 'lucide-react'
 import { Link } from 'react-router'
 import { calculateProgress } from '../data/demo'
 import { useStudio } from '../store/StudioContext'
-import { Button, Modal, PageHeader, ProgressBar, StatusBadge, Toast } from '../components/ui'
+import { useToast } from '../store/ToastContext'
+import { Button, Modal, PageHeader, ProgressBar, StatusBadge } from '../components/ui'
 import type { ProjectSummary } from '../types'
 import { localizeDisplayText } from '../utils/localizeDisplayText'
 
@@ -11,19 +12,10 @@ export function ProjectsPage() {
   const { apiStatus, deleteProject, project, projectSummaries, resetDemo } = useStudio()
   const progress = calculateProgress(project.shots)
   const featureImage = project.shots.find((shot) => shot.currentImageUrl)?.currentImageUrl
+  const { notify } = useToast()
   const [pendingDelete, setPendingDelete] = useState<ProjectSummary | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
-  const [deleteNotice, setDeleteNotice] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (!deleteNotice && !deleteError) return
-    const timer = window.setTimeout(() => {
-      setDeleteNotice(null)
-      setDeleteError(null)
-    }, 4500)
-    return () => window.clearTimeout(timer)
-  }, [deleteError, deleteNotice])
 
   async function confirmDelete() {
     if (!pendingDelete || deleting) return
@@ -33,7 +25,7 @@ export function ProjectsPage() {
       const name = pendingDelete.name
       await deleteProject(pendingDelete.id)
       setPendingDelete(null)
-      setDeleteNotice(`“${name}”已删除。`)
+      notify(`“${name}”已删除。`)
     } catch (reason) {
       setDeleteError(reason instanceof Error ? reason.message : '删除项目失败，请稍后重试。')
     } finally {
@@ -115,7 +107,7 @@ export function ProjectsPage() {
             <p className="eyebrow">项目库</p>
             <h2 id="project-library-title">全部项目</h2>
           </div>
-          {apiStatus === 'mock_fallback' ? <Button onClick={resetDemo} size="sm" variant="ghost">
+          {apiStatus === 'mock_fallback' ? <Button onClick={() => { resetDemo(); notify('已恢复内置演示项目。') }} size="sm" variant="ghost">
             <RotateCcw size={15} /> 恢复演示项目
           </Button> : null}
         </div>
@@ -141,7 +133,6 @@ export function ProjectsPage() {
                   disabled={item.id === project.id}
                   onClick={() => {
                     setDeleteError(null)
-                    setDeleteNotice(null)
                     setPendingDelete(item)
                   }}
                   title={item.id === project.id ? '当前正在编辑的项目不能删除' : `删除${item.name}`}
@@ -158,12 +149,6 @@ export function ProjectsPage() {
         </div>
       </section>
 
-      {deleteNotice || (deleteError && !pendingDelete) ? (
-        <div className="toast-region" aria-label="通知">
-          {deleteNotice ? <Toast message={deleteNotice} onDismiss={() => setDeleteNotice(null)} /> : null}
-          {deleteError && !pendingDelete ? <Toast message={deleteError} onDismiss={() => setDeleteError(null)} tone="error" /> : null}
-        </div>
-      ) : null}
       <Modal
         className="modal--project-delete"
         description="此操作不可撤销，项目关联的项目简报、任务、剧本、素材和时间线都会一并删除。"
