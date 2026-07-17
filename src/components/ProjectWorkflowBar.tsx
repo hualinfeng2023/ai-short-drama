@@ -42,7 +42,17 @@ export function ProjectWorkflowBar() {
         <Link to={readiness.nextActionHref}>{readiness.nextActionLabel}</Link>
       </header>
       <nav aria-label="制作阶段">
-        {readiness.stages.map((stage) => (
+        {readiness.stages.map((stage) => stage.status === 'LOCKED' ? (
+          <span
+            aria-disabled="true"
+            className={`project-workflow__stage project-workflow__stage--${stage.status.toLowerCase()}`}
+            key={stage.key}
+            title={stage.detail}
+          >
+            <i><StageIcon stage={stage} /></i>
+            <span>{stage.label}</span>
+          </span>
+        ) : (
           <Link
             aria-current={stage.key === readiness.activeStageKey ? 'step' : undefined}
             className={`project-workflow__stage project-workflow__stage--${stage.status.toLowerCase()}`}

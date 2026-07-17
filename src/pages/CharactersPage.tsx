@@ -25,7 +25,8 @@ import {
   type CharacterVisualRecord,
   type CharacterVisualWorkspace,
 } from '../api/client'
-import { Button, EmptyState, PageHeader } from '../components/ui'
+import { Button, PageHeader } from '../components/ui'
+import { ServiceRequiredState } from '../components/ServiceRequiredState'
 import { localizeDisplayText } from '../utils/localizeDisplayText'
 
 const STATUS_LABELS: Record<string, string> = {
@@ -258,7 +259,7 @@ export function CharactersPage() {
   )
 
   if (!loading && (!projectId || !workspace)) {
-    return <div className="page"><EmptyState title="无法打开角色形象" description="角色文字设定或关系基线尚未准备，请返回故事工作区检查。" action={<Link className="button button--secondary button--md" to={projectId ? `/projects/${projectId}/story` : '/projects'}><ArrowLeft size={16} />返回角色文字设定</Link>} /></div>
+    return <ServiceRequiredState feature="角色形象生成与锁定" projectId={projectId} />
   }
 
   if (loading || !projectId || !workspace) {

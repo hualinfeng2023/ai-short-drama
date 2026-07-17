@@ -8,6 +8,7 @@ import {
   type StoryboardWorkspace,
 } from '../api/client'
 import { Button, EmptyState, PageHeader, StatusBadge } from '../components/ui'
+import { ServiceRequiredState } from '../components/ServiceRequiredState'
 import type { ProjectRecord } from '../types'
 import { localizeDisplayText } from '../utils/localizeDisplayText'
 
@@ -76,7 +77,7 @@ export function StoryboardPage() {
   }
 
   if (!loading && (!project || !workspace || !projectId)) {
-    return <div className="page"><EmptyState title="无法打开动态分镜" description="分镜工作区暂时没有返回，请确认项目服务已连接后重试。" action={<Link className="button button--secondary button--md" to={projectId ? `/projects/${projectId}/preproduction` : '/projects'}><ArrowLeft size={16} />返回前期制作</Link>} /></div>
+    return <ServiceRequiredState feature="动态分镜" projectId={projectId} />
   }
   if (loading || !project || !workspace || !projectId) {
     return <div className="page brief-page-state"><LoaderCircle className="spin" size={22} /><strong>正在读取动态分镜与节奏样片…</strong></div>

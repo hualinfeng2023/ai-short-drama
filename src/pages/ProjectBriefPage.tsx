@@ -16,6 +16,7 @@ import {
   updateProjectDraft,
 } from '../api/client'
 import { Button, PageHeader, SelectControl, StatusBadge } from '../components/ui'
+import { ServiceRequiredState } from '../components/ServiceRequiredState'
 import { useStudio } from '../store/StudioContext'
 import type {
   BriefVersionRecord,
@@ -650,7 +651,7 @@ export function ProjectBriefPage() {
   }
 
   if (!project || !form) {
-    return <div className="page brief-page-state"><strong>无法打开项目</strong><p>{error ?? '项目不存在或服务不可用。'}</p><Link className="button button--secondary button--md" to="/projects"><ArrowLeft size={16} />返回项目列表</Link></div>
+    return <ServiceRequiredState feature="项目简报" projectId={projectId} />
   }
 
   const isActiveWorkspace = activeProject.id === project.id

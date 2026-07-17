@@ -26,6 +26,7 @@ import {
   type TimelineWorkspace,
 } from '../api/client'
 import { Button, EmptyState, PageHeader, StatusBadge } from '../components/ui'
+import { ServiceRequiredState } from '../components/ServiceRequiredState'
 import { useProjectReadiness } from '../store/ProjectReadinessContext'
 import type { ExportPackage, ProjectRecord } from '../types'
 import { localizeDisplayText } from '../utils/localizeDisplayText'
@@ -181,7 +182,7 @@ export function ProductionPage() {
   }
 
   if (!loading && (!project || !audio || !timeline || !projectId)) {
-    return <div className="page"><EmptyState title="无法打开正式制作" description="音频、时间线或交付数据暂时没有返回，请确认项目服务已连接后重试。" action={<Link className="button button--secondary button--md" to={projectId ? `/tasks?project=${projectId}` : '/projects'}>查看项目任务</Link>} /></div>
+    return <ServiceRequiredState feature="正式制作与交付" projectId={projectId} />
   }
   if (loading || !project || !audio || !timeline || !projectId) {
     return <div className="page brief-page-state"><LoaderCircle className="spin" size={22} /><strong>正在读取音频、多轨时间线与交付状态…</strong></div>
