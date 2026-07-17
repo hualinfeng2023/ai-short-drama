@@ -1,0 +1,796 @@
+import json
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
+from uuid import uuid4
+
+from fastapi import HTTPException
+from sqlalchemy import exists, or_, select, update
+from sqlalchemy.orm import Session, aliased
+
+from app.db.models import (
+    ChangeSet,
+    ExportRecord,
+    Job,
+    JobDependency,
+    Project,
+    ProposalVersion,
+    Shot,
+    Take,
+    TimelineVersion,
+    UsageLedger,
+    WorkerState,
+)
+from app.schemas import JobRead
+from app.services.events import append_event
+from app.services.projects import canonical_json
+from app.services.workspace import not_found, project_or_404
+
+QUEUED_STATUSES = {"PENDING", "RETRY_WAIT"}
+ACTIVE_STATUSES = {"RUNNING", "CANCEL_REQUESTED"}
+TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED"}
+RETRY_DELAYS = (5, 20, 60)
+
+
+def release_project_after_terminal_job(session: Session, job: Job, now: datetime) -> None:
+    running_status: str
+    fallback_status: str
+    if job.job_type == "GENERATE_PROPOSAL":
+        running_status = "PROPOSAL_RUNNING"
+        fallback_status = "DRAFT"
+    elif job.job_type == "GENERATE_STORY_DIRECTIONS":
+        running_status = "PROPOSAL_RUNNING"
+        has_ready_direction = session.scalar(
+            select(ProposalVersion.id)
+            .where(
+                ProposalVersion.project_id == job.project_id,
+                ProposalVersion.status == "READY",
+            )
+            .limit(1)
+        )
+        fallback_status = "PROPOSAL_READY" if has_ready_direction is not None else "DRAFT"
+    elif job.job_type == "GENERATE_STORY_PACKAGE":
+        running_status = "STORY_PACKAGE_RUNNING"
+        fallback_status = "PROPOSAL_READY"
+    elif job.job_type == "GENERATE_STORY_STRUCTURE":
+        running_status = "STORY_STRUCTURE_RUNNING"
+        fallback_status = "PROPOSAL_READY"
+    elif job.job_type == "GENERATE_SCRIPT_PACKAGE":
+        running_status = "SCRIPT_PACKAGE_RUNNING"
+        fallback_status = "CHARACTER_VISUAL_READY"
+    else:
+        return
+    project = session.get(Project, job.project_id)
+    if project is not None and project.status == running_status:
+        project.status = fallback_status
+        project.lock_version += 1
+        project.updated_at = now
+
+
+def _restore_project_from_current_timeline(
+    session: Session, project: Project, now: datetime
+) -> None:
+    timeline = (
+        session.get(TimelineVersion, project.current_timeline_version_id)
+        if project.current_timeline_version_id
+        else None
+    )
+    approved = timeline is not None and timeline.status == "APPROVED"
+    project.status = "APPROVED" if approved else "PREVIEW_READY"
+    project.preview_approved = approved
+    project.export_ready = False
+    project.lock_version += 1
+    project.updated_at = now
+
+
+def _release_revision_job(session: Session, job: Job, now: datetime) -> None:
+    if job.job_type != "APPLY_REVISION":
+        return
+    change_set = session.get(ChangeSet, job.entity_id)
+    if change_set is None or change_set.result_timeline_id is not None:
+        return
+    terminal_status = "CANCELLED" if job.status == "CANCELLED" else "FAILED"
+    if change_set.status == terminal_status:
+        return
+    change_set.status = terminal_status
+    project = session.get(Project, job.project_id)
+    if project is not None:
+        _restore_project_from_current_timeline(session, project, now)
+
+
+def _export_ledger_totals(session: Session, job_id: str) -> tuple[int, int]:
+    entries = session.scalars(select(UsageLedger).where(UsageLedger.job_id == job_id)).all()
+    reserved = sum(item.points for item in entries if item.entry_type == "RESERVED")
+    released = sum(item.points for item in entries if item.entry_type == "RELEASED")
+    return reserved, released
+
+
+def _release_export_job(session: Session, job: Job, now: datetime) -> None:
+    if job.job_type != "EXPORT_PACKAGE":
+        return
+    export = session.get(ExportRecord, job.entity_id)
+    if export is None or export.status == "READY":
+        return
+    terminal_status = "CANCELLED" if job.status == "CANCELLED" else "FAILED"
+    if export.status == terminal_status:
+        return
+    export.status = terminal_status
+    export.completed_at = now
+    project = session.get(Project, job.project_id)
+    if project is None:
+        return
+    committed = session.scalar(
+        select(UsageLedger).where(
+            UsageLedger.job_id == job.id,
+            UsageLedger.entry_type == "COMMITTED",
+        )
+    )
+    reserved, released = _export_ledger_totals(session, job.id)
+    outstanding = max(0, reserved - released)
+    if committed is None and outstanding:
+        project.available_points += outstanding
+        session.add(
+            UsageLedger(
+                id=str(uuid4()),
+                project_id=project.id,
+                job_id=job.id,
+                entry_type="RELEASED",
+                points=outstanding,
+                description="导出失败或取消，释放预留积分",
+                created_at=now,
+            )
+        )
+    _restore_project_from_current_timeline(session, project, now)
+
+
+def release_entity_after_terminal_job(session: Session, job: Job, now: datetime) -> None:
+    release_project_after_terminal_job(session, job, now)
+    _release_revision_job(session, job, now)
+    _release_export_job(session, job, now)
+    if job.job_type in {
+        "GENERATE_CHARACTER_VISUAL_CANDIDATE",
+        "GENERATE_CHARACTER_IDENTITY_DOSSIER",
+    }:
+        from app.services.character_visuals import mark_character_generation_failed
+
+        mark_character_generation_failed(session, job)
+    if job.job_type != "GENERATE_SHOT_IMAGE":
+        return
+    shot = session.get(Shot, job.entity_id)
+    if shot is None:
+        return
+    take_version = int(json.loads(job.input_json).get("take_version", 0))
+    materialized = session.scalar(
+        select(Take).where(Take.shot_id == shot.id, Take.version == take_version)
+    )
+    if materialized is None:
+        shot.candidate_take = None
+        shot.status = "APPROVED" if shot.current_take_id else "READY"
+        shot.lock_version += 1
+
+
+def mark_project_job_running(session: Session, job: Job, now: datetime) -> None:
+    if job.job_type in {"GENERATE_PROPOSAL", "GENERATE_STORY_DIRECTIONS"}:
+        running_status = "PROPOSAL_RUNNING"
+    elif job.job_type == "GENERATE_STORY_PACKAGE":
+        running_status = "STORY_PACKAGE_RUNNING"
+    elif job.job_type == "GENERATE_STORY_STRUCTURE":
+        running_status = "STORY_STRUCTURE_RUNNING"
+    elif job.job_type == "GENERATE_SCRIPT_PACKAGE":
+        running_status = "SCRIPT_PACKAGE_RUNNING"
+    else:
+        return
+    project = session.get(Project, job.project_id)
+    if project is not None and project.status != running_status:
+        project.status = running_status
+        project.lock_version += 1
+        project.updated_at = now
+
+
+def reconcile_terminal_project_jobs(session: Session) -> int:
+    """Repair projects left in a running state after an older terminal job."""
+    now = datetime.now(UTC)
+    job_types_by_status = {
+        "PROPOSAL_RUNNING": ("GENERATE_PROPOSAL", "GENERATE_STORY_DIRECTIONS"),
+        "STORY_PACKAGE_RUNNING": ("GENERATE_STORY_PACKAGE",),
+        "STORY_STRUCTURE_RUNNING": ("GENERATE_STORY_STRUCTURE",),
+        "SCRIPT_PACKAGE_RUNNING": ("GENERATE_SCRIPT_PACKAGE",),
+    }
+    repaired = 0
+    projects = session.scalars(select(Project).where(Project.status.in_(job_types_by_status))).all()
+    for project in projects:
+        job_types = job_types_by_status[project.status]
+        active_job_id = session.scalar(
+            select(Job.id)
+            .where(
+                Job.project_id == project.id,
+                Job.job_type.in_(job_types),
+                Job.status.in_(QUEUED_STATUSES | ACTIVE_STATUSES),
+            )
+            .limit(1)
+        )
+        if active_job_id is not None:
+            continue
+        terminal_job = session.scalar(
+            select(Job)
+            .where(
+                Job.project_id == project.id,
+                Job.job_type.in_(job_types),
+                Job.status.in_({"FAILED", "CANCELLED"}),
+            )
+            .order_by(Job.updated_at.desc())
+            .limit(1)
+        )
+        if terminal_job is None:
+            continue
+        previous_status = project.status
+        release_project_after_terminal_job(session, terminal_job, now)
+        if project.status == previous_status:
+            continue
+        repaired += 1
+        append_event(
+            session,
+            project_id=project.id,
+            job_id=terminal_job.id,
+            event_type="project.running_state_reconciled",
+            payload={
+                "job_id": terminal_job.id,
+                "job_status": terminal_job.status,
+                "previous_project_status": previous_status,
+                "project_status": project.status,
+            },
+        )
+    session.commit()
+    return repaired
+
+
+def mark_entity_job_running(session: Session, job: Job, now: datetime) -> None:
+    mark_project_job_running(session, job, now)
+    project = session.get(Project, job.project_id)
+    if job.job_type == "APPLY_REVISION":
+        change_set = session.get(ChangeSet, job.entity_id)
+        if change_set is not None and change_set.result_timeline_id is None:
+            change_set.status = "PENDING"
+        if project is not None:
+            project.status = "PRODUCING"
+            project.preview_approved = False
+            project.export_ready = False
+            project.lock_version += 1
+            project.updated_at = now
+    if job.job_type == "EXPORT_PACKAGE":
+        export = session.get(ExportRecord, job.entity_id)
+        if export is not None and export.status != "READY":
+            reserved, released = _export_ledger_totals(session, job.id)
+            reserve_amount = next(
+                (
+                    item.points
+                    for item in session.scalars(
+                        select(UsageLedger).where(
+                            UsageLedger.job_id == job.id,
+                            UsageLedger.entry_type == "RESERVED",
+                        )
+                    )
+                ),
+                0,
+            )
+            if reserved <= released and reserve_amount:
+                if project is None or project.available_points < reserve_amount:
+                    raise HTTPException(
+                        status_code=429,
+                        detail={
+                            "code": "INSUFFICIENT_POINTS",
+                            "message": "重试导出所需积分不足",
+                            "retryable": False,
+                        },
+                    )
+                project.available_points -= reserve_amount
+                session.add(
+                    UsageLedger(
+                        id=str(uuid4()),
+                        project_id=project.id,
+                        job_id=job.id,
+                        entry_type="RESERVED",
+                        points=reserve_amount,
+                        description="导出重试预留",
+                        created_at=now,
+                    )
+                )
+            export.status = "PENDING"
+            export.completed_at = None
+            if project is not None:
+                project.status = "EXPORTING"
+                project.export_ready = False
+                project.lock_version += 1
+                project.updated_at = now
+    if job.job_type != "GENERATE_SHOT_IMAGE":
+        return
+    shot = session.get(Shot, job.entity_id)
+    if shot is None:
+        return
+    shot.status = "GENERATING"
+    shot.candidate_take = int(json.loads(job.input_json)["take_version"])
+    shot.lock_version += 1
+
+
+def job_to_read(job: Job) -> JobRead:
+    return JobRead.model_validate(job)
+
+
+def job_or_404(session: Session, job_id: str) -> Job:
+    job = session.get(Job, job_id)
+    if job is None:
+        raise not_found("任务", job_id)
+    return job
+
+
+def list_jobs(session: Session) -> list[JobRead]:
+    jobs = session.scalars(select(Job).order_by(Job.created_at.desc())).all()
+    return [job_to_read(job) for job in jobs]
+
+
+def list_project_jobs(session: Session, project_id: str) -> list[JobRead]:
+    project_or_404(session, project_id)
+    jobs = session.scalars(
+        select(Job).where(Job.project_id == project_id).order_by(Job.created_at.desc())
+    ).all()
+    return [job_to_read(job) for job in jobs]
+
+
+def enqueue_job(
+    session: Session,
+    *,
+    project_id: str,
+    job_type: str,
+    entity_type: str,
+    entity_id: str,
+    idempotency_key: str,
+    input_payload: dict[str, object],
+    label: str,
+    stage: str,
+    trace_id: str,
+    estimated_seconds: int | None = None,
+    max_attempts: int = 3,
+    priority: int = 0,
+    retryable: bool = True,
+) -> tuple[Job, bool]:
+    request_hash = sha256(canonical_json(input_payload).encode()).hexdigest()
+    existing = session.scalar(select(Job).where(Job.idempotency_key == idempotency_key))
+    if existing is not None:
+        if existing.request_hash != request_hash:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "IDEMPOTENCY_CONFLICT",
+                    "message": "相同任务幂等键对应了不同输入",
+                    "user_action": "刷新当前实体版本后重新发起",
+                    "retryable": False,
+                    "details": {"job_id": existing.id},
+                },
+            )
+        return existing, True
+
+    now = datetime.now(UTC)
+    job = Job(
+        id=str(uuid4()),
+        project_id=project_id,
+        job_type=job_type,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        label=label,
+        entity=f"{entity_type}:{entity_id}",
+        status="PENDING",
+        progress=0,
+        stage=stage,
+        priority=priority,
+        attempt=0,
+        max_attempts=max_attempts,
+        available_at=now,
+        lease_until=None,
+        heartbeat_at=None,
+        cancel_requested=False,
+        input_json=canonical_json(input_payload),
+        output_json=None,
+        error_code=None,
+        error_message=None,
+        error_details_json=None,
+        created_at_label=now.strftime("%H:%M"),
+        created_at=now,
+        updated_at=now,
+        completed_at=None,
+        worker_id=None,
+        trace_id=trace_id,
+        estimated_seconds=estimated_seconds,
+        retryable=retryable,
+    )
+    session.add(job)
+    session.flush()
+    append_event(
+        session,
+        project_id=project_id,
+        job_id=job.id,
+        event_type="job.created",
+        payload={"job_id": job.id, "status": job.status, "stage": job.stage, "progress": 0},
+    )
+    return job, False
+
+
+def request_cancel(session: Session, job_id: str) -> JobRead:
+    job = job_or_404(session, job_id)
+    now = datetime.now(UTC)
+    if job.status in TERMINAL_STATUSES:
+        return job_to_read(job)
+    if job.status in QUEUED_STATUSES:
+        job.status = "CANCELLED"
+        job.cancel_requested = True
+        job.stage = "已取消"
+        job.completed_at = now
+        release_entity_after_terminal_job(session, job, now)
+    else:
+        job.status = "CANCEL_REQUESTED"
+        job.cancel_requested = True
+        job.stage = "等待当前处理单元结束"
+    job.updated_at = now
+    append_event(
+        session,
+        project_id=job.project_id,
+        job_id=job.id,
+        event_type="job.cancel_requested",
+        payload={"job_id": job.id, "status": job.status, "progress": job.progress},
+    )
+    session.commit()
+    session.refresh(job)
+    return job_to_read(job)
+
+
+def request_retry(session: Session, job_id: str) -> JobRead:
+    job = job_or_404(session, job_id)
+    if job.status in {"PENDING", "RETRY_WAIT", "RUNNING"}:
+        return job_to_read(job)
+    if job.status not in {"FAILED", "CANCELLED"} or not job.retryable:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "JOB_NOT_RETRYABLE",
+                "message": "当前任务不能重试",
+                "user_action": "查看错误详情或返回上游修改输入",
+                "retryable": False,
+                "details": {"job_id": job.id, "status": job.status},
+            },
+        )
+    now = datetime.now(UTC)
+    job.status = "RETRY_WAIT"
+    job.stage = "等待重试"
+    job.available_at = now
+    job.lease_until = None
+    mark_entity_job_running(session, job, now)
+    job.heartbeat_at = None
+    job.worker_id = None
+    job.cancel_requested = False
+    job.completed_at = None
+    job.error_code = None
+    job.error_message = None
+    job.error_details_json = None
+    job.updated_at = now
+    append_event(
+        session,
+        project_id=job.project_id,
+        job_id=job.id,
+        event_type="job.retry_requested",
+        payload={"job_id": job.id, "status": job.status, "attempt": job.attempt},
+    )
+    session.commit()
+    session.refresh(job)
+    return job_to_read(job)
+
+
+def recover_expired_jobs(session: Session) -> int:
+    now = datetime.now(UTC)
+    expired = session.scalars(
+        select(Job).where(
+            Job.status.in_(ACTIVE_STATUSES),
+            or_(Job.lease_until.is_(None), Job.lease_until < now),
+        )
+    ).all()
+    for job in expired:
+        if job.status == "CANCEL_REQUESTED" or job.cancel_requested:
+            job.status = "CANCELLED"
+            job.stage = "重启恢复时完成取消"
+            job.completed_at = now
+            event_type = "job.cancelled"
+        elif job.retryable and job.attempt < job.max_attempts:
+            job.status = "RETRY_WAIT"
+            job.stage = "进程重启后等待恢复"
+            job.available_at = now
+            event_type = "job.recovered"
+        else:
+            job.status = "FAILED"
+            job.stage = "恢复次数已耗尽"
+            job.error_code = "WORKER_LEASE_EXPIRED"
+            job.error_message = "任务执行期间后台任务进程心跳过期"
+            job.completed_at = now
+            event_type = "job.failed"
+        if job.status in {"FAILED", "CANCELLED"}:
+            release_entity_after_terminal_job(session, job, now)
+        job.lease_until = None
+        job.heartbeat_at = None
+        job.worker_id = None
+        job.updated_at = now
+        append_event(
+            session,
+            project_id=job.project_id,
+            job_id=job.id,
+            event_type=event_type,
+            payload={"job_id": job.id, "status": job.status, "attempt": job.attempt},
+        )
+    session.commit()
+    return len(expired)
+
+
+def claim_next_job(session: Session, worker_id: str, lease_seconds: int) -> Job | None:
+    now = datetime.now(UTC)
+    dependency_job = aliased(Job)
+    unmet_dependency = exists(
+        select(JobDependency.id)
+        .join(dependency_job, dependency_job.id == JobDependency.depends_on_job_id)
+        .where(
+            JobDependency.job_id == Job.id,
+            dependency_job.status != "SUCCEEDED",
+        )
+    )
+    candidate = (
+        select(Job.id)
+        .where(
+            Job.status.in_(QUEUED_STATUSES),
+            Job.available_at <= now,
+            or_(Job.lease_until.is_(None), Job.lease_until < now),
+            ~unmet_dependency,
+        )
+        .order_by(Job.priority.desc(), Job.created_at.asc())
+        .limit(1)
+        .scalar_subquery()
+    )
+    claimed_id = session.scalar(
+        update(Job)
+        .where(
+            Job.id == candidate,
+            Job.status.in_(QUEUED_STATUSES),
+            Job.available_at <= now,
+        )
+        .values(
+            status="RUNNING",
+            stage="任务已领取",
+            attempt=Job.attempt + 1,
+            worker_id=worker_id,
+            heartbeat_at=now,
+            lease_until=now + timedelta(seconds=lease_seconds),
+            error_code=None,
+            error_message=None,
+            error_details_json=None,
+            updated_at=now,
+        )
+        .returning(Job.id)
+    )
+    if claimed_id is None:
+        session.rollback()
+        return None
+    job = session.get(Job, claimed_id)
+    if job is None:
+        session.rollback()
+        return None
+    append_event(
+        session,
+        project_id=job.project_id,
+        job_id=job.id,
+        event_type="job.running",
+        payload={"job_id": job.id, "status": "RUNNING", "attempt": job.attempt},
+    )
+    session.commit()
+    session.refresh(job)
+    return job
+
+
+def update_job_progress(
+    session: Session,
+    *,
+    job_id: str,
+    worker_id: str,
+    progress: float,
+    stage: str,
+    lease_seconds: int,
+) -> bool:
+    now = datetime.now(UTC)
+    job = job_or_404(session, job_id)
+    session.refresh(job)
+    if job.cancel_requested or job.status == "CANCEL_REQUESTED":
+        return False
+    if job.status != "RUNNING" or job.worker_id != worker_id:
+        return False
+    next_progress = min(99, max(job.progress, progress))
+    changed = job.progress != next_progress or job.stage != stage
+    job.progress = next_progress
+    job.stage = stage
+    job.heartbeat_at = now
+    job.lease_until = now + timedelta(seconds=lease_seconds)
+    job.updated_at = now
+    if changed:
+        append_event(
+            session,
+            project_id=job.project_id,
+            job_id=job.id,
+            event_type="job.progress",
+            payload={
+                "job_id": job.id,
+                "status": job.status,
+                "progress": job.progress,
+                "stage": stage,
+            },
+        )
+    session.commit()
+    return True
+
+
+def update_job_diagnostics(
+    session: Session,
+    *,
+    job_id: str,
+    worker_id: str,
+    details: dict[str, object],
+    lease_seconds: int,
+) -> bool:
+    now = datetime.now(UTC)
+    job = job_or_404(session, job_id)
+    session.refresh(job)
+    if job.cancel_requested or job.status == "CANCEL_REQUESTED":
+        return False
+    if job.status != "RUNNING" or job.worker_id != worker_id:
+        return False
+    job.error_details_json = canonical_json(details)
+    job.heartbeat_at = now
+    job.lease_until = now + timedelta(seconds=lease_seconds)
+    job.updated_at = now
+    append_event(
+        session,
+        project_id=job.project_id,
+        job_id=job.id,
+        event_type="job.diagnostics",
+        payload={
+            "job_id": job.id,
+            "status": job.status,
+            "phase": details.get("phase"),
+            "model_attempt": details.get("model_attempt"),
+        },
+    )
+    session.commit()
+    return True
+
+
+def finish_job_success(
+    session: Session, job_id: str, worker_id: str, output: dict[str, object]
+) -> None:
+    now = datetime.now(UTC)
+    job = job_or_404(session, job_id)
+    session.refresh(job)
+    if job.worker_id != worker_id:
+        return
+    job.status = "SUCCEEDED"
+    job.progress = 100
+    job.stage = "已完成"
+    job.output_json = canonical_json(output)
+    job.error_code = None
+    job.error_message = None
+    job.error_details_json = None
+    job.completed_at = now
+    job.updated_at = now
+    job.lease_until = None
+    job.heartbeat_at = now
+    append_event(
+        session,
+        project_id=job.project_id,
+        job_id=job.id,
+        event_type="job.succeeded",
+        payload={"job_id": job.id, "status": job.status, "progress": 100, "output": output},
+    )
+    session.commit()
+
+
+def finish_job_cancelled(session: Session, job_id: str, worker_id: str) -> None:
+    now = datetime.now(UTC)
+    job = job_or_404(session, job_id)
+    session.refresh(job)
+    if job.worker_id != worker_id:
+        return
+    job.status = "CANCELLED"
+    job.stage = "已取消"
+    job.completed_at = now
+    job.updated_at = now
+    job.lease_until = None
+    release_entity_after_terminal_job(session, job, now)
+    append_event(
+        session,
+        project_id=job.project_id,
+        job_id=job.id,
+        event_type="job.cancelled",
+        payload={"job_id": job.id, "status": job.status, "progress": job.progress},
+    )
+    session.commit()
+
+
+def finish_job_failure(
+    session: Session,
+    *,
+    job_id: str,
+    worker_id: str,
+    code: str,
+    message: str,
+    details: dict[str, object] | None,
+    retryable: bool,
+) -> None:
+    now = datetime.now(UTC)
+    job = job_or_404(session, job_id)
+    session.refresh(job)
+    if job.worker_id != worker_id:
+        return
+    can_retry = retryable and job.retryable and job.attempt < job.max_attempts
+    if can_retry:
+        delay = RETRY_DELAYS[min(max(job.attempt - 1, 0), len(RETRY_DELAYS) - 1)]
+        job.status = "RETRY_WAIT"
+        job.stage = f"{delay} 秒后重试"
+        job.available_at = now + timedelta(seconds=delay)
+        job.completed_at = None
+        event_type = "job.retry_wait"
+    else:
+        job.status = "FAILED"
+        job.stage = "任务失败"
+        job.completed_at = now
+        event_type = "job.failed"
+        release_entity_after_terminal_job(session, job, now)
+    job.error_code = code
+    job.error_message = message
+    job.error_details_json = canonical_json(details or {})
+    job.updated_at = now
+    job.lease_until = None
+    job.worker_id = None
+    append_event(
+        session,
+        project_id=job.project_id,
+        job_id=job.id,
+        event_type=event_type,
+        payload={
+            "job_id": job.id,
+            "status": job.status,
+            "attempt": job.attempt,
+            "error_code": code,
+            "retryable": can_retry,
+        },
+    )
+    session.commit()
+
+
+def upsert_worker_heartbeat(
+    session: Session,
+    *,
+    state_id: str,
+    worker_id: str,
+    status: str,
+    started_at: datetime,
+    current_job_id: str | None,
+) -> None:
+    now = datetime.now(UTC)
+    state = session.get(WorkerState, state_id)
+    if state is None:
+        state = WorkerState(
+            id=state_id,
+            worker_id=worker_id,
+            status=status,
+            started_at=started_at,
+            heartbeat_at=now,
+            current_job_id=current_job_id,
+        )
+        session.add(state)
+    else:
+        state.worker_id = worker_id
+        state.status = status
+        state.heartbeat_at = now
+        state.current_job_id = current_job_id
+    session.commit()

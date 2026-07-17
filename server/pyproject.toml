@@ -1,0 +1,37 @@
+[project]
+name = "ai-short-drama-api"
+version = "0.1.0"
+description = "Persistent MVP API and worker for the AI short drama studio"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "alembic==1.18.5",
+  "fastapi==0.139.0",
+  "httpx==0.28.1",
+  "pillow==12.2.0",
+  "pydantic==2.13.4",
+  "pypdf==6.10.0",
+  "python-docx==1.2.0",
+  "sqlalchemy==2.0.51",
+  "tos==2.9.2",
+  "uvicorn[standard]==0.51.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest==9.1.1",
+  "ruff==0.15.21",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends"]

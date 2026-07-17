@@ -1,0 +1,16 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    ports:
+      - "${HOST_PORT:-8000}:8000"
+    volumes:
+      - ai_short_drama_data:/data
+    restart: unless-stopped
+    init: true
+
+volumes:
+  ai_short_drama_data:
