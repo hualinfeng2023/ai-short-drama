@@ -31,6 +31,8 @@ import { localizeDisplayText } from '../utils/localizeDisplayText'
 import { buildLocalReadiness } from '../utils/localReadiness'
 import { Button, getStatusLabel } from './ui'
 import { ErrorBoundary } from './ErrorBoundary'
+import { GlossaryTip } from './GlossaryTip'
+import { OnboardingDialog, markOnboardingDone, shouldShowOnboarding } from './OnboardingDialog'
 import { ProjectWorkflowBar } from './ProjectWorkflowBar'
 
 const ACTIVE_JOB_STATUSES: JobStatus[] = ['PENDING', 'RETRY_WAIT', 'RUNNING', 'CANCEL_REQUESTED']
@@ -89,6 +91,24 @@ export function AppShell() {
   })
   const [accountOpen, setAccountOpen] = useState(false)
   const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const [onboardingOpen, setOnboardingOpen] = useState(false)
+
+  useEffect(() => {
+    if (!shouldShowOnboarding()) return
+    const timer = window.setTimeout(() => setOnboardingOpen(true), 700)
+    return () => window.clearTimeout(timer)
+  }, [])
+
+  useEffect(() => {
+    const onShowOnboarding = () => setOnboardingOpen(true)
+    window.addEventListener('studio:show-onboarding', onShowOnboarding)
+    return () => window.removeEventListener('studio:show-onboarding', onShowOnboarding)
+  }, [])
+
+  const finishOnboarding = () => {
+    markOnboardingDone()
+    setOnboardingOpen(false)
+  }
   const [globalJobs, setGlobalJobs] = useState<Job[]>([])
   const [readiness, setReadiness] = useState<ProjectReadiness | null>(null)
   const [readinessErrorProjectId, setReadinessErrorProjectId] = useState<string | null>(null)
@@ -371,10 +391,17 @@ export function AppShell() {
           <div className="topbar__actions">
             <span
               className={`system-status system-status--${apiStatus}`}
-              title={apiStatus === 'connected' ? '后端服务已连接' : apiStatus === 'loading' ? '正在连接后端服务' : '当前使用本地回退数据'}
+              title={apiStatus === 'loading' ? '正在连接后端服务' : undefined}
             >
               {apiStatus === 'connected' ? <Wifi size={14} /> : <CloudOff size={14} />}
-              <span>{apiStatus === 'connected' ? '已连接' : apiStatus === 'loading' ? '连接中' : '本地模式'}</span>
+              {apiStatus === 'connected' ? <span>已连接</span> : apiStatus === 'loading' ? <span>连接中</span> : (
+                <GlossaryTip
+                  focusable
+                  align="end"
+                  label="本地模式"
+                  tip="当前是浏览器演示模式：数据只保存在本浏览器中，可直接体验镜头制作全流程；启动本地服务端后解锁五阶段制作流与数据持久化。"
+                />
+              )}
             </span>
             <div className="credit-balance" title="演示积分，不对应真实货币">
               <span />
@@ -426,6 +453,16 @@ export function AppShell() {
                 <div className="popover" id="account-popover" role="menu">
                   <p className="popover__meta">本地单用户模式</p>
                   <Link role="menuitem" to="/settings" onClick={() => setAccountOpen(false)}>打开系统设置</Link>
+                  <button
+                    role="menuitem"
+                    onClick={() => {
+                      setAccountOpen(false)
+                      setOnboardingOpen(true)
+                    }}
+                    type="button"
+                  >
+                    查看新手引导
+                  </button>
                 </div>
               ) : null}
             </div>
@@ -452,6 +489,7 @@ export function AppShell() {
           </main>
         </ProjectReadinessContext.Provider>
       </div>
+      <OnboardingDialog open={onboardingOpen} onFinish={finishOnboarding} />
     </div>
   )
 }

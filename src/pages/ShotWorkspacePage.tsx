@@ -29,6 +29,7 @@ import {
 import { Button, Modal, ProgressBar, SelectControl, StatusBadge } from '../components/ui'
 import { useStudio } from '../store/StudioContext'
 import { useToast } from '../store/ToastContext'
+import { GlossaryTip } from '../components/GlossaryTip'
 import type { CharacterRecord, IdentityReviewDecision, IdentityReviewIssue } from '../types'
 import { resolveCharacterReferencePreview } from '../utils/characterReferencePreview'
 import { localizeDisplayText } from '../utils/localizeDisplayText'
@@ -249,6 +250,24 @@ export function ShotWorkspacePage() {
     return () => window.removeEventListener('beforeunload', guard)
   }, [dirty])
 
+  // ← / → 在同场景镜头间快速切换（输入控件聚焦或弹窗打开时不劫持按键）。
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+      const target = event.target as HTMLElement | null
+      if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return
+      if (target?.isContentEditable) return
+      if (generateOpen || videoOpen || compareOpen || identityReviewOpen) return
+      const index = sceneShots.findIndex((shot) => shot.id === currentShot.id)
+      const nextShot = event.key === 'ArrowRight' ? sceneShots[index + 1] : sceneShots[index - 1]
+      if (!nextShot) return
+      event.preventDefault()
+      selectShot(nextShot.id)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  })
+
   function selectShot(shotId: string, targetSceneId = scene.id) {
     if (dirty && !window.confirm('当前镜头有未保存修改，确定切换吗？')) return
     navigate(`/projects/${project.id}/episodes/${project.episodeId}/scenes/${targetSceneId}?shot=${shotId}`)
@@ -395,6 +414,7 @@ export function ShotWorkspacePage() {
             </button>
           ))}
         </div>
+        <p className="shot-workspace__kbd-hint" aria-hidden="true"><kbd>←</kbd><kbd>→</kbd> 切换镜头</p>
 
         <section className="versions-panel">
           <div className="section-heading"><div><p className="eyebrow">素材版本</p><h2>版本</h2></div><Button disabled={!currentShot.candidateTake} onClick={() => setCompareOpen(true)} size="sm" variant="ghost"><ArrowLeftRight size={15} />比较版本</Button></div>
@@ -406,14 +426,27 @@ export function ShotWorkspacePage() {
       <aside className="inspector">
         <div className="inspector__tabs">
           <button className={inspectorTab === 'shot' ? 'active' : ''} onClick={() => setInspectorTab('shot')}>镜头</button>
-          <button className={inspectorTab === 'continuity' ? 'active' : ''} onClick={() => setInspectorTab('continuity')}>连续性</button>
-          <button className={inspectorTab === 'versions' ? 'active' : ''} onClick={() => setInspectorTab('versions')}>版本</button>
+          <button className={inspectorTab === 'continuity' ? 'active' : ''} onClick={() => setInspectorTab('continuity')}>
+            <GlossaryTip label="连续性" tip="角色与场景的一致性检查：管理出场角色、造型版本与光线等连续性规则，避免镜头之间「穿帮」。" />
+            {boundCharacterCount > 0 ? <em className="inspector__tab-badge">{boundCharacterCount}</em> : null}
+          </button>
+          <button className={inspectorTab === 'versions' ? 'active' : ''} onClick={() => setInspectorTab('versions')}>
+            <GlossaryTip label="版本" tip="当前版本始终可播放；新生成的画面先作为候选版本，复核通过后才会应用，失败不会覆盖当前版本。" />
+            <em className="inspector__tab-badge">{1 + (currentShot.candidateTake ? 1 : 0)}</em>
+          </button>
         </div>
         <div className="inspector__body">
           {inspectorTab === 'shot' ? <section>
             <p className="eyebrow">镜头参数</p>
-            <label className="field"><span>生图模型</span><SelectControl aria-label="生图模型" onChange={(event) => selectImageModel(event.target.value)} value={selectedImageModel}>{imageModels.map((option) => <option key={option.id} value={option.id}>{option.label} · {option.id}</option>)}</SelectControl></label>
-            <div className="field-grid"><label>分辨率<SelectControl aria-label="分辨率" onChange={(event) => setSelectedImageResolution(event.target.value as ImageResolution)} value={selectedImageResolution}>{imageResolutions.map((resolution) => <option key={resolution} value={resolution}>{resolution}</option>)}</SelectControl></label><label>画面比例<SelectControl aria-label="画面比例" onChange={(event) => setSelectedImageAspectRatio(event.target.value as ImageAspectRatio)} value={selectedImageAspectRatio}>{IMAGE_ASPECT_RATIOS.map((option) => <option key={option.id} value={option.id}>{option.id} · {option.label}</option>)}</SelectControl></label></div>
+            <details className="params-fold">
+              <summary>
+                <span>生成参数</span>
+                <small>{modelLabel(selectedImageModel)} · {selectedImageResolution} · {selectedImageAspectRatio}</small>
+                <ChevronDown className="params-fold__chevron" size={14} />
+              </summary>
+              <label className="field"><span>生图模型</span><SelectControl aria-label="生图模型" onChange={(event) => selectImageModel(event.target.value)} value={selectedImageModel}>{imageModels.map((option) => <option key={option.id} value={option.id}>{option.label} · {option.id}</option>)}</SelectControl></label>
+              <div className="field-grid"><label>分辨率<SelectControl aria-label="分辨率" onChange={(event) => setSelectedImageResolution(event.target.value as ImageResolution)} value={selectedImageResolution}>{imageResolutions.map((resolution) => <option key={resolution} value={resolution}>{resolution}</option>)}</SelectControl></label><label>画面比例<SelectControl aria-label="画面比例" onChange={(event) => setSelectedImageAspectRatio(event.target.value as ImageAspectRatio)} value={selectedImageAspectRatio}>{IMAGE_ASPECT_RATIOS.map((option) => <option key={option.id} value={option.id}>{option.id} · {option.label}</option>)}</SelectControl></label></div>
+            </details>
             <div className="field-grid"><label>景别<SelectControl aria-label="景别" value={currentShot.shotSize} onChange={(event) => updateShot(currentShot.id, { shotSize: event.target.value as typeof currentShot.shotSize })}><option value="WS">全景（WS）</option><option value="MS">中景（MS）</option><option value="MCU">中近景（MCU）</option><option value="CU">近景（CU）</option></SelectControl></label><label>运动<SelectControl aria-label="镜头运动" value={currentShot.cameraMovement} onChange={(event) => updateShot(currentShot.id, { cameraMovement: event.target.value as typeof currentShot.cameraMovement })}><option value="STATIC">固定镜头</option><option value="PAN">摇镜</option><option value="DOLLY_IN">推镜</option><option value="TRACK">跟拍</option><option value="HANDHELD">手持</option></SelectControl></label></div>
             <label className="field"><span className="field__heading"><span>画面描述</span><span className="field__actions"><button disabled={apiStatus !== 'connected' || enhancingDescription || description.trim().length < 3} onClick={(event) => { event.preventDefault(); void intelligentlyEnhanceDescription() }} type="button">{enhancingDescription ? <LoaderCircle className="spin" size={12} /> : <Sparkles size={12} />}{enhancingDescription ? '智能改写中' : 'AI 一键智能改写'}</button>{descriptionBeforeEnhance !== null ? <button onClick={(event) => { event.preventDefault(); undoDescriptionEnhancement() }} type="button"><RotateCcw size={12} />撤销</button> : null}</span></span><textarea onChange={(event) => { setDescription(event.target.value); setDirty(true); setEnhanceNote(null) }} value={description} />{enhanceNote ? <small className="field__note">{enhanceNote}</small> : null}</label>
             <label className="field"><span>对白</span><textarea onChange={(event) => { setDialogue(event.target.value); setDirty(true) }} placeholder="无对白" value={dialogue} /></label>
@@ -426,7 +459,7 @@ export function ShotWorkspacePage() {
               <div className="identity-binding-list">
                 {lockedCharacters.map((character) => <label key={character.id}><input checked={boundCharacterIds.includes(character.id)} onChange={(event) => setBoundCharacterIds((current) => event.target.checked ? [...current, character.id] : current.filter((id) => id !== character.id))} type="checkbox" /><UserRound size={14} /><span>{character.name}<small>{localizeDisplayText(character.role)} · 已锁定参考图</small></span></label>)}
               </div>
-              <label className="field"><span>本镜头使用的造型版本</span><input onChange={(event) => setLookVersion(event.target.value)} value={lookVersion} /></label>
+              <label className="field"><span><GlossaryTip label="本镜头使用的造型版本" tip="同一角色可登记多套服装与造型；生成画面时以所选版本为参考，避免角色形象在镜头之间漂移。" /></span><input onChange={(event) => setLookVersion(event.target.value)} value={lookVersion} /></label>
               <Button disabled={!bindingsDirty || bindingSaving || currentShot.status === 'GENERATING'} onClick={() => void saveCharacterBindings()} size="sm" variant="secondary">{bindingSaving ? <LoaderCircle className="spin" size={14} /> : <Save size={14} />}保存角色与造型</Button>
               {currentShot.candidateIdentityMessage ? <small className={currentShot.candidateIdentityStatus === 'REVIEW_REQUIRED' ? 'warning' : ''}>{currentShot.candidateIdentityScore === undefined ? '' : `角色相似度 ${Math.round(currentShot.candidateIdentityScore * 100)}% · `}{currentShot.candidateIdentityStatus === 'REVIEW_REQUIRED' ? '系统发现可能存在差异，请对照参考图确认。' : '系统未发现明显差异。'}</small> : <small>生成新画面时会自动参考已锁定的角色图和当前造型版本。</small>}
               {currentShot.latestIdentityReview ? <div className="identity-review-record" role="status"><Check size={14} /><span><strong>{REVIEW_DECISION_LABELS[currentShot.latestIdentityReview.decision]}</strong><small>{displayActor(currentShot.latestIdentityReview.actor)} · {new Date(currentShot.latestIdentityReview.reviewedAt).toLocaleString('zh-CN')}{currentShot.latestIdentityReview.lookVersion ? ` · ${displayLookVersion(currentShot.latestIdentityReview.lookVersion)}` : ''}</small>{currentShot.latestIdentityReview.issues.length > 0 ? <small>标记差异：{currentShot.latestIdentityReview.issues.map((id) => IDENTITY_ISSUES.find((issue) => issue.id === id)?.label ?? id).join('、')}</small> : null}{currentShot.latestIdentityReview.note ? <small>说明：{currentShot.latestIdentityReview.note}</small> : null}</span></div> : null}
