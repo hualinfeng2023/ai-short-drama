@@ -2132,3 +2132,45 @@ a.project-workflow__stage:focus-visible {
   .project-workflow__item .project-workflow__stage { margin: 0 3px; }
   .project-workflow__item:not(:last-child)::after { display: none; }
 }
+
+/* ---------------------------------------------------------------------------
+ * Workflow bar theme adaptation: replace legacy hard-coded light colors with
+ * theme variables so both standard and cinema (dark room) modes render
+ * correctly; tooltip gets a border in dark mode.
+ * ------------------------------------------------------------------------- */
+
+.project-workflow {
+  background: var(--surface);
+  border-color: var(--border);
+  box-shadow: var(--shadow);
+}
+.project-workflow--loading { color: var(--text-2); }
+.project-workflow > header { border-bottom-color: var(--border); }
+.project-workflow > header span { color: var(--text-3); }
+.project-workflow > header > a { color: var(--primary); }
+.project-workflow > header > a:hover { color: var(--primary-hover); }
+
+.project-workflow__stage { color: var(--text-2); }
+.project-workflow__stage i { background: var(--surface-3); color: var(--text-2); }
+.project-workflow__stage--current,
+.project-workflow__stage--in_progress { color: var(--text); }
+.project-workflow__stage--current i,
+.project-workflow__stage--in_progress i { background: var(--primary-soft); color: var(--primary); }
+.project-workflow__stage--blocked { color: var(--warning); }
+.project-workflow__stage--blocked i { background: var(--warning-soft); color: var(--warning); }
+.project-workflow__blocker { background: var(--warning-soft); color: var(--warning); }
+.project-workflow__blocker > a { color: var(--primary); }
+
+/* Dark-room adjustments: tooltip needs separation from the dark surface */
+:root[data-visual-mode="cinema"] .project-workflow__tip {
+  background: #232833;
+  border: 1px solid rgb(255 255 255 / 0.12);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55);
+}
+:root[data-visual-mode="cinema"] .project-workflow__tip::after {
+  border-top-color: #232833;
+}
+:root[data-visual-mode="cinema"] .project-workflow__stage--complete i { color: #08210f; }
+:root[data-visual-mode="cinema"] a.project-workflow__stage:hover {
+  background: rgb(255 255 255 / 0.06);
+}
