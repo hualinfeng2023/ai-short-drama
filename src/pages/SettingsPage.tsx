@@ -350,7 +350,7 @@ export function SettingsPage() {
       <div className="settings-content" key={settingsSection}>
         {settingsSection === 'appearance' ? (
           <section>
-            <div className="section-heading"><div><p className="eyebrow">外观</p><h2>界面模式</h2></div><Eye size={19} /></div>
+            <div className="section-heading"><div><h2>界面模式</h2></div></div>
             <p className="settings-copy">三种模式共享同一信息架构与交互规则，切换只影响信息密度和画面层级。</p>
             <div className="mode-grid">{modes.map((mode) => <button className={visualMode === mode.id ? 'active' : ''} key={mode.id} onClick={() => { if (visualMode !== mode.id) { setVisualMode(mode.id); notify(`已切换到「${mode.title}」，界面密度与层级已更新。`, 'info') } }}><span className={`mode-preview mode-preview--${mode.id}`}><i /><i /><i /></span><div><strong>{mode.title}</strong><p>{mode.description}</p><small>{mode.tone}</small></div>{visualMode === mode.id ? <em><Check size={14} />当前</em> : null}</button>)}</div>
           </section>
@@ -358,7 +358,7 @@ export function SettingsPage() {
 
         {settingsSection === 'runtime' ? (
           <section className="runtime-card">
-            <div className="section-heading"><div><p className="eyebrow">运行环境</p><h2>本地工作台</h2></div><StatusBadge label={apiConnected ? 'API 已连接' : apiStatus === 'loading' ? '连接中' : '离线回退'} status={apiConnected ? 'APPROVED' : apiStatus === 'loading' ? 'GENERATING' : 'READY'} /></div>
+            <div className="section-heading"><div><h2>本地工作台</h2></div><StatusBadge label={apiConnected ? 'API 已连接' : apiStatus === 'loading' ? '连接中' : '离线回退'} status={apiConnected ? 'APPROVED' : apiStatus === 'loading' ? 'GENERATING' : 'READY'} /></div>
             <dl><div><dt><MonitorCog size={15} />图片模型</dt><dd>{imageLabel}</dd></div><div><dt><MonitorCog size={15} />视频模型</dt><dd>{videoLabel}</dd></div><div><dt><Database size={15} />数据来源</dt><dd>{apiConnected ? 'FastAPI + SQLite' : '浏览器本地存储'}</dd></div><div><dt><ShieldCheck size={15} />持久化流程</dt><dd>{capabilities?.mediaPipeline ? '任务 + 媒体 + 版本 + 导出' : apiConnected ? '读取能力中' : '不可用'}</dd></div></dl>
             <small>未配置真实服务商时仍可走通确定性的模拟流程。保存方舟 API Key 后，文本、图片和视频任务会由后端 Worker 调用真实服务。</small>
           </section>
@@ -390,7 +390,7 @@ export function SettingsPage() {
         {settingsSection === 'providers' ? (
           <section className="provider-settings-panel">
             <header className="provider-settings-header">
-              <div><p className="eyebrow">API 接入</p><h2>服务与凭证</h2><p>集中管理创作模型和媒体存储。设置只保存在本机服务端。</p></div>
+              <div><h2>服务与凭证</h2><p>集中管理创作模型和媒体存储。设置只保存在本机服务端。</p></div>
               <div className="provider-settings-header__actions">
                 <span className={hasProviderChanges ? 'settings-sync-state settings-sync-state--dirty' : 'settings-sync-state'}>
                   <i />{hasProviderChanges ? '有未保存更改' : providerSettings?.storage.updatedAt ? '配置已同步' : '使用环境配置'}

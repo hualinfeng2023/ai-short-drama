@@ -2802,3 +2802,6 @@ a.project-workflow__stage:focus-visible {
   .settings-nav__text small { display: none; }
   .settings-nav__chevron { display: none; }
 }
+
+/* Settings sections: subordinate heading scale (page title stays dominant) */
+.settings-content .section-heading h2 { font-size: 17px; letter-spacing: -0.01em; }
