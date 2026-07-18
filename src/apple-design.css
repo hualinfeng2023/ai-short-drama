@@ -2715,3 +2715,93 @@ a.project-workflow__stage:focus-visible {
 
 /* Clickable project rows */
 .project-table__row--clickable { cursor: pointer; }
+
+/* ---------------------------------------------------------------------------
+ * Settings page IA redesign: category nav + content pane.
+ * ------------------------------------------------------------------------- */
+
+.settings-shell {
+  display: grid;
+  align-items: start;
+  gap: 22px;
+  grid-template-columns: 230px minmax(0, 1fr);
+}
+
+.settings-nav {
+  position: sticky;
+  top: 76px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+}
+.settings-nav > button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  color: var(--text-2);
+  background: transparent;
+  border: 0;
+  border-radius: 11px;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--response-fast, 140ms) ease-out, color var(--response-fast, 140ms) ease-out;
+}
+.settings-nav > button:hover { color: var(--text); background: color-mix(in srgb, var(--text) 5%, transparent); }
+.settings-nav > button:active { transform: scale(0.985); }
+.settings-nav > button.active {
+  color: var(--primary);
+  background: var(--primary-soft);
+}
+.settings-nav__icon {
+  display: grid;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  color: var(--text-2);
+  background: var(--surface-2);
+  border-radius: 9px;
+  transition: background var(--response-fast, 140ms) ease-out, color var(--response-fast, 140ms) ease-out;
+}
+.settings-nav > button.active .settings-nav__icon { color: var(--primary); background: color-mix(in srgb, var(--primary) 14%, var(--surface)); }
+.settings-nav__text { flex: 1 1 auto; min-width: 0; }
+.settings-nav__text strong { display: block; font-size: 12.5px; font-weight: 680; }
+.settings-nav__text small {
+  display: block;
+  overflow: hidden;
+  margin-top: 1px;
+  color: var(--text-3);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-nav__chevron { flex: 0 0 auto; color: var(--text-3); opacity: 0; transform: translateX(-3px); transition: opacity var(--response-fast, 140ms) ease-out, transform var(--response-fast, 140ms) var(--ease-fluid, cubic-bezier(0.22, 1, 0.36, 1)); }
+.settings-nav > button.active .settings-nav__chevron { color: var(--primary); opacity: 1; transform: translateX(0); }
+
+.settings-content { animation: apple-page-in 220ms var(--ease-fluid, cubic-bezier(0.22, 1, 0.36, 1)) both; }
+.settings-content > section { min-width: 0; }
+.settings-content .provider-settings-panel { margin-top: 0; }
+.settings-stack { display: flex; flex-direction: column; gap: 20px; }
+.settings-copy { max-width: 520px; color: var(--text-2); font-size: 12.5px; }
+
+@media (max-width: 900px) {
+  .settings-shell { grid-template-columns: 1fr; }
+  .settings-nav {
+    position: static;
+    flex-direction: row;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .settings-nav > button { flex: 0 0 auto; }
+  .settings-nav__text small { display: none; }
+  .settings-nav__chevron { display: none; }
+}
+
+/* Settings sections: subordinate heading scale (page title stays dominant) */
+.settings-content .section-heading h2 { font-size: 17px; letter-spacing: -0.01em; }

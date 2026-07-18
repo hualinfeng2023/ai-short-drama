@@ -85,6 +85,12 @@ export function AppShell() {
     return () => window.clearTimeout(timer)
   }, [])
 
+  useEffect(() => {
+    const onShowOnboarding = () => setOnboardingOpen(true)
+    window.addEventListener('studio:show-onboarding', onShowOnboarding)
+    return () => window.removeEventListener('studio:show-onboarding', onShowOnboarding)
+  }, [])
+
   const finishOnboarding = () => {
     markOnboardingDone()
     setOnboardingOpen(false)

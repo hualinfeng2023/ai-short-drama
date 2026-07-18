@@ -132,6 +132,7 @@ function ConnectionResult({ result }: { result: ProviderConnectionResult | null 
 export function SettingsPage() {
   const { apiStatus, project, visualMode, setVisualMode, resetDemo, resyncCurrentProject } = useStudio()
   const { notify } = useToast()
+  const [settingsSection, setSettingsSection] = useState<'appearance' | 'runtime' | 'providers' | 'data'>('appearance')
   const [runtime, setRuntime] = useState<RuntimeConfig | null>(null)
   const [providerSettings, setProviderSettings] = useState<ProviderSettings | null>(null)
   const [draft, setDraft] = useState<ProviderSettings | null>(null)
@@ -317,101 +318,140 @@ export function SettingsPage() {
 
   return <div className="page page--settings">
     <PageHeader
-      description="在本机服务端管理生成服务与媒体存储 API；密钥只做脱敏展示，不会回传明文。"
-      eyebrow="本地运行环境"
+      description="外观、运行环境、服务凭证与数据恢复，分门别类管理。"
+      eyebrow="工作台配置"
       title="系统设置"
     />
-    <div className="settings-layout">
-      <section>
-        <div className="section-heading"><div><p className="eyebrow">外观</p><h2>界面模式</h2></div><Eye size={19} /></div>
-        <p className="settings-copy">三种模式共享同一信息架构与交互规则，切换只影响信息密度和画面层级。</p>
-        <div className="mode-grid">{modes.map((mode) => <button className={visualMode === mode.id ? 'active' : ''} key={mode.id} onClick={() => { if (visualMode !== mode.id) { setVisualMode(mode.id); notify(`已切换到「${mode.title}」，界面密度与层级已更新。`, 'info') } }}><span className={`mode-preview mode-preview--${mode.id}`}><i /><i /><i /></span><div><strong>{mode.title}</strong><p>{mode.description}</p><small>{mode.tone}</small></div>{visualMode === mode.id ? <em><Check size={14} />当前</em> : null}</button>)}</div>
-      </section>
-      <aside>
-        <section className="runtime-card">
-          <div className="section-heading"><div><p className="eyebrow">运行环境</p><h2>本地工作台</h2></div><StatusBadge label={apiConnected ? 'API 已连接' : apiStatus === 'loading' ? '连接中' : '离线回退'} status={apiConnected ? 'APPROVED' : apiStatus === 'loading' ? 'GENERATING' : 'READY'} /></div>
-          <dl><div><dt><MonitorCog size={15} />图片模型</dt><dd>{imageLabel}</dd></div><div><dt><MonitorCog size={15} />视频模型</dt><dd>{videoLabel}</dd></div><div><dt><Database size={15} />数据来源</dt><dd>{apiConnected ? 'FastAPI + SQLite' : '浏览器本地存储'}</dd></div><div><dt><ShieldCheck size={15} />持久化流程</dt><dd>{capabilities?.mediaPipeline ? '任务 + 媒体 + 版本 + 导出' : apiConnected ? '读取能力中' : '不可用'}</dd></div></dl>
-          <small>未配置真实服务商时仍可走通确定性的模拟流程。保存方舟 API Key 后，文本、图片和视频任务会由后端 Worker 调用真实服务。</small>
-        </section>
-        {apiConnected ? <section className="reset-card">
-          <p className="eyebrow">故障恢复</p>
-          <h2>重新同步当前项目</h2>
-          <p>清除当前项目的浏览器缓存，再从 SQLite 重新读取项目、镜头与任务；不会删除服务端数据。</p>
-          <Button onClick={() => { setRecoveryNotice(null); setRecoveryOpen(true) }} variant="secondary"><RotateCcw size={16} />清除本地缓存并重新同步</Button>
-          {recoveryNotice ? <small className={`settings-recovery-notice settings-recovery-notice--${recoveryNotice.tone}`} role={recoveryNotice.tone === 'error' ? 'alert' : 'status'}>{recoveryNotice.message}</small> : null}
-        </section> : apiStatus === 'mock_fallback' ? <section className="reset-card">
-          <p className="eyebrow">离线演示</p>
-          <h2>恢复演示项目</h2>
-          <p>恢复浏览器中的内置演示场景；此模式没有连接 SQLite。</p>
-          <Button onClick={() => { resetDemo(); notify('已恢复内置演示项目。') }} variant="secondary"><RotateCcw size={16} />恢复演示项目</Button>
-        </section> : null}
-      </aside>
-    </div>
-
-    <section className="provider-settings-panel">
-      <header className="provider-settings-header">
-        <div><p className="eyebrow">API 接入</p><h2>服务与凭证</h2><p>集中管理创作模型和媒体存储。设置只保存在本机服务端。</p></div>
-        <div className="provider-settings-header__actions">
-          <span className={hasProviderChanges ? 'settings-sync-state settings-sync-state--dirty' : 'settings-sync-state'}>
-            <i />{hasProviderChanges ? '有未保存更改' : providerSettings?.storage.updatedAt ? '配置已同步' : '使用环境配置'}
-          </span>
-          <Button disabled={!draft || !hasProviderChanges || saving || !apiConnected} onClick={() => void saveSettings()}>
-            {saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}
-            {saving ? '正在保存' : '保存更改'}
-          </Button>
-        </div>
-      </header>
-      {notice ? <div className={`brief-save-message brief-save-message--${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'}>{notice.message}</div> : null}
-      {!draft ? (apiConnected
-        ? <div className="provider-settings-loading"><LoaderCircle className="spin" size={20} />正在读取服务端 API 设置…</div>
-        : <div className="provider-offline" role="status">
-            <span className="provider-offline__icon"><CloudOff size={22} /></span>
-            <strong>连接服务端后可管理 API 凭证</strong>
-            <p>演示模式下全部生成走模拟流程，无需配置密钥。启动本地服务端后，这里可以接入火山方舟（文本 · 图片 · 视频）与火山 TOS 媒体中转。</p>
-            <div className="provider-offline__how">
-              <strong>如何连接</strong>
-              <ol>
-                <li>在项目根目录运行 <code>docker compose up --build</code>，或 <code>uv run uvicorn app.main:app --port 8000</code></li>
-                <li>刷新本页，右上角状态变为「已连接」</li>
-              </ol>
-            </div>
-          </div>
-      ) : <div className="api-settings-shell">
-        <nav aria-label="API 服务商" className="provider-sidebar">
-          <p className="provider-sidebar__label">服务商</p>
-          <button aria-pressed={activeProvider === 'ark'} className={activeProvider === 'ark' ? 'active' : ''} onClick={() => setActiveProvider('ark')} type="button">
-            <span className="provider-nav-icon"><PlugZap size={18} /></span>
-            <span><strong>火山方舟</strong><small>文本 · 图片 · 视频</small></span>
-            <span className={arkConfigured ? 'provider-nav-status provider-nav-status--ready' : 'provider-nav-status'}>{arkConfigured ? '已连接' : '未配置'}</span>
-            <ChevronRight size={15} />
+    <div className="settings-shell">
+      <nav aria-label="设置分类" className="settings-nav">
+        {([
+          { id: 'appearance', label: '外观与模式', description: '主题密度与画面层级', icon: Eye },
+          { id: 'runtime', label: '运行环境', description: apiConnected ? '服务端已连接' : '浏览器演示模式', icon: MonitorCog },
+          { id: 'providers', label: '服务与凭证', description: apiConnected ? (arkConfigured ? '方舟已配置' : '待配置') : '连接服务端后可用', icon: PlugZap },
+          { id: 'data', label: '数据与恢复', description: apiConnected ? '缓存与重新同步' : '演示数据管理', icon: Database },
+        ] as const).map(({ id, label, description, icon: Icon }) => (
+          <button
+            aria-current={settingsSection === id ? 'page' : undefined}
+            className={settingsSection === id ? 'active' : ''}
+            key={id}
+            onClick={() => setSettingsSection(id)}
+            type="button"
+          >
+            <span className="settings-nav__icon"><Icon size={16} /></span>
+            <span className="settings-nav__text">
+              <strong>{label}</strong>
+              <small>{description}</small>
+            </span>
+            <ChevronRight className="settings-nav__chevron" size={14} />
           </button>
-          <button aria-pressed={activeProvider === 'tos'} className={activeProvider === 'tos' ? 'active' : ''} onClick={() => setActiveProvider('tos')} type="button">
-            <span className="provider-nav-icon"><Cloud size={18} /></span>
-            <span><strong>火山 TOS</strong><small>私有媒体中转</small></span>
-            <span className={tosConfigured && draft.tos.enabled ? 'provider-nav-status provider-nav-status--ready' : 'provider-nav-status'}>{draft.tos.enabled ? tosConfigured ? '已启用' : '待补全' : '未启用'}</span>
-            <ChevronRight size={15} />
-          </button>
-          <div className="provider-security-note"><LockKeyhole size={18} /><div><strong>本机安全存储</strong><p>密钥不会进入浏览器，只返回掩码和配置状态。</p></div></div>
-        </nav>
+        ))}
+      </nav>
 
-        <article className="provider-editor">
-          <header className="provider-editor__header">
-            <div className="provider-editor__identity">
-              <span className="provider-editor__icon">{activeProvider === 'ark' ? <PlugZap size={20} /> : <Cloud size={20} />}</span>
-              <div><div><h3>{activeProvider === 'ark' ? '火山方舟' : '火山 TOS'}</h3><StatusBadge label={activeProvider === 'ark' ? arkConfigured ? '已配置' : '模拟模式' : draft.tos.enabled ? tosConfigured ? '已启用' : '待补全' : '未启用'} status={activeProvider === 'ark' ? arkConfigured ? 'APPROVED' : 'READY' : draft.tos.enabled ? tosConfigured ? 'APPROVED' : 'FAILED' : 'READY'} /></div><p>{activeProvider === 'ark' ? '统一管理文本创作、Seedream 图片、身份检查与 Seedance 视频。' : '为私有关键帧生成 Seedance 可访问的短期签名地址。'}</p></div>
-            </div>
-            <Button disabled={saving || testing !== null || hasProviderChanges} onClick={() => void testConnection(activeProvider)} variant="secondary">{testing === activeProvider ? <LoaderCircle className="spin" size={15} /> : <PlugZap size={15} />}{hasProviderChanges ? '保存后测试' : '测试连接'}</Button>
-          </header>
-          <ConnectionResult result={testResults[activeProvider]} />
+      <div className="settings-content" key={settingsSection}>
+        {settingsSection === 'appearance' ? (
+          <section>
+            <div className="section-heading"><div><h2>界面模式</h2></div></div>
+            <p className="settings-copy">三种模式共享同一信息架构与交互规则，切换只影响信息密度和画面层级。</p>
+            <div className="mode-grid">{modes.map((mode) => <button className={visualMode === mode.id ? 'active' : ''} key={mode.id} onClick={() => { if (visualMode !== mode.id) { setVisualMode(mode.id); notify(`已切换到「${mode.title}」，界面密度与层级已更新。`, 'info') } }}><span className={`mode-preview mode-preview--${mode.id}`}><i /><i /><i /></span><div><strong>{mode.title}</strong><p>{mode.description}</p><small>{mode.tone}</small></div>{visualMode === mode.id ? <em><Check size={14} />当前</em> : null}</button>)}</div>
+          </section>
+        ) : null}
 
-          {activeProvider === 'ark' ? <>
-            <section className="provider-config-section">
-              <div className="provider-config-section__intro"><KeyRound size={17} /><div><h4>认证凭证</h4><p>用于全部方舟模型请求</p></div></div>
-              <div className="provider-config-section__body"><SecretField clear={clearArkApiKey} configured={draft.ark.apiKeyConfigured} hint={draft.ark.apiKeyHint} label="API Key" onChange={setArkApiKey} onClear={setClearArkApiKey} source={draft.ark.apiKeySource} value={arkApiKey} /></div>
+        {settingsSection === 'runtime' ? (
+          <section className="runtime-card">
+            <div className="section-heading"><div><h2>本地工作台</h2></div><StatusBadge label={apiConnected ? 'API 已连接' : apiStatus === 'loading' ? '连接中' : '离线回退'} status={apiConnected ? 'APPROVED' : apiStatus === 'loading' ? 'GENERATING' : 'READY'} /></div>
+            <dl><div><dt><MonitorCog size={15} />图片模型</dt><dd>{imageLabel}</dd></div><div><dt><MonitorCog size={15} />视频模型</dt><dd>{videoLabel}</dd></div><div><dt><Database size={15} />数据来源</dt><dd>{apiConnected ? 'FastAPI + SQLite' : '浏览器本地存储'}</dd></div><div><dt><ShieldCheck size={15} />持久化流程</dt><dd>{capabilities?.mediaPipeline ? '任务 + 媒体 + 版本 + 导出' : apiConnected ? '读取能力中' : '不可用'}</dd></div></dl>
+            <small>未配置真实服务商时仍可走通确定性的模拟流程。保存方舟 API Key 后，文本、图片和视频任务会由后端 Worker 调用真实服务。</small>
+          </section>
+        ) : null}
+
+        {settingsSection === 'data' ? (
+          <div className="settings-stack">
+            {apiConnected ? <section className="reset-card">
+              <p className="eyebrow">故障恢复</p>
+              <h2>重新同步当前项目</h2>
+              <p>清除当前项目的浏览器缓存，再从 SQLite 重新读取项目、镜头与任务；不会删除服务端数据。</p>
+              <Button onClick={() => { setRecoveryNotice(null); setRecoveryOpen(true) }} variant="secondary"><RotateCcw size={16} />清除本地缓存并重新同步</Button>
+              {recoveryNotice ? <small className={`settings-recovery-notice settings-recovery-notice--${recoveryNotice.tone}`} role={recoveryNotice.tone === 'error' ? 'alert' : 'status'}>{recoveryNotice.message}</small> : null}
+            </section> : apiStatus === 'mock_fallback' ? <section className="reset-card">
+              <p className="eyebrow">离线演示</p>
+              <h2>恢复演示项目</h2>
+              <p>恢复浏览器中的内置演示场景；此模式没有连接 SQLite。</p>
+              <Button onClick={() => { resetDemo(); notify('已恢复内置演示项目。') }} variant="secondary"><RotateCcw size={16} />恢复演示项目</Button>
+            </section> : null}
+            <section className="reset-card">
+              <p className="eyebrow">浏览器本地数据</p>
+              <h2>本机保存的内容</h2>
+              <p>故事草稿、界面模式偏好、演示项目副本与新手引导标记都只保存在当前浏览器中，不会上传。</p>
+              <Button onClick={() => window.dispatchEvent(new Event('studio:show-onboarding'))} variant="secondary"><Eye size={16} />重新观看新手引导</Button>
             </section>
-            <section className="provider-config-section">
-              <div className="provider-config-section__intro"><SlidersHorizontal size={17} /><div><h4>模型路由</h4><p>按任务类型选择模型</p></div></div>
-              <div className="provider-config-section__body api-form-grid api-form-grid--stack">
+          </div>
+        ) : null}
+
+        {settingsSection === 'providers' ? (
+          <section className="provider-settings-panel">
+            <header className="provider-settings-header">
+              <div><h2>服务与凭证</h2><p>集中管理创作模型和媒体存储。设置只保存在本机服务端。</p></div>
+              <div className="provider-settings-header__actions">
+                <span className={hasProviderChanges ? 'settings-sync-state settings-sync-state--dirty' : 'settings-sync-state'}>
+                  <i />{hasProviderChanges ? '有未保存更改' : providerSettings?.storage.updatedAt ? '配置已同步' : '使用环境配置'}
+                </span>
+                <Button disabled={!draft || !hasProviderChanges || saving || !apiConnected} onClick={() => void saveSettings()}>
+                  {saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}
+                  {saving ? '正在保存' : '保存更改'}
+                </Button>
+              </div>
+            </header>
+            {notice ? <div className={`brief-save-message brief-save-message--${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'}>{notice.message}</div> : null}
+            {!draft ? (apiConnected
+              ? <div className="provider-settings-loading"><LoaderCircle className="spin" size={20} />正在读取服务端 API 设置…</div>
+              : <div className="provider-offline" role="status">
+                  <span className="provider-offline__icon"><CloudOff size={22} /></span>
+                  <strong>连接服务端后可管理 API 凭证</strong>
+                  <p>演示模式下全部生成走模拟流程，无需配置密钥。启动本地服务端后，这里可以接入火山方舟（文本 · 图片 · 视频）与火山 TOS 媒体中转。</p>
+                  <div className="provider-offline__how">
+                    <strong>如何连接</strong>
+                    <ol>
+                      <li>在项目根目录运行 <code>docker compose up --build</code>，或 <code>uv run uvicorn app.main:app --port 8000</code></li>
+                      <li>刷新本页，右上角状态变为「已连接」</li>
+                    </ol>
+                  </div>
+                </div>
+            ) : <div className="api-settings-shell">
+              <nav aria-label="API 服务商" className="provider-sidebar">
+                <p className="provider-sidebar__label">服务商</p>
+                <button aria-pressed={activeProvider === 'ark'} className={activeProvider === 'ark' ? 'active' : ''} onClick={() => setActiveProvider('ark')} type="button">
+                  <span className="provider-nav-icon"><PlugZap size={18} /></span>
+                  <span><strong>火山方舟</strong><small>文本 · 图片 · 视频</small></span>
+                  <span className={arkConfigured ? 'provider-nav-status provider-nav-status--ready' : 'provider-nav-status'}>{arkConfigured ? '已连接' : '未配置'}</span>
+                  <ChevronRight size={15} />
+                </button>
+                <button aria-pressed={activeProvider === 'tos'} className={activeProvider === 'tos' ? 'active' : ''} onClick={() => setActiveProvider('tos')} type="button">
+                  <span className="provider-nav-icon"><Cloud size={18} /></span>
+                  <span><strong>火山 TOS</strong><small>私有媒体中转</small></span>
+                  <span className={tosConfigured && draft.tos.enabled ? 'provider-nav-status provider-nav-status--ready' : 'provider-nav-status'}>{draft.tos.enabled ? tosConfigured ? '已启用' : '待补全' : '未启用'}</span>
+                  <ChevronRight size={15} />
+                </button>
+                <div className="provider-security-note"><LockKeyhole size={18} /><div><strong>本机安全存储</strong><p>密钥不会进入浏览器，只返回掩码和配置状态。</p></div></div>
+              </nav>
+
+              <article className="provider-editor">
+                <header className="provider-editor__header">
+                  <div className="provider-editor__identity">
+                    <span className="provider-editor__icon">{activeProvider === 'ark' ? <PlugZap size={20} /> : <Cloud size={20} />}</span>
+                    <div><div><h3>{activeProvider === 'ark' ? '火山方舟' : '火山 TOS'}</h3><StatusBadge label={activeProvider === 'ark' ? arkConfigured ? '已配置' : '模拟模式' : draft.tos.enabled ? tosConfigured ? '已启用' : '待补全' : '未启用'} status={activeProvider === 'ark' ? arkConfigured ? 'APPROVED' : 'READY' : draft.tos.enabled ? tosConfigured ? 'APPROVED' : 'FAILED' : 'READY'} /></div><p>{activeProvider === 'ark' ? '统一管理文本创作、Seedream 图片、身份检查与 Seedance 视频。' : '为私有关键帧生成 Seedance 可访问的短期签名地址。'}</p></div>
+                  </div>
+                  <Button disabled={saving || testing !== null || hasProviderChanges} onClick={() => void testConnection(activeProvider)} variant="secondary">{testing === activeProvider ? <LoaderCircle className="spin" size={15} /> : <PlugZap size={15} />}{hasProviderChanges ? '保存后测试' : '测试连接'}</Button>
+                </header>
+                <ConnectionResult result={testResults[activeProvider]} />
+
+                {activeProvider === 'ark' ? <>
+                  <section className="provider-config-section">
+                    <div className="provider-config-section__intro"><KeyRound size={17} /><div><h4>认证凭证</h4><p>用于全部方舟模型请求</p></div></div>
+                    <div className="provider-config-section__body"><SecretField clear={clearArkApiKey} configured={draft.ark.apiKeyConfigured} hint={draft.ark.apiKeyHint} label="API Key" onChange={setArkApiKey} onClear={setClearArkApiKey} source={draft.ark.apiKeySource} value={arkApiKey} /></div>
+                  </section>
+                  <section className="provider-config-section">
+                    <div className="provider-config-section__intro"><SlidersHorizontal size={17} /><div><h4>模型路由</h4><p>按任务类型选择模型</p></div></div>
+<div className="provider-config-section__body api-form-grid api-form-grid--stack">
                 <label className="api-field"><span>文本模型</span><select onChange={(event) => updateArk('promptModel', event.target.value)} value={draft.ark.promptModel}>{promptModelOptions.map((option) => <option key={option.id} value={option.id}>{option.label} · {option.id}</option>)}</select><small>故事、剧本与提示词</small></label>
                 <label className="api-field"><span>图片模型</span><select onChange={(event) => updateArk('imageModel', event.target.value)} value={draft.ark.imageModel}>{imageModelOptions.map((option) => <option key={option.id} value={option.id}>{option.label} · {option.id}</option>)}</select><small>关键帧与角色候选</small></label>
                 <label className="api-field"><span>视频模型</span><select onChange={(event) => updateArk('videoModel', event.target.value)} value={draft.ark.videoModel}>{videoModelOptions.map((option) => <option key={option.id} value={option.id}>{option.label} · {option.id}</option>)}</select><small>单镜头视频生成</small></label>
@@ -472,6 +512,9 @@ export function SettingsPage() {
         </article>
       </div>}
     </section>
+        ) : null}
+      </div>
+    </div>
     <Modal
       description="这会放弃尚未写入服务端的浏览器缓存，然后从 SQLite 重新读取当前项目。服务端项目和版本记录不会被删除。"
       footer={<>
