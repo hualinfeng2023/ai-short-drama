@@ -1854,3 +1854,323 @@ summary:focus-visible,
 .route-error__actions button:hover { filter: brightness(1.06); }
 .route-error__actions button:active { transform: scale(0.97); }
 .route-error__actions a { font-size: 12px; }
+
+/* ---------------------------------------------------------------------------
+ * IA fixes: service-required placeholder, in-project sidebar nav,
+ * clickable breadcrumbs, locked workflow stages.
+ * ------------------------------------------------------------------------- */
+
+/* Unified "service required" placeholder */
+.service-required {
+  display: flex;
+  max-width: 560px;
+  margin: 48px auto;
+  padding: 32px 32px 26px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  box-shadow: var(--shadow-soft, 0 14px 32px rgba(17, 24, 39, 0.08));
+  animation: apple-page-in var(--response-slow, 260ms) var(--ease-fluid, cubic-bezier(0.22, 1, 0.36, 1)) both;
+}
+.service-required__icon {
+  display: grid;
+  width: 46px;
+  height: 46px;
+  place-items: center;
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, var(--surface));
+  border-radius: 14px;
+}
+.service-required h2 { font-size: 18px; letter-spacing: -0.02em; }
+.service-required > p { color: var(--text-2); font-size: 12.5px; line-height: 1.75; }
+.service-required__how {
+  width: 100%;
+  padding: 12px 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.service-required__how strong { display: block; margin-bottom: 6px; font-size: 12px; }
+.service-required__how ol { margin: 0; padding-left: 18px; color: var(--text-2); font-size: 12px; line-height: 1.9; }
+.service-required__how code {
+  padding: 1px 6px;
+  font-size: 11px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.service-required__actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+:root[data-visual-mode="cinema"] .service-required { background: #14171c; border-color: #262b33; box-shadow: none; }
+:root[data-visual-mode="cinema"] .service-required__how { background: #101318; border-color: #232830; }
+:root[data-visual-mode="cinema"] .service-required__how code { background: #171c23; border-color: #2a303a; }
+
+/* In-project secondary navigation */
+.sidebar__subnav {
+  display: flex;
+  margin-top: 12px;
+  padding-top: 10px;
+  flex-direction: column;
+  gap: 1px;
+  border-top: 1px dashed var(--border);
+}
+.sidebar__subnav-item {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 9px;
+  padding: 0 10px;
+  color: var(--text-2);
+  border-radius: 9px;
+  font-size: 12px;
+  font-weight: 560;
+  letter-spacing: 0.01em;
+  transition: background var(--response-fast, 140ms) ease-out, color var(--response-fast, 140ms) ease-out;
+}
+.sidebar__subnav-item:hover { color: var(--text); background: color-mix(in srgb, var(--text) 5%, transparent); }
+.sidebar__subnav-item:active { transform: scale(0.985); }
+.sidebar__subnav-item--active {
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 9%, transparent);
+  font-weight: 680;
+}
+.sidebar__subnav-item svg { flex: 0 0 auto; opacity: 0.85; }
+.sidebar__subnav-item span { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar__subnav-lock { color: var(--text-3); opacity: 0.7; }
+.app-shell--collapsed .sidebar__subnav { display: none; }
+
+/* Clickable breadcrumbs */
+.breadcrumbs a {
+  color: var(--text-3);
+  border-radius: 4px;
+  transition: color var(--response-fast, 140ms) ease-out;
+}
+.breadcrumbs a:hover { color: var(--primary); }
+.breadcrumbs span:last-child a { color: var(--text); }
+
+/* Locked workflow stage rendered as non-interactive */
+span.project-workflow__stage--locked { cursor: not-allowed; }
+span.project-workflow__stage--locked:hover { transform: none; }
+
+@media (max-width: 760px) {
+  .service-required { margin: 20px 0; padding: 24px 20px; }
+}
+
+/* ---------------------------------------------------------------------------
+ * ProjectWorkflowBar redesign: semantic stage list, connector track,
+ * pulse on active stage, rich CSS tooltips, refined states.
+ * ------------------------------------------------------------------------- */
+
+/* Allow tooltips to escape the card; re-clip rounded corners on children */
+.project-workflow { overflow: visible; }
+.project-workflow__blocker { border-radius: 0 0 14px 14px; }
+
+.project-workflow__stages {
+  display: flex;
+  width: 100%;
+  min-width: max-content;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.project-workflow__item {
+  position: relative;
+  display: flex;
+  flex: 1 1 0;
+}
+
+/* connector track between stages */
+.project-workflow__item:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  right: -5px;
+  width: 10px;
+  height: 2px;
+  margin-top: -1px;
+  background: var(--border);
+  border-radius: 2px;
+  transition: background var(--response-slow, 260ms) ease-out;
+}
+.project-workflow__item--complete:not(:last-child)::after {
+  background: color-mix(in srgb, var(--success, #14804a) 55%, var(--border));
+}
+.project-workflow__item--current:not(:last-child)::after,
+.project-workflow__item--in_progress:not(:last-child)::after {
+  background: linear-gradient(90deg, color-mix(in srgb, var(--primary) 60%, var(--border)), var(--border));
+}
+.project-workflow__item--blocked:not(:last-child)::after {
+  background: color-mix(in srgb, #b54708 45%, var(--border));
+}
+
+/* pill inside the item */
+.project-workflow__item .project-workflow__stage {
+  width: 100%;
+  margin: 0 5px;
+  border-radius: 10px;
+  transition: background var(--response-fast, 140ms) ease-out, transform var(--response-fast, 140ms) var(--ease-fluid, cubic-bezier(0.22, 1, 0.36, 1));
+}
+/* neutralize the legacy dash drawn by styles.css */
+.project-workflow > nav .project-workflow__stage::after { display: none; }
+
+a.project-workflow__stage:hover {
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+  transform: translateY(-1px);
+}
+a.project-workflow__stage:active { transform: translateY(0) scale(0.985); }
+a.project-workflow__stage:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+/* filled check for completed stages */
+.project-workflow__stage--complete i { background: var(--success, #14804a); color: #fff; }
+
+/* pulse ring on the active stage icon */
+.project-workflow__stage--current i,
+.project-workflow__stage--in_progress i { position: relative; }
+.project-workflow__stage--current i::before,
+.project-workflow__stage--in_progress i::before {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border: 2px solid color-mix(in srgb, var(--primary) 45%, transparent);
+  border-radius: 999px;
+  animation: apple-stage-pulse 1.8s ease-out infinite;
+}
+@keyframes apple-stage-pulse {
+  0% { transform: scale(0.72); opacity: 0.9; }
+  70%, 100% { transform: scale(1.28); opacity: 0; }
+}
+
+/* header live indicator */
+.project-workflow__jobs-icon {
+  display: inline-block;
+  margin-right: 5px;
+  color: var(--primary);
+  vertical-align: -2px;
+}
+
+/* rich tooltip (hover / keyboard focus) */
+.project-workflow__tip {
+  position: absolute;
+  bottom: calc(100% + 9px);
+  left: 50%;
+  z-index: 40;
+  min-width: 190px;
+  max-width: 250px;
+  padding: 10px 12px 9px;
+  color: #f5f6f8;
+  background: rgba(22, 24, 30, 0.95);
+  border-radius: 12px;
+  box-shadow: 0 12px 30px rgba(15, 18, 25, 0.28);
+  font-size: 11px;
+  line-height: 1.55;
+  text-align: left;
+  opacity: 0;
+  visibility: hidden;
+  transform: translate(-50%, 5px);
+  transition: opacity var(--response-fast, 140ms) ease-out,
+    transform 180ms var(--ease-fluid, cubic-bezier(0.22, 1, 0.36, 1)),
+    visibility var(--response-fast, 140ms);
+  pointer-events: none;
+}
+.project-workflow__tip::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  border: 5px solid transparent;
+  border-top-color: rgba(22, 24, 30, 0.95);
+  transform: translateX(-50%);
+}
+.project-workflow__item:hover .project-workflow__tip,
+.project-workflow__item:focus-within .project-workflow__tip {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, 0);
+}
+/* keep edge tooltips inside the card */
+.project-workflow__item:first-child .project-workflow__tip { left: 4px; transform: translate(0, 5px); }
+.project-workflow__item:first-child:hover .project-workflow__tip,
+.project-workflow__item:first-child:focus-within .project-workflow__tip { transform: translate(0, 0); }
+.project-workflow__item:first-child .project-workflow__tip::after { left: 32px; }
+.project-workflow__item:last-child .project-workflow__tip { left: auto; right: 4px; transform: translate(0, 5px); }
+.project-workflow__item:last-child:hover .project-workflow__tip,
+.project-workflow__item:last-child:focus-within .project-workflow__tip { transform: translate(0, 0); }
+.project-workflow__item:last-child .project-workflow__tip::after { left: auto; right: 32px; transform: none; }
+
+.project-workflow__tip-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.project-workflow__tip-row strong { font-size: 11.5px; letter-spacing: 0.01em; }
+.project-workflow__tip small { color: rgba(235, 237, 242, 0.72); }
+.project-workflow__tip-status {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 700;
+}
+.project-workflow__tip-status--complete { color: #7ee2a8; background: rgba(46, 160, 90, 0.22); }
+.project-workflow__tip-status--current,
+.project-workflow__tip-status--in_progress { color: #9db4ff; background: rgba(82, 110, 245, 0.26); }
+.project-workflow__tip-status--blocked { color: #f8c471; background: rgba(214, 138, 23, 0.24); }
+.project-workflow__tip-status--locked { color: rgba(235, 237, 242, 0.65); background: rgba(255, 255, 255, 0.1); }
+
+@media (max-width: 800px) {
+  .project-workflow { overflow: hidden; }
+  .project-workflow__tip { display: none; }
+  .project-workflow__item .project-workflow__stage { margin: 0 3px; }
+  .project-workflow__item:not(:last-child)::after { display: none; }
+}
+
+/* ---------------------------------------------------------------------------
+ * Workflow bar theme adaptation: replace legacy hard-coded light colors with
+ * theme variables so both standard and cinema (dark room) modes render
+ * correctly; tooltip gets a border in dark mode.
+ * ------------------------------------------------------------------------- */
+
+.project-workflow {
+  background: var(--surface);
+  border-color: var(--border);
+  box-shadow: var(--shadow);
+}
+.project-workflow--loading { color: var(--text-2); }
+.project-workflow > header { border-bottom-color: var(--border); }
+.project-workflow > header span { color: var(--text-3); }
+.project-workflow > header > a { color: var(--primary); }
+.project-workflow > header > a:hover { color: var(--primary-hover); }
+
+.project-workflow__stage { color: var(--text-2); }
+.project-workflow__stage i { background: var(--surface-3); color: var(--text-2); }
+.project-workflow__stage--current,
+.project-workflow__stage--in_progress { color: var(--text); }
+.project-workflow__stage--current i,
+.project-workflow__stage--in_progress i { background: var(--primary-soft); color: var(--primary); }
+.project-workflow__stage--blocked { color: var(--warning); }
+.project-workflow__stage--blocked i { background: var(--warning-soft); color: var(--warning); }
+.project-workflow__blocker { background: var(--warning-soft); color: var(--warning); }
+.project-workflow__blocker > a { color: var(--primary); }
+
+/* Dark-room adjustments: tooltip needs separation from the dark surface */
+:root[data-visual-mode="cinema"] .project-workflow__tip {
+  background: #232833;
+  border: 1px solid rgb(255 255 255 / 0.12);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55);
+}
+:root[data-visual-mode="cinema"] .project-workflow__tip::after {
+  border-top-color: #232833;
+}
+:root[data-visual-mode="cinema"] .project-workflow__stage--complete i { color: #08210f; }
+:root[data-visual-mode="cinema"] a.project-workflow__stage:hover {
+  background: rgb(255 255 255 / 0.06);
+}

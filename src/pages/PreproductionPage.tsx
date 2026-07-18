@@ -8,7 +8,8 @@ import {
   lockCharacterCandidate,
   type PreproductionWorkspace,
 } from '../api/client'
-import { Button, EmptyState, PageHeader, StatusBadge, getStatusLabel } from '../components/ui'
+import { Button, PageHeader, StatusBadge, getStatusLabel } from '../components/ui'
+import { ServiceRequiredState } from '../components/ServiceRequiredState'
 import { useStudio } from '../store/StudioContext'
 import { localizeDisplayText } from '../utils/localizeDisplayText'
 import type { ProjectRecord } from '../types'
@@ -95,7 +96,7 @@ export function PreproductionPage() {
   }
 
   if (!loading && (!project || !workspace || !projectId)) {
-    return <div className="page"><EmptyState title="无法打开前期制作" description="角色与前期资产暂时没有返回，请确认项目服务已连接后重试。" action={<Link className="button button--secondary button--md" to={projectId ? `/projects/${projectId}/story` : '/projects'}><ArrowLeft size={16} />返回剧本</Link>} /></div>
+    return <ServiceRequiredState feature="前期资产" projectId={projectId} />
   }
   if (loading || !project || !workspace || !projectId) {
     return <div className="page brief-page-state"><LoaderCircle className="spin" size={22} /><strong>正在读取角色、造型、场景与声音资产…</strong></div>
