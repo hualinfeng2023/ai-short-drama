@@ -227,8 +227,16 @@ export function Modal({
   useEffect(() => {
     const dialog = ref.current
     if (!dialog) return
-    if (open && !dialog.open) dialog.showModal()
-    if (!open && dialog.open) dialog.close()
+    if (open) {
+      if (closeTimer.current !== null) {
+        window.clearTimeout(closeTimer.current)
+        closeTimer.current = null
+      }
+      setClosing(false)
+      if (!dialog.open) dialog.showModal()
+    } else if (dialog.open) {
+      dialog.close()
+    }
   }, [open])
 
   useEffect(() => () => {
@@ -239,6 +247,7 @@ export function Modal({
     if (closing) return
     setClosing(true)
     closeTimer.current = window.setTimeout(() => {
+      closeTimer.current = null
       setClosing(false)
       onClose()
     }, 150)

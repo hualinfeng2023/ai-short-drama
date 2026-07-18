@@ -21,6 +21,7 @@ import {
 } from '../api/client'
 import { RelationshipGraphSection, type RelationshipCharacter } from '../components/relationship-graph/RelationshipGraphSection'
 import { Button, Modal, PageHeader, StatusBadge } from '../components/ui'
+import { ServiceRequiredState } from '../components/ServiceRequiredState'
 import { useStudio } from '../store/StudioContext'
 import type { BriefVersionRecord, DirectorProposal, NarrativeTargeting, ProjectRecord } from '../types'
 import { directionKeyLabel, directionKeyTurns, isQuestionStyleHook } from '../utils/storyDirection'
@@ -472,7 +473,7 @@ export function StoryPage() {
     return <div className="page brief-page-state"><LoaderCircle className="spin" size={22} /><strong>正在读取故事资产…</strong></div>
   }
   if (!project || !workspace || !projectId) {
-    return <div className="page brief-page-state"><strong>无法打开故事工作区</strong><p>{error ?? '项目不存在或服务不可用。'}</p><Link className="button button--secondary button--md" to="/projects"><ArrowLeft size={16} />返回项目列表</Link></div>
+    return <ServiceRequiredState feature="故事与剧本" projectId={projectId} />
   }
 
   const biblePayload = latestBible?.payload ?? {}

@@ -1,17 +1,24 @@
-import { Suspense, useEffect, useRef, useState } from 'react'
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Bell,
+  BookOpenText,
+  Boxes,
   ChevronDown,
   CircleUserRound,
   Clapperboard,
   CloudOff,
+  Film,
   FolderKanban,
+  Images,
   ListChecks,
   LoaderCircle,
+  LockKeyhole,
   PanelLeftClose,
   PanelLeftOpen,
+  Rocket,
   Settings,
   ShieldCheck,
+  Users,
   Wifi,
 } from 'lucide-react'
 import { Link, NavLink, Outlet, useLocation } from 'react-router'
@@ -21,6 +28,7 @@ import { useStudio } from '../store/StudioContext'
 import { useToast } from '../store/ToastContext'
 import type { Job, JobStatus, ProjectReadiness } from '../types'
 import { localizeDisplayText } from '../utils/localizeDisplayText'
+import { buildLocalReadiness } from '../utils/localReadiness'
 import { Button, getStatusLabel } from './ui'
 import { ErrorBoundary } from './ErrorBoundary'
 import { ProjectWorkflowBar } from './ProjectWorkflowBar'
@@ -34,20 +42,25 @@ const navigation = [
   { to: '/settings', label: '设置', icon: Settings },
 ]
 
-function breadcrumb(pathname: string, projectName: string): string[] {
-  if (pathname === '/projects/new') return ['项目', 'AI 新建项目']
-  if (pathname.includes('/scenes/')) return [projectName, '第 1 集', '场景工作台']
-  if (pathname.endsWith('/preview')) return [projectName, '第 1 集', '完整小样']
-  if (pathname.endsWith('/story')) return [projectName, '故事与剧本']
-  if (pathname.endsWith('/characters')) return [projectName, '角色形象生成与锁定']
-  if (pathname.endsWith('/preproduction')) return [projectName, '第 3 阶段 · 前期资产']
-  if (pathname.endsWith('/storyboard')) return [projectName, '第 4 阶段 · 动态分镜']
-  if (pathname.endsWith('/production')) return [projectName, '第 5 阶段 · 正式制作与交付']
-  if (pathname.includes('/episodes/')) return [projectName, '第 1 集']
-  if (pathname === '/tasks') return ['生成任务']
-  if (pathname === '/reviews') return ['审核中心']
-  if (pathname === '/settings') return ['系统设置']
-  return ['项目']
+interface Crumb {
+  label: string
+  to?: string
+}
+
+function breadcrumb(pathname: string, projectName: string, projectHref: string): Crumb[] {
+  if (pathname === '/projects/new') return [{ label: '项目', to: '/projects' }, { label: 'AI 新建项目' }]
+  if (pathname.includes('/scenes/')) return [{ label: projectName, to: projectHref }, { label: '第 1 集', to: projectHref }, { label: '场景工作台' }]
+  if (pathname.endsWith('/preview')) return [{ label: projectName, to: projectHref }, { label: '第 1 集', to: projectHref }, { label: '完整小样' }]
+  if (pathname.endsWith('/story')) return [{ label: projectName, to: projectHref }, { label: '故事与剧本' }]
+  if (pathname.endsWith('/characters')) return [{ label: projectName, to: projectHref }, { label: '角色形象生成与锁定' }]
+  if (pathname.endsWith('/preproduction')) return [{ label: projectName, to: projectHref }, { label: '前期资产' }]
+  if (pathname.endsWith('/storyboard')) return [{ label: projectName, to: projectHref }, { label: '动态分镜' }]
+  if (pathname.endsWith('/production')) return [{ label: projectName, to: projectHref }, { label: '正式制作与交付' }]
+  if (pathname.includes('/episodes/')) return [{ label: projectName, to: projectHref }, { label: '第 1 集' }]
+  if (pathname === '/tasks') return [{ label: '生成任务' }]
+  if (pathname === '/reviews') return [{ label: '审核中心' }]
+  if (pathname === '/settings') return [{ label: '系统设置' }]
+  return [{ label: '项目' }]
 }
 
 const SIDEBAR_COLLAPSED_KEY = 'studio-sidebar-collapsed'
@@ -90,8 +103,19 @@ export function AppShell() {
   const activeJobCount = visibleJobs.filter((job) =>
     ACTIVE_JOB_STATUSES.includes(job.status),
   ).length
+  const fallbackReadiness = useMemo(() => (
+    apiStatus !== 'connected' && routeProjectId
+      ? buildLocalReadiness({
+        projectId: routeProjectId,
+        episodeId: routeProjectId === project.id ? project.episodeId : null,
+        activeJobCount,
+      })
+      : null
+  ), [apiStatus, routeProjectId, project.id, project.episodeId, activeJobCount])
+  const contextReadiness = apiStatus === 'connected' ? readiness : fallbackReadiness
+  const contextReadinessLoading = apiStatus === 'connected' ? readinessLoading : false
   const latestJob = visibleJobs[0]
-  const crumbs = breadcrumb(location.pathname, currentProjectName)
+  const crumbs = breadcrumb(location.pathname, currentProjectName, currentProjectLink)
 
   useEffect(() => {
     if (apiStatus !== 'connected') {
@@ -224,6 +248,32 @@ export function AppShell() {
               <small>{currentProjectMeta}</small>
             </span>
           </Link>
+          {routeProjectId ? (
+            <nav aria-label="项目内导航" className="sidebar__subnav">
+              {([
+                { label: '样片工作台', to: currentProjectLink, icon: Film, offlineReady: true },
+                { label: '故事与剧本', to: `/projects/${routeProjectId}/story`, icon: BookOpenText, offlineReady: false },
+                { label: '角色', to: `/projects/${routeProjectId}/characters`, icon: Users, offlineReady: false },
+                { label: '前期资产', to: `/projects/${routeProjectId}/preproduction`, icon: Boxes, offlineReady: false },
+                { label: '动态分镜', to: `/projects/${routeProjectId}/storyboard`, icon: Images, offlineReady: false },
+                { label: '正式制作', to: `/projects/${routeProjectId}/production`, icon: Rocket, offlineReady: false },
+              ]).map(({ label, to, icon: Icon, offlineReady }) => {
+                const locked = apiStatus !== 'connected' && !offlineReady
+                return (
+                  <NavLink
+                    className={({ isActive }) => `sidebar__subnav-item ${isActive ? 'sidebar__subnav-item--active' : ''}`}
+                    key={to}
+                    title={locked ? `${label} · 连接服务端后可用` : label}
+                    to={to}
+                  >
+                    <Icon size={15} strokeWidth={1.8} />
+                    <span>{label}</span>
+                    {locked ? <LockKeyhole aria-label="连接服务端后可用" className="sidebar__subnav-lock" size={12} /> : null}
+                  </NavLink>
+                )
+              })}
+            </nav>
+          ) : null}
         </div>
 
         <button
@@ -247,9 +297,13 @@ export function AppShell() {
             </Link>
             <nav className="breadcrumbs" aria-label="面包屑">
               {crumbs.map((crumb, index) => (
-                <span key={`${crumb}-${index}`}>
+                <span key={`${crumb.label}-${index}`}>
                   {index > 0 ? <i>/</i> : null}
-                  {crumb}
+                  {crumb.to && index < crumbs.length - 1 ? (
+                    <Link to={crumb.to}>{crumb.label}</Link>
+                  ) : (
+                    crumb.label
+                  )}
                 </span>
               ))}
             </nav>
@@ -318,7 +372,7 @@ export function AppShell() {
           </div>
         </header>
 
-        <ProjectReadinessContext.Provider value={{ loading: readinessLoading, readiness }}>
+        <ProjectReadinessContext.Provider value={{ loading: contextReadinessLoading, readiness: contextReadiness }}>
           <main className="content-area" id="main-content" tabIndex={-1}>
             {pathProjectId && pathProjectId !== 'new' ? <ProjectWorkflowBar /> : null}
             <ErrorBoundary key={location.pathname}>
