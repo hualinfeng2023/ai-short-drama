@@ -2403,11 +2403,11 @@ p {
   margin: 18px auto 0;
   max-width: 1440px;
   width: calc(100% - 48px);
-  border: 1px solid var(--border-color, #e3e5e8);
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--surface, #fff) 92%, transparent);
-  box-shadow: 0 8px 28px rgb(15 23 42 / 5%);
-  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--surface) 94%, var(--bg));
+  box-shadow: var(--shadow);
+  overflow: clip;
 }
 
 .project-workflow--loading {
@@ -2416,7 +2416,7 @@ p {
   gap: 8px;
   min-height: 58px;
   padding: 0 18px;
-  color: var(--text-secondary, #69707d);
+  color: var(--text-2);
   font-size: 13px;
 }
 
@@ -2425,72 +2425,117 @@ p {
   display: flex;
   justify-content: space-between;
   gap: 16px;
-  min-height: 44px;
-  padding: 8px 14px;
-  border-bottom: 1px solid var(--border-color, #e3e5e8);
+  min-height: 48px;
+  padding: 8px 12px 8px 16px;
+  background: color-mix(in srgb, var(--surface-2) 42%, var(--surface));
+  border-bottom: 1px solid var(--border);
 }
 
 .project-workflow > header > div {
-  align-items: baseline;
+  align-items: center;
   display: flex;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
 }
 
 .project-workflow > header span {
-  color: var(--text-secondary, #69707d);
-  font-size: 12px;
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .project-workflow > header strong {
+  color: var(--text);
   font-size: 13px;
+  font-weight: 680;
 }
 
 .project-workflow > header > a,
 .project-workflow__blocker > a {
-  color: var(--accent, #5755d9);
+  color: var(--primary);
   flex: 0 0 auto;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 680;
   text-decoration: none;
 }
 
+.project-workflow > header > a {
+  align-items: center;
+  display: inline-flex;
+  gap: 5px;
+  justify-content: center;
+  min-height: 36px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  transition: color var(--response-fast, 140ms) ease-out,
+    background var(--response-fast, 140ms) ease-out;
+}
+
+.project-workflow > header > a:hover {
+  color: var(--primary-hover);
+  background: color-mix(in srgb, var(--primary) 9%, transparent);
+}
+
+.project-workflow > header > a svg {
+  flex: 0 0 auto;
+  transition: transform var(--response-fast, 140ms) ease-out;
+}
+
+.project-workflow > header > a:hover svg {
+  transform: translateX(2px);
+}
+
 .project-workflow > nav {
-  display: flex;
-  min-width: max-content;
-  padding: 8px;
+  min-width: 0;
+  position: relative;
+  padding: 9px;
 }
 
 .project-workflow__stage {
   align-items: center;
-  color: var(--text-secondary, #69707d);
+  color: var(--text-2);
   display: flex;
   flex: 1 1 0;
-  gap: 7px;
-  min-height: 34px;
+  gap: 8px;
+  min-height: 44px;
   min-width: 132px;
-  padding: 0 10px;
+  padding: 0 11px;
   position: relative;
+  border: 1px solid transparent;
+  border-radius: 10px;
   text-decoration: none;
+  transition: color var(--response-fast, 140ms) ease-out,
+    background var(--response-fast, 140ms) ease-out,
+    border-color var(--response-fast, 140ms) ease-out;
+}
+
+.project-workflow__stage:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 4.5%, transparent);
 }
 
 .project-workflow__stage:not(:last-child)::after {
-  background: var(--border-color, #e3e5e8);
+  background: var(--border-strong);
   content: '';
   height: 1px;
   position: absolute;
-  right: -4px;
+  right: -5px;
   top: 50%;
-  width: 8px;
+  width: 10px;
 }
 
 .project-workflow__stage i {
   align-items: center;
-  background: #f0f1f4;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
   border-radius: 999px;
   display: inline-flex;
+  flex: 0 0 auto;
   height: 24px;
   justify-content: center;
+  transition: color var(--response-fast, 140ms) ease-out,
+    background var(--response-fast, 140ms) ease-out,
+    border-color var(--response-fast, 140ms) ease-out;
   width: 24px;
 }
 
@@ -2501,29 +2546,45 @@ p {
 }
 
 .project-workflow__stage--complete i {
-  background: #e7f6ed;
-  color: #16834b;
+  color: var(--success);
+  background: var(--success-soft);
+  border-color: color-mix(in srgb, var(--success) 28%, var(--border));
+}
+
+.project-workflow__stage--complete:not(:last-child)::after {
+  background: color-mix(in srgb, var(--success) 34%, var(--border));
 }
 
 .project-workflow__stage--current,
 .project-workflow__stage--in_progress {
-  color: var(--text-primary, #16181d);
+  color: var(--text);
+  background: color-mix(in srgb, var(--primary-soft) 58%, var(--surface));
+  border-color: color-mix(in srgb, var(--primary) 28%, var(--border));
 }
 
 .project-workflow__stage--current i,
 .project-workflow__stage--in_progress i {
-  background: #ecebff;
-  color: var(--accent, #5755d9);
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 13%, var(--surface));
+  border-color: color-mix(in srgb, var(--primary) 42%, var(--border));
 }
 
-.project-workflow__stage--blocked { color: #b54708; }
-.project-workflow__stage--blocked i { background: #fff1e7; }
-.project-workflow__stage--locked { opacity: .58; }
+.project-workflow__stage--blocked { color: var(--warning); }
+.project-workflow__stage--blocked i {
+  background: var(--warning-soft);
+  border-color: color-mix(in srgb, var(--warning) 28%, var(--border));
+}
+.project-workflow__stage--locked { color: var(--text-3); }
+.project-workflow__stage--locked i {
+  color: var(--text-3);
+  background: color-mix(in srgb, var(--surface-3) 72%, transparent);
+}
 
 .project-workflow__blocker {
   align-items: center;
-  background: #fff7ed;
-  color: #9a3412;
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning-soft) 70%, var(--surface));
+  border-top: 1px solid color-mix(in srgb, var(--warning) 22%, var(--border));
   display: flex;
   gap: 8px;
   padding: 9px 14px;
@@ -2532,6 +2593,26 @@ p {
 
 .project-workflow__blocker span { flex: 1; }
 
+:root[data-visual-mode="cinema"] .project-workflow {
+  background: color-mix(in srgb, var(--surface) 88%, var(--bg));
+  border-color: color-mix(in srgb, var(--text) 13%, transparent);
+  box-shadow: 0 12px 36px rgb(0 0 0 / 0.22);
+}
+
+:root[data-visual-mode="cinema"] .project-workflow > header {
+  background: color-mix(in srgb, var(--surface-2) 46%, var(--surface));
+}
+
+:root[data-visual-mode="cinema"] .project-workflow__stage--current,
+:root[data-visual-mode="cinema"] .project-workflow__stage--in_progress {
+  background: color-mix(in srgb, var(--primary) 11%, var(--surface-2));
+  border-color: color-mix(in srgb, var(--primary) 38%, var(--border));
+}
+
+:root[data-visual-mode="cinema"] .project-workflow__stage--locked i {
+  background: color-mix(in srgb, var(--surface-3) 58%, var(--surface));
+}
+
 @media (max-width: 800px) {
   .project-workflow {
     margin-top: 10px;
@@ -2539,15 +2620,40 @@ p {
   }
 
   .project-workflow > header {
-    align-items: flex-start;
+    align-items: center;
+    min-height: 52px;
+    padding-block: 4px;
   }
 
   .project-workflow > header > div {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 2px;
+    align-items: center;
   }
 
-  .project-workflow > nav { overflow-x: auto; }
-  .project-workflow__stage { min-width: 118px; }
+  .project-workflow > header span { display: none; }
+
+  .project-workflow > header > a,
+  .project-workflow__blocker > a {
+    min-height: 44px;
+  }
+
+  .project-workflow > nav {
+    min-width: 0;
+    width: 100%;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x proximity;
+    scrollbar-width: none;
+    mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 28px), transparent);
+  }
+
+  .project-workflow > nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .project-workflow__stage {
+    flex: 0 0 118px;
+    min-height: 44px;
+    min-width: 118px;
+    scroll-snap-align: start;
+  }
 }
