@@ -1,21 +1,40 @@
-import { lazy } from 'react'
+import { lazy, type ComponentType } from 'react'
 import { Navigate, Route, Routes } from 'react-router'
 import { AppShell } from './components/AppShell'
 
-const CharactersPage = lazy(() => import('./pages/CharactersPage').then((module) => ({ default: module.CharactersPage })))
-const EpisodePage = lazy(() => import('./pages/EpisodePage').then((module) => ({ default: module.EpisodePage })))
-const NewProjectPage = lazy(() => import('./pages/NewProjectPage').then((module) => ({ default: module.NewProjectPage })))
-const PreviewPage = lazy(() => import('./pages/PreviewPage').then((module) => ({ default: module.PreviewPage })))
-const PreproductionPage = lazy(() => import('./pages/PreproductionPage').then((module) => ({ default: module.PreproductionPage })))
-const ProductionPage = lazy(() => import('./pages/ProductionPage').then((module) => ({ default: module.ProductionPage })))
-const ProjectBriefPage = lazy(() => import('./pages/ProjectBriefPage').then((module) => ({ default: module.ProjectBriefPage })))
-const ProjectsPage = lazy(() => import('./pages/ProjectsPage').then((module) => ({ default: module.ProjectsPage })))
-const ReviewsPage = lazy(() => import('./pages/ReviewsPage').then((module) => ({ default: module.ReviewsPage })))
-const SettingsPage = lazy(() => import('./pages/SettingsPage').then((module) => ({ default: module.SettingsPage })))
-const StoryPage = lazy(() => import('./pages/StoryPage').then((module) => ({ default: module.StoryPage })))
-const StoryboardPage = lazy(() => import('./pages/StoryboardPage').then((module) => ({ default: module.StoryboardPage })))
-const ShotWorkspacePage = lazy(() => import('./pages/ShotWorkspacePage').then((module) => ({ default: module.ShotWorkspacePage })))
-const TasksPage = lazy(() => import('./pages/TasksPage').then((module) => ({ default: module.TasksPage })))
+const ROUTE_LOAD_TIMEOUT_MS = 12_000
+
+function lazyRoute<T extends ComponentType>(loader: () => Promise<T>) {
+  return lazy(async () => {
+    let timeoutId = 0
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutId = window.setTimeout(() => {
+        reject(new Error('页面模块加载超时，请刷新后重试。'))
+      }, ROUTE_LOAD_TIMEOUT_MS)
+    })
+
+    try {
+      return { default: await Promise.race([loader(), timeout]) }
+    } finally {
+      window.clearTimeout(timeoutId)
+    }
+  })
+}
+
+const CharactersPage = lazyRoute(() => import('./pages/CharactersPage').then((module) => module.CharactersPage))
+const EpisodePage = lazyRoute(() => import('./pages/EpisodePage').then((module) => module.EpisodePage))
+const NewProjectPage = lazyRoute(() => import('./pages/NewProjectPage').then((module) => module.NewProjectPage))
+const PreviewPage = lazyRoute(() => import('./pages/PreviewPage').then((module) => module.PreviewPage))
+const PreproductionPage = lazyRoute(() => import('./pages/PreproductionPage').then((module) => module.PreproductionPage))
+const ProductionPage = lazyRoute(() => import('./pages/ProductionPage').then((module) => module.ProductionPage))
+const ProjectBriefPage = lazyRoute(() => import('./pages/ProjectBriefPage').then((module) => module.ProjectBriefPage))
+const ProjectsPage = lazyRoute(() => import('./pages/ProjectsPage').then((module) => module.ProjectsPage))
+const ReviewsPage = lazyRoute(() => import('./pages/ReviewsPage').then((module) => module.ReviewsPage))
+const SettingsPage = lazyRoute(() => import('./pages/SettingsPage').then((module) => module.SettingsPage))
+const StoryPage = lazyRoute(() => import('./pages/StoryPage').then((module) => module.StoryPage))
+const StoryboardPage = lazyRoute(() => import('./pages/StoryboardPage').then((module) => module.StoryboardPage))
+const ShotWorkspacePage = lazyRoute(() => import('./pages/ShotWorkspacePage').then((module) => module.ShotWorkspacePage))
+const TasksPage = lazyRoute(() => import('./pages/TasksPage').then((module) => module.TasksPage))
 
 export function App() {
   return (

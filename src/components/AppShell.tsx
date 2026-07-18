@@ -34,6 +34,20 @@ import { ErrorBoundary } from './ErrorBoundary'
 import { ProjectWorkflowBar } from './ProjectWorkflowBar'
 
 const ACTIVE_JOB_STATUSES: JobStatus[] = ['PENDING', 'RETRY_WAIT', 'RUNNING', 'CANCEL_REQUESTED']
+const DATA_REFRESH_INTERVAL_MS = 3_000
+const DATA_REQUEST_TIMEOUT_MS = 5_000
+
+async function requestWithTimeout<T>(
+  request: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController()
+  const timeoutId = window.setTimeout(() => controller.abort(), DATA_REQUEST_TIMEOUT_MS)
+  try {
+    return await request(controller.signal)
+  } finally {
+    window.clearTimeout(timeoutId)
+  }
+}
 
 const navigation = [
   { to: '/projects', label: '项目', icon: FolderKanban },
@@ -77,6 +91,7 @@ export function AppShell() {
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [globalJobs, setGlobalJobs] = useState<Job[]>([])
   const [readiness, setReadiness] = useState<ProjectReadiness | null>(null)
+  const [readinessErrorProjectId, setReadinessErrorProjectId] = useState<string | null>(null)
   const [readinessLoading, setReadinessLoading] = useState(false)
   const { apiStatus, jobs: contextJobs, project, projectSummaries } = useStudio()
   const location = useLocation()
@@ -112,15 +127,23 @@ export function AppShell() {
       })
       : null
   ), [apiStatus, routeProjectId, project.id, project.episodeId, activeJobCount])
-  const contextReadiness = apiStatus === 'connected' ? readiness : fallbackReadiness
-  const contextReadinessLoading = apiStatus === 'connected' ? readinessLoading : false
+  const routeReadiness = readiness?.projectId === routeProjectId ? readiness : null
+  const contextReadiness = apiStatus === 'connected' ? routeReadiness : fallbackReadiness
+  const contextReadinessError = apiStatus === 'connected'
+    && readinessErrorProjectId === routeProjectId
+  const contextReadinessLoading = apiStatus === 'connected'
+    ? readinessLoading || (
+      Boolean(routeProjectId)
+      && !routeReadiness
+      && !contextReadinessError
+    )
+    : false
   const latestJob = visibleJobs[0]
   const crumbs = breadcrumb(location.pathname, currentProjectName, currentProjectLink)
 
   useEffect(() => {
     if (apiStatus !== 'connected') {
       setGlobalJobs([])
-      setReadiness(null)
       return
     }
     let active = true
@@ -129,24 +152,61 @@ export function AppShell() {
       if (refreshInFlight) return
       refreshInFlight = true
       try {
-        if (routeProjectId) setReadinessLoading(true)
-        const [latest, nextReadiness] = await Promise.all([
-          fetchJobs(),
-          routeProjectId ? fetchProjectReadiness(routeProjectId) : Promise.resolve(null),
-        ])
+        const latest = await requestWithTimeout((signal) => fetchJobs(signal))
+        if (active) setGlobalJobs(latest)
+      } catch {
+        // Keep the last successful task snapshot; project-stage polling is independent.
+      } finally {
+        refreshInFlight = false
+      }
+    }
+    void refresh()
+    const interval = window.setInterval(refresh, DATA_REFRESH_INTERVAL_MS)
+    return () => {
+      active = false
+      window.clearInterval(interval)
+    }
+  }, [apiStatus])
+
+  useEffect(() => {
+    if (apiStatus !== 'connected' || !routeProjectId) {
+      setReadiness(null)
+      setReadinessErrorProjectId(null)
+      setReadinessLoading(false)
+      return
+    }
+
+    let active = true
+    let refreshInFlight = false
+    let hasSnapshot = false
+    setReadiness(null)
+    setReadinessErrorProjectId(null)
+    setReadinessLoading(true)
+
+    const refresh = async () => {
+      if (refreshInFlight) return
+      refreshInFlight = true
+      try {
+        const nextReadiness = await requestWithTimeout(
+          (signal) => fetchProjectReadiness(routeProjectId, signal),
+        )
         if (active) {
-          setGlobalJobs(latest)
+          hasSnapshot = true
           setReadiness(nextReadiness)
+          setReadinessErrorProjectId(null)
         }
       } catch {
-        // Keep the last successful snapshot; the task page reports fetch errors in detail.
+        if (active && !hasSnapshot) {
+          setReadinessErrorProjectId(routeProjectId)
+        }
       } finally {
         if (active) setReadinessLoading(false)
         refreshInFlight = false
       }
     }
+
     void refresh()
-    const interval = window.setInterval(refresh, 3000)
+    const interval = window.setInterval(refresh, DATA_REFRESH_INTERVAL_MS)
     return () => {
       active = false
       window.clearInterval(interval)
@@ -372,7 +432,11 @@ export function AppShell() {
           </div>
         </header>
 
-        <ProjectReadinessContext.Provider value={{ loading: contextReadinessLoading, readiness: contextReadiness }}>
+        <ProjectReadinessContext.Provider value={{
+          error: contextReadinessError,
+          loading: contextReadinessLoading,
+          readiness: contextReadiness,
+        }}>
           <main className="content-area" id="main-content" tabIndex={-1}>
             {pathProjectId && pathProjectId !== 'new' ? <ProjectWorkflowBar /> : null}
             <ErrorBoundary key={location.pathname}>

@@ -196,14 +196,49 @@ export function ProjectBriefPage() {
   useEffect(() => {
     if (!projectId) return
     const controller = new AbortController()
+    let active = true
     setLoading(true)
     setError(null)
-    Promise.all([
-      fetchProject(projectId, controller.signal),
-      fetchDirectorProposals(projectId, controller.signal),
-      fetchBriefVersions(projectId, controller.signal),
-    ])
+
+    const loadBriefData = async () => {
+      const retryDelays = [0, 350, 900]
+      let lastError: unknown
+
+      for (const delay of retryDelays) {
+        if (delay > 0) {
+          await new Promise<void>((resolve) => {
+            const timeout = window.setTimeout(resolve, delay)
+            controller.signal.addEventListener('abort', () => {
+              window.clearTimeout(timeout)
+              resolve()
+            }, { once: true })
+          })
+        }
+        if (controller.signal.aborted) throw new DOMException('请求已取消', 'AbortError')
+
+        try {
+          return await Promise.all([
+            fetchProject(projectId, controller.signal),
+            fetchDirectorProposals(projectId, controller.signal),
+            fetchBriefVersions(projectId, controller.signal),
+          ])
+        } catch (reason) {
+          if (reason instanceof DOMException && reason.name === 'AbortError') throw reason
+          lastError = reason
+          const retryable = !(reason instanceof ApiError)
+            || reason.status === 408
+            || reason.status === 429
+            || reason.status >= 500
+          if (!retryable) throw reason
+        }
+      }
+
+      throw lastError
+    }
+
+    loadBriefData()
       .then(([result, proposals, briefs]) => {
+        if (!active) return
         const persistedForm = toForm(result, briefs[0])
         const suggestedGenre = recommendGenre(persistedForm.idea)
         const canApplySmartDefaults = result.status === 'DRAFT' || result.status === 'PROPOSAL_READY'
@@ -222,10 +257,16 @@ export function ProjectBriefPage() {
       })
       .catch((reason: unknown) => {
         if (reason instanceof DOMException && reason.name === 'AbortError') return
+        if (!active) return
         setError(reason instanceof Error ? reason.message : '项目读取失败')
       })
-      .finally(() => setLoading(false))
-    return () => controller.abort()
+      .finally(() => {
+        if (active) setLoading(false)
+      })
+    return () => {
+      active = false
+      controller.abort()
+    }
   }, [projectId])
 
   useEffect(() => {
@@ -817,7 +858,7 @@ export function ProjectBriefPage() {
                   <span>建议</span>{recommendedGenreLabel}
                 </span>
               </div>
-              <SelectControl disabled={!editable} id="brief-genre" onChange={(event) => updateGenre(event.target.value)} value={form.genre}>
+              <SelectControl aria-label="题材" disabled={!editable} id="brief-genre" onChange={(event) => updateGenre(event.target.value)} value={form.genre}>
                 {!hasKnownGenre ? <option value={form.genre}>{form.genre}（旧数据）</option> : null}
                 {GENRE_OPTION_GROUPS.map((group) => (
                   <optgroup key={group.label} label={group.label}>
@@ -833,7 +874,7 @@ export function ProjectBriefPage() {
                   <span>建议</span>{recommendedVisualStyleLabel}
                 </span>
               </div>
-              <SelectControl disabled={!editable} id="brief-visual-style" onChange={(event) => updateField('style', event.target.value)} value={form.style}>
+              <SelectControl aria-label="视觉风格" disabled={!editable} id="brief-visual-style" onChange={(event) => updateField('style', event.target.value)} value={form.style}>
                 {!hasKnownVisualStyle ? <option value={form.style}>{form.style}（旧数据）</option> : null}
                 {VISUAL_STYLE_OPTIONS.map(([value, label]) => (
                   <option key={value} value={value}>
@@ -842,19 +883,19 @@ export function ProjectBriefPage() {
                 ))}
               </SelectControl>
             </div>
-            <label className="brief-field"><span>目标时长</span><SelectControl disabled={!editable} onChange={(event) => updateField('targetDurationSec', Number(event.target.value))} value={form.targetDurationSec}><option value={45}>45 秒</option><option value={60}>60 秒</option><option value={90}>90 秒</option></SelectControl></label>
-            <label className="brief-field"><span>画幅</span><SelectControl disabled={!editable} onChange={(event) => updateField('aspectRatio', event.target.value as BriefForm['aspectRatio'])} value={form.aspectRatio}><option value="9:16">9:16 竖屏</option><option value="16:9">16:9 横屏</option></SelectControl></label>
-            <label className="brief-field"><span>内容形态</span><SelectControl disabled={!editable} onChange={(event) => updateField('productionFormat', event.target.value as ProductionFormat)} value={form.productionFormat}>{PRODUCTION_FORMAT_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
-            <label className="brief-field"><span>叙事主角</span><SelectControl disabled={!editable} onChange={(event) => updateField('narrativeProtagonist', event.target.value as NarrativeProtagonist)} value={form.narrativeProtagonist}>{NARRATIVE_PROTAGONIST_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
-            <label className="brief-field"><span>目标受众</span><SelectControl disabled={!editable} onChange={(event) => updateField('targetAudience', event.target.value as TargetAudience)} value={form.targetAudience}>{TARGET_AUDIENCE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
-            <label className="brief-field"><span>主市场</span><SelectControl disabled={!editable} onChange={(event) => setForm((current) => current ? { ...current, primaryMarket: event.target.value, secondaryMarkets: current.secondaryMarkets.filter((item) => item !== event.target.value) } : current)} value={form.primaryMarket}>{MARKET_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
+            <label className="brief-field"><span>目标时长</span><SelectControl aria-label="目标时长" disabled={!editable} onChange={(event) => updateField('targetDurationSec', Number(event.target.value))} value={form.targetDurationSec}><option value={45}>45 秒</option><option value={60}>60 秒</option><option value={90}>90 秒</option></SelectControl></label>
+            <label className="brief-field"><span>画幅</span><SelectControl aria-label="画幅" disabled={!editable} onChange={(event) => updateField('aspectRatio', event.target.value as BriefForm['aspectRatio'])} value={form.aspectRatio}><option value="9:16">9:16 竖屏</option><option value="16:9">16:9 横屏</option></SelectControl></label>
+            <label className="brief-field"><span>内容形态</span><SelectControl aria-label="内容形态" disabled={!editable} onChange={(event) => updateField('productionFormat', event.target.value as ProductionFormat)} value={form.productionFormat}>{PRODUCTION_FORMAT_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
+            <label className="brief-field"><span>叙事主角</span><SelectControl aria-label="叙事主角" disabled={!editable} onChange={(event) => updateField('narrativeProtagonist', event.target.value as NarrativeProtagonist)} value={form.narrativeProtagonist}>{NARRATIVE_PROTAGONIST_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
+            <label className="brief-field"><span>目标受众</span><SelectControl aria-label="目标受众" disabled={!editable} onChange={(event) => updateField('targetAudience', event.target.value as TargetAudience)} value={form.targetAudience}>{TARGET_AUDIENCE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
+            <label className="brief-field"><span>主市场</span><SelectControl aria-label="主市场" disabled={!editable} onChange={(event) => setForm((current) => current ? { ...current, primaryMarket: event.target.value, secondaryMarkets: current.secondaryMarkets.filter((item) => item !== event.target.value) } : current)} value={form.primaryMarket}>{MARKET_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
             <label className="brief-field brief-field--wide"><span>补充受众画像（可选）</span><input disabled={!editable} maxLength={240} onChange={(event) => updateField('audienceProfile', event.target.value)} placeholder="例如：25—40岁女性；仅用于本项目表达校准" value={form.audienceProfile} /><small>年龄、性别、兴趣或媒介习惯只作为项目画像，不决定主角、题材或情绪回报。</small></label>
             <fieldset className="brief-choice-field brief-field--wide" disabled={!editable}><legend>情绪回报（可多选，至少一项）</legend><div className="brief-choice-grid">{EMOTIONAL_REWARD_OPTIONS.map(([value, label]) => <label key={value}><input checked={form.emotionalRewards.includes(value)} onChange={() => toggleEmotionalReward(value)} type="checkbox" /><span>{label}</span></label>)}</div></fieldset>
             <div className="brief-field brief-field--wide brief-field--compact"><span>首批选题池配比</span><small>当前内容形态：女频 {slateMix.female_frequency}% · 泛人群 {slateMix.general}% · 男频 {slateMix.male_frequency}%。该配比只用于多项目选题组合，不会改写本项目设置。</small></div>
             <fieldset className="brief-choice-field brief-field--wide" disabled={!editable}><legend>次要市场（可多选）</legend><div className="brief-choice-grid">{MARKET_OPTIONS.filter(([value]) => value !== form.primaryMarket).map(([value, label]) => <label key={value}><input checked={form.secondaryMarkets.includes(value)} onChange={() => toggleSelection('secondaryMarkets', value)} type="checkbox" /><span>{label}</span></label>)}</div></fieldset>
-            <label className="brief-field"><span>规范语言</span><SelectControl disabled={!editable} onChange={(event) => setForm((current) => current ? { ...current, canonicalLanguage: event.target.value, localizationTargets: current.localizationTargets.filter((item) => item !== event.target.value) } : current)} value={form.canonicalLanguage}>{LANGUAGE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
+            <label className="brief-field"><span>规范语言</span><SelectControl aria-label="规范语言" disabled={!editable} onChange={(event) => setForm((current) => current ? { ...current, canonicalLanguage: event.target.value, localizationTargets: current.localizationTargets.filter((item) => item !== event.target.value) } : current)} value={form.canonicalLanguage}>{LANGUAGE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
             <fieldset className="brief-choice-field" disabled={!editable}><legend>本地化语言（可多选）</legend><div className="brief-choice-grid">{LANGUAGE_OPTIONS.filter(([value]) => value !== form.canonicalLanguage).map(([value, label]) => <label key={value}><input checked={form.localizationTargets.includes(value)} onChange={() => toggleSelection('localizationTargets', value)} type="checkbox" /><span>{label}</span></label>)}</div></fieldset>
-            <label className="brief-field"><span>主平台</span><SelectControl disabled={!editable} onChange={(event) => setForm((current) => current ? { ...current, targetPlatform: event.target.value, secondaryPlatforms: current.secondaryPlatforms.filter((item) => item !== event.target.value) } : current)} value={form.targetPlatform}>{PLATFORM_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
+            <label className="brief-field"><span>主平台</span><SelectControl aria-label="主平台" disabled={!editable} onChange={(event) => setForm((current) => current ? { ...current, targetPlatform: event.target.value, secondaryPlatforms: current.secondaryPlatforms.filter((item) => item !== event.target.value) } : current)} value={form.targetPlatform}>{PLATFORM_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
             <fieldset className="brief-choice-field" disabled={!editable}><legend>同步平台（可多选）</legend><div className="brief-choice-grid">{PLATFORM_OPTIONS.filter(([value]) => value !== form.targetPlatform).map(([value, label]) => <label key={value}><input checked={form.secondaryPlatforms.includes(value)} onChange={() => toggleSelection('secondaryPlatforms', value)} type="checkbox" /><span>{label}</span></label>)}</div></fieldset>
             <div className="brief-field brief-field--wide brief-field--compact">
               <div className="brief-field__heading">

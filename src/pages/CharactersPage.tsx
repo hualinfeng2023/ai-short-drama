@@ -25,7 +25,7 @@ import {
   type CharacterVisualRecord,
   type CharacterVisualWorkspace,
 } from '../api/client'
-import { Button, PageHeader } from '../components/ui'
+import { Button, PageHeader, SelectControl } from '../components/ui'
 import { ServiceRequiredState } from '../components/ServiceRequiredState'
 import { localizeDisplayText } from '../utils/localizeDisplayText'
 
@@ -347,7 +347,7 @@ export function CharactersPage() {
             <label>配饰<input onChange={(event) => setDraft({ ...draft, accessories: event.target.value })} value={draft.accessories} /></label>
             <label className="is-wide">禁止元素<input onChange={(event) => setDraft({ ...draft, forbiddenElements: event.target.value })} value={draft.forbiddenElements} /></label>
             <label className="is-wide">负面约束<textarea onChange={(event) => setDraft({ ...draft, negativeConstraints: event.target.value })} rows={2} value={draft.negativeConstraints} /></label>
-            <label>视觉方向<select onChange={(event) => setDraft({ ...draft, selectedDirection: event.target.value })} value={draft.selectedDirection}>{(profile?.recommendedDirections ?? []).map((direction) => <option key={direction.key} value={direction.key}>{direction.label}</option>)}</select></label>
+            <label>视觉方向<SelectControl aria-label="视觉方向" onChange={(event) => setDraft({ ...draft, selectedDirection: event.target.value })} value={draft.selectedDirection}>{(profile?.recommendedDirections ?? []).map((direction) => <option key={direction.key} value={direction.key}>{direction.label}</option>)}</SelectControl></label>
           </div>
           <footer><Button onClick={() => { setEditingId(null); setDraft(null) }} variant="secondary">取消</Button><Button disabled={busy !== null} onClick={() => void saveProfile(character)}>{busy === `save-${character.id}` ? <LoaderCircle className="spin" size={15} /> : <ShieldCheck size={15} />}保存并重新审核</Button></footer>
         </section> : null}

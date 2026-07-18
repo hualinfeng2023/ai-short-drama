@@ -55,7 +55,7 @@ function StageTip({ id, stage }: { id: string; stage: ProjectStage }) {
 
 export function ProjectWorkflowBar() {
   const location = useLocation()
-  const { loading, readiness } = useProjectReadiness()
+  const { error, loading, readiness } = useProjectReadiness()
   const stageNavRef = useRef<HTMLElement>(null)
 
   useEffect(() => {
@@ -76,7 +76,34 @@ export function ProjectWorkflowBar() {
   }, [location.pathname, readiness?.activeStageKey])
 
   if (loading && !readiness) {
-    return <div className="project-workflow project-workflow--loading" role="status"><LoaderCircle className="spin" size={15} />正在同步项目阶段…</div>
+    return (
+      <div aria-live="polite" className="project-workflow project-workflow--loading" role="status">
+        <span className="project-workflow__state-icon" aria-hidden="true">
+          <LoaderCircle className="spin" size={17} />
+        </span>
+        <span className="project-workflow__state-copy">
+          <strong>正在同步项目阶段</strong>
+          <small>正在读取最新制作进度与可用操作</small>
+        </span>
+      </div>
+    )
+  }
+  if (error && !readiness) {
+    return (
+      <div aria-live="polite" className="project-workflow project-workflow--error" role="status">
+        <span className="project-workflow__state-icon" aria-hidden="true">
+          <AlertTriangle size={17} />
+        </span>
+        <span className="project-workflow__state-copy">
+          <strong>项目阶段暂未同步</strong>
+          <small>不影响当前页面操作，系统将在后台继续尝试</small>
+        </span>
+        <span className="project-workflow__retry-status" aria-hidden="true">
+          <LoaderCircle className="spin" size={13} />
+          自动重试中
+        </span>
+      </div>
+    )
   }
   if (!readiness) return null
 

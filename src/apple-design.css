@@ -2144,7 +2144,105 @@ a.project-workflow__stage:focus-visible {
   border-color: var(--border);
   box-shadow: var(--shadow);
 }
-.project-workflow--loading { color: var(--text-2); }
+.project-workflow--loading,
+.project-workflow--error {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  min-height: 64px;
+  padding: 10px 13px;
+  overflow: hidden;
+  box-shadow: 0 8px 24px rgb(15 23 42 / 0.06);
+}
+
+.project-workflow--loading {
+  color: var(--text-2);
+  background: color-mix(in srgb, var(--surface) 94%, var(--primary-soft));
+  border-color: color-mix(in srgb, var(--primary) 15%, var(--border));
+}
+
+.project-workflow--error {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning-soft) 52%, var(--surface));
+  border-color: color-mix(in srgb, var(--warning) 26%, var(--border));
+}
+
+.project-workflow__state-icon {
+  display: inline-flex;
+  width: 36px;
+  height: 36px;
+  align-items: center;
+  justify-content: center;
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--primary) 18%, var(--border));
+  border-radius: 11px;
+}
+
+.project-workflow--error .project-workflow__state-icon {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 10%, var(--surface));
+  border-color: color-mix(in srgb, var(--warning) 20%, var(--border));
+}
+
+.project-workflow__state-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.project-workflow__state-copy strong {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.project-workflow__state-copy small {
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-workflow__retry-status {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  color: color-mix(in srgb, var(--warning) 88%, var(--text));
+  background: color-mix(in srgb, var(--warning) 9%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--warning) 20%, var(--border));
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 680;
+  white-space: nowrap;
+}
+
+:root[data-visual-mode="cinema"] .project-workflow--loading,
+:root[data-visual-mode="cinema"] .project-workflow--error {
+  background: color-mix(in srgb, var(--surface) 88%, var(--bg));
+  border-color: color-mix(in srgb, currentColor 28%, var(--border));
+  box-shadow: 0 12px 30px rgb(0 0 0 / 0.24);
+}
+
+@media (max-width: 640px) {
+  .project-workflow--loading,
+  .project-workflow--error {
+    grid-template-columns: auto minmax(0, 1fr);
+    min-height: 62px;
+    padding: 9px 10px;
+  }
+
+  .project-workflow__retry-status {
+    display: none;
+  }
+}
 .project-workflow > header { border-bottom-color: var(--border); }
 .project-workflow > header span { color: var(--text-3); }
 .project-workflow > header > a { color: var(--primary); }
@@ -2173,4 +2271,442 @@ a.project-workflow__stage:focus-visible {
 :root[data-visual-mode="cinema"] .project-workflow__stage--complete i { color: #08210f; }
 :root[data-visual-mode="cinema"] a.project-workflow__stage:hover {
   background: rgb(255 255 255 / 0.06);
+}
+
+/* ---------------------------------------------------------------------------
+ * Unified select / dropdown interaction
+ * Theme-aware custom trigger, viewport-safe menu, search, and keyboard states.
+ * The clipped native select remains in the DOM for form serialization.
+ * ------------------------------------------------------------------------- */
+
+.select-control {
+  position: relative;
+  display: block;
+  width: 100%;
+  min-width: 0;
+}
+
+.select-control__native {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  margin: -1px !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+  clip: rect(0 0 0 0) !important;
+  clip-path: inset(50%) !important;
+}
+
+.select-control__trigger {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 11px 8px 12px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  outline: 0;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 560;
+  text-align: left;
+  transition:
+    color var(--response-fast) ease-out,
+    background-color var(--response-fast) ease-out,
+    border-color var(--response-fast) ease-out,
+    box-shadow var(--response-fast) ease-out;
+}
+
+.select-control__trigger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--surface-2) 72%, var(--surface));
+  border-color: color-mix(in srgb, var(--primary) 34%, var(--border-strong));
+}
+
+.select-control__trigger:focus-visible,
+.select-control.is-open .select-control__trigger {
+  background: var(--surface);
+  border-color: color-mix(in srgb, var(--primary) 72%, var(--border-strong));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 13%, transparent);
+  outline: 0;
+}
+
+.select-control__value {
+  position: static;
+  inset: auto;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: inherit;
+  pointer-events: none;
+  text-overflow: ellipsis;
+  transform: none;
+  white-space: nowrap;
+}
+
+.select-control__chevron {
+  position: static;
+  inset: auto;
+  flex: 0 0 auto;
+  color: var(--text-3);
+  pointer-events: none;
+  transform: none;
+  transition:
+    color var(--response-fast) ease-out,
+    transform var(--response-fast) var(--ease-fluid);
+}
+
+.select-control__trigger:hover:not(:disabled) .select-control__chevron,
+.select-control.is-open .select-control__chevron {
+  color: var(--primary);
+}
+
+.select-control.is-open .select-control__chevron {
+  transform: rotate(180deg);
+}
+
+.select-control.is-disabled .select-control__trigger,
+.select-control__trigger:disabled {
+  color: var(--text-3);
+  background: color-mix(in srgb, var(--surface-2) 72%, transparent);
+  border-color: var(--border);
+  box-shadow: none;
+  cursor: not-allowed;
+  opacity: 0.68;
+}
+
+.brief-field .select-control__trigger {
+  min-height: 42px;
+  padding-inline: 11px;
+  border-radius: 8px;
+  font-size: 11px;
+}
+
+.field .select-control__trigger,
+.field-grid .select-control__trigger {
+  min-height: 40px;
+  padding-inline: 8px;
+  font-size: 11px;
+}
+
+.api-field .select-control__trigger {
+  height: 42px;
+  padding: 0 11px 0 12px;
+  overflow: hidden;
+  border-radius: 8px;
+  font: 500 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.character-visual-editor__grid .select-control__trigger {
+  min-height: 38px;
+  padding: 8px 9px;
+  border-color: var(--border);
+  border-radius: 7px;
+  font: inherit;
+  font-weight: 500;
+}
+
+.relationship-editor__version .select-control {
+  width: auto;
+  min-width: 170px;
+}
+
+.relationship-editor__version .select-control__trigger {
+  height: 34px;
+  min-height: 34px;
+  padding: 0 9px 0 10px;
+  border-color: var(--border);
+  border-radius: 8px;
+}
+
+.relationship-inspector .select-control__trigger,
+.relationship-beat .select-control__trigger {
+  min-height: 36px;
+  padding: 7px 9px;
+  border-color: var(--border);
+  border-radius: 7px;
+  font: inherit;
+}
+
+.relationship-beat > header .select-control {
+  width: auto;
+  min-width: 112px;
+}
+
+.relationship-beat > header .select-control__trigger {
+  min-height: 34px;
+  padding-block: 5px;
+}
+
+@keyframes select-menu-in-bottom {
+  from { opacity: 0; transform: translateY(-5px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes select-menu-in-top {
+  from { opacity: 0; transform: translateY(5px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.select-menu {
+  position: fixed;
+  z-index: 1400;
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  padding: 6px;
+  overflow: hidden;
+  color: var(--text);
+  background: color-mix(in srgb, var(--surface-elevated, var(--surface)) 96%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border-strong) 88%, transparent);
+  border-radius: 13px;
+  box-shadow: 0 18px 48px rgb(15 23 42 / 0.18), 0 3px 10px rgb(15 23 42 / 0.08);
+  backdrop-filter: blur(18px) saturate(1.15);
+  -webkit-backdrop-filter: blur(18px) saturate(1.15);
+  transform-origin: center top;
+  animation: select-menu-in-bottom 150ms var(--ease-fluid) both;
+}
+
+.select-menu[data-placement="top"] {
+  transform-origin: center bottom;
+  animation-name: select-menu-in-top;
+}
+
+.select-menu__search {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 5px;
+  padding: 0 8px;
+  color: var(--text-3);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  transition: border-color var(--response-fast) ease-out, box-shadow var(--response-fast) ease-out;
+}
+
+.select-menu__search:focus-within {
+  color: var(--primary);
+  border-color: color-mix(in srgb, var(--primary) 62%, var(--border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 10%, transparent);
+}
+
+.select-menu__search > svg {
+  flex: 0 0 auto;
+}
+
+.select-menu__search input[type="search"] {
+  width: 100%;
+  min-width: 0;
+  height: 38px;
+  padding: 0;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  outline: 0;
+  box-shadow: none;
+  font-size: 12px;
+}
+
+.select-menu__search input[type="search"]::-webkit-search-cancel-button {
+  display: none;
+}
+
+.select-menu__search > button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  margin-right: -5px;
+  padding: 0;
+  color: var(--text-3);
+  background: transparent;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.select-menu__search > button:hover {
+  color: var(--text);
+  background: var(--surface-3);
+}
+
+.select-menu__viewport {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-padding-block: 28px 4px;
+}
+
+.select-menu__group {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  padding: 8px 9px 4px;
+  color: var(--text-3);
+  background: color-mix(in srgb, var(--surface-elevated, var(--surface)) 94%, transparent);
+  font-size: 9px;
+  font-weight: 760;
+  letter-spacing: 0.06em;
+}
+
+.select-menu__option {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 7px;
+  margin: 1px 0;
+  padding: 7px 9px 7px 7px;
+  color: var(--text-2);
+  border: 1px solid transparent;
+  border-radius: 9px;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1.35;
+  transition:
+    color 100ms ease-out,
+    background-color 100ms ease-out,
+    border-color 100ms ease-out;
+}
+
+.select-menu__option.is-active {
+  color: var(--text);
+  background: color-mix(in srgb, var(--primary) 9%, var(--surface-2));
+  border-color: color-mix(in srgb, var(--primary) 16%, transparent);
+}
+
+.select-menu__option.is-selected {
+  color: var(--primary);
+  font-weight: 680;
+}
+
+.select-menu__option.is-disabled {
+  color: var(--text-3);
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.select-menu__indicator {
+  display: inline-flex;
+  flex: 0 0 18px;
+  align-items: center;
+  justify-content: center;
+  color: var(--primary);
+}
+
+.select-menu__option-label {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+}
+
+.select-menu__option small {
+  flex: 0 0 auto;
+  color: var(--text-3);
+  font-size: 8px;
+  font-weight: 650;
+}
+
+.select-menu__empty {
+  display: flex;
+  min-height: 112px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--text-2);
+  text-align: center;
+}
+
+.select-menu__empty > svg {
+  margin-bottom: 3px;
+  color: var(--text-3);
+}
+
+.select-menu__empty small {
+  color: var(--text-3);
+  font-size: 9px;
+}
+
+.select-menu__hint {
+  flex: 0 0 auto;
+  margin-top: 5px;
+  padding: 5px 8px 1px;
+  color: var(--text-3);
+  border-top: 1px solid var(--border);
+  font-size: 8px;
+  text-align: right;
+}
+
+:root[data-visual-mode="cinema"] .select-menu {
+  background: color-mix(in srgb, var(--surface-elevated, var(--surface)) 96%, #080c13);
+  border-color: color-mix(in srgb, var(--text) 16%, transparent);
+  box-shadow: 0 22px 58px rgb(0 0 0 / 0.52), 0 4px 14px rgb(0 0 0 / 0.26);
+}
+
+:root[data-visual-mode="cinema"] .select-menu__group {
+  background: color-mix(in srgb, var(--surface-elevated, var(--surface)) 96%, #080c13);
+}
+
+@media (max-width: 640px) {
+  .select-control__trigger {
+    min-height: 44px;
+    font-size: 16px;
+  }
+
+  .select-menu {
+    padding: 7px;
+    border-radius: 14px;
+  }
+
+  .select-menu__search input[type="search"] {
+    height: 42px;
+    font-size: 16px;
+  }
+
+  .select-menu__option {
+    min-height: 44px;
+    padding-block: 9px;
+    font-size: 13px;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .select-control__trigger:focus-visible,
+  .select-control.is-open .select-control__trigger {
+    border-color: var(--primary);
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+
+  .select-menu {
+    border-width: 2px;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+
+  .select-menu__option.is-active {
+    border-color: var(--primary);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .select-control__chevron,
+  .select-menu {
+    animation: none;
+    transition: none;
+  }
 }

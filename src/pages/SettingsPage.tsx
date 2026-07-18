@@ -27,7 +27,7 @@ import {
   type ProviderSettings,
   type RuntimeConfig,
 } from '../api/client'
-import { Button, Modal, PageHeader, StatusBadge } from '../components/ui'
+import { Button, Modal, PageHeader, SelectControl, StatusBadge } from '../components/ui'
 import { useStudio } from '../store/StudioContext'
 import { useToast } from '../store/ToastContext'
 import type { VisualMode } from '../types'
@@ -397,9 +397,9 @@ export function SettingsPage() {
             <section className="provider-config-section">
               <div className="provider-config-section__intro"><SlidersHorizontal size={17} /><div><h4>模型路由</h4><p>按任务类型选择模型</p></div></div>
               <div className="provider-config-section__body api-form-grid api-form-grid--stack">
-                <label className="api-field"><span>文本模型</span><select onChange={(event) => updateArk('promptModel', event.target.value)} value={draft.ark.promptModel}>{promptModelOptions.map((option) => <option key={option.id} value={option.id}>{option.label} · {option.id}</option>)}</select><small>故事、剧本与提示词</small></label>
-                <label className="api-field"><span>图片模型</span><select onChange={(event) => updateArk('imageModel', event.target.value)} value={draft.ark.imageModel}>{imageModelOptions.map((option) => <option key={option.id} value={option.id}>{option.label} · {option.id}</option>)}</select><small>关键帧与角色候选</small></label>
-                <label className="api-field"><span>视频模型</span><select onChange={(event) => updateArk('videoModel', event.target.value)} value={draft.ark.videoModel}>{videoModelOptions.map((option) => <option key={option.id} value={option.id}>{option.label} · {option.id}</option>)}</select><small>单镜头视频生成</small></label>
+                <label className="api-field"><span>文本模型</span><SelectControl aria-label="文本模型" onChange={(event) => updateArk('promptModel', event.target.value)} value={draft.ark.promptModel}>{promptModelOptions.map((option) => <option key={option.id} value={option.id}>{option.label} · {option.id}</option>)}</SelectControl><small>故事、剧本与提示词</small></label>
+                <label className="api-field"><span>图片模型</span><SelectControl aria-label="图片模型" onChange={(event) => updateArk('imageModel', event.target.value)} value={draft.ark.imageModel}>{imageModelOptions.map((option) => <option key={option.id} value={option.id}>{option.label} · {option.id}</option>)}</SelectControl><small>关键帧与角色候选</small></label>
+                <label className="api-field"><span>视频模型</span><SelectControl aria-label="视频模型" onChange={(event) => updateArk('videoModel', event.target.value)} value={draft.ark.videoModel}>{videoModelOptions.map((option) => <option key={option.id} value={option.id}>{option.label} · {option.id}</option>)}</SelectControl><small>单镜头视频生成</small></label>
               </div>
             </section>
             <section className="provider-config-section">
