@@ -29,6 +29,7 @@ import {
 } from '../api/client'
 import { Button, Modal, PageHeader, StatusBadge } from '../components/ui'
 import { useStudio } from '../store/StudioContext'
+import { useToast } from '../store/ToastContext'
 import type { VisualMode } from '../types'
 
 const modes: Array<{ id: VisualMode; title: string; description: string; tone: string }> = [
@@ -129,6 +130,7 @@ function ConnectionResult({ result }: { result: ProviderConnectionResult | null 
 
 export function SettingsPage() {
   const { apiStatus, project, visualMode, setVisualMode, resetDemo, resyncCurrentProject } = useStudio()
+  const { notify } = useToast()
   const [runtime, setRuntime] = useState<RuntimeConfig | null>(null)
   const [providerSettings, setProviderSettings] = useState<ProviderSettings | null>(null)
   const [draft, setDraft] = useState<ProviderSettings | null>(null)
@@ -322,7 +324,7 @@ export function SettingsPage() {
       <section>
         <div className="section-heading"><div><p className="eyebrow">外观</p><h2>界面模式</h2></div><Eye size={19} /></div>
         <p className="settings-copy">三种模式共享同一信息架构与交互规则，切换只影响信息密度和画面层级。</p>
-        <div className="mode-grid">{modes.map((mode) => <button className={visualMode === mode.id ? 'active' : ''} key={mode.id} onClick={() => setVisualMode(mode.id)}><span className={`mode-preview mode-preview--${mode.id}`}><i /><i /><i /></span><div><strong>{mode.title}</strong><p>{mode.description}</p><small>{mode.tone}</small></div>{visualMode === mode.id ? <em><Check size={14} />当前</em> : null}</button>)}</div>
+        <div className="mode-grid">{modes.map((mode) => <button className={visualMode === mode.id ? 'active' : ''} key={mode.id} onClick={() => { if (visualMode !== mode.id) { setVisualMode(mode.id); notify(`已切换到「${mode.title}」，界面密度与层级已更新。`, 'info') } }}><span className={`mode-preview mode-preview--${mode.id}`}><i /><i /><i /></span><div><strong>{mode.title}</strong><p>{mode.description}</p><small>{mode.tone}</small></div>{visualMode === mode.id ? <em><Check size={14} />当前</em> : null}</button>)}</div>
       </section>
       <aside>
         <section className="runtime-card">
@@ -340,7 +342,7 @@ export function SettingsPage() {
           <p className="eyebrow">离线演示</p>
           <h2>恢复演示项目</h2>
           <p>恢复浏览器中的内置演示场景；此模式没有连接 SQLite。</p>
-          <Button onClick={resetDemo} variant="secondary"><RotateCcw size={16} />恢复演示项目</Button>
+          <Button onClick={() => { resetDemo(); notify('已恢复内置演示项目。') }} variant="secondary"><RotateCcw size={16} />恢复演示项目</Button>
         </section> : null}
       </aside>
     </div>

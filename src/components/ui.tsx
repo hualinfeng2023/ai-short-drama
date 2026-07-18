@@ -1,5 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type ComponentPropsWithoutRef, type ReactNode } from 'react'
-import { AlertCircle, AlertTriangle, Check, CheckCircle2, ChevronDown, CircleDot, LoaderCircle, X } from 'lucide-react'
+import { AlertCircle, AlertTriangle, Check, CheckCircle2, ChevronDown, CircleDot, Info, LoaderCircle, X } from 'lucide-react'
 
 export function Button({
   variant = 'primary',
@@ -125,19 +125,21 @@ export function Toast({
   message,
   onDismiss,
   tone = 'success',
+  className = '',
 }: {
   message: string
   onDismiss: () => void
-  tone?: 'success' | 'error'
+  tone?: 'success' | 'error' | 'info'
+  className?: string
 }) {
-  const title = tone === 'success' ? '操作成功' : '操作失败'
-  const icon = tone === 'success' ? <CheckCircle2 size={18} /> : <AlertCircle size={18} />
+  const title = tone === 'success' ? '操作成功' : tone === 'error' ? '操作失败' : '提示'
+  const icon = tone === 'success' ? <CheckCircle2 size={18} /> : tone === 'error' ? <AlertCircle size={18} /> : <Info size={18} />
 
   return (
     <div
       aria-atomic="true"
       aria-live={tone === 'error' ? 'assertive' : 'polite'}
-      className={`toast toast--${tone}`}
+      className={`toast toast--${tone} ${className}`}
       role={tone === 'error' ? 'alert' : 'status'}
     >
       <span className="toast__icon" aria-hidden="true">{icon}</span>
@@ -219,6 +221,8 @@ export function Modal({
   const ref = useRef<HTMLDialogElement>(null)
   const titleId = useId()
   const descriptionId = useId()
+  const [closing, setClosing] = useState(false)
+  const closeTimer = useRef<number | null>(null)
 
   useEffect(() => {
     const dialog = ref.current
@@ -227,15 +231,31 @@ export function Modal({
     if (!open && dialog.open) dialog.close()
   }, [open])
 
+  useEffect(() => () => {
+    if (closeTimer.current) window.clearTimeout(closeTimer.current)
+  }, [])
+
+  const requestClose = () => {
+    if (closing) return
+    setClosing(true)
+    closeTimer.current = window.setTimeout(() => {
+      setClosing(false)
+      onClose()
+    }, 150)
+  }
+
   return (
     <dialog
       aria-describedby={description ? descriptionId : undefined}
       aria-labelledby={titleId}
-      className={`modal ${className}`}
+      className={`modal ${className} ${closing ? 'modal--closing' : ''}`}
       ref={ref}
       onCancel={(event) => {
         event.preventDefault()
-        onClose()
+        requestClose()
+      }}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) requestClose()
       }}
       onClose={onClose}
     >
@@ -244,7 +264,7 @@ export function Modal({
           <h2 id={titleId}>{title}</h2>
           {description ? <p id={descriptionId}>{description}</p> : null}
         </div>
-        <Button aria-label="关闭" onClick={onClose} size="sm" variant="ghost">
+        <Button aria-label="关闭" onClick={requestClose} size="sm" variant="ghost">
           <X size={18} />
         </Button>
       </div>

@@ -1764,3 +1764,93 @@ summary:focus-visible,
   .project-table__actions button,
   .project-table__actions a { min-height: 44px; }
 }
+
+/* ---------------------------------------------------------------------------
+ * Interaction polish
+ * Global toast exit animation + info tone, modal exit, account chevron,
+ * popover affordances. Appended by UI interaction optimization pass.
+ * ------------------------------------------------------------------------- */
+
+@keyframes apple-toast-out {
+  from { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+  to { opacity: 0; transform: translate3d(14px, -4px, 0) scale(0.985); }
+}
+
+.toast { overflow: hidden; }
+.toast--leaving { animation: apple-toast-out 180ms ease-in both; }
+.toast--info::before { background: var(--primary); }
+.toast--info .toast__icon { color: var(--primary); background: color-mix(in srgb, var(--primary) 12%, var(--surface)); }
+:root[data-visual-mode="cinema"] .toast--info .toast__icon { color: #84adff; background: #17263b; }
+
+@media (max-width: 760px) {
+  .toast-region {
+    top: calc(64px + env(safe-area-inset-top));
+    right: 16px;
+    left: 16px;
+    width: auto;
+  }
+}
+
+@keyframes apple-dialog-out {
+  from { opacity: 1; transform: scale(1) translateY(0); }
+  to { opacity: 0; transform: scale(0.975) translateY(8px); }
+}
+
+.modal--closing[open] {
+  animation: apple-dialog-out 150ms ease-in both;
+  pointer-events: none;
+}
+
+.modal::backdrop { cursor: pointer; }
+.modal__header,
+.modal__body,
+.modal__footer { cursor: default; }
+
+.account-button__chevron { transition: transform var(--response-fast, 140ms) var(--ease-fluid, cubic-bezier(0.22, 1, 0.36, 1)); }
+.account-button--open .account-button__chevron { transform: rotate(180deg); }
+.account-button:active .account-button__chevron { transform: scale(0.88); }
+.account-button--open:active .account-button__chevron { transform: rotate(180deg) scale(0.88); }
+
+/* Route-level error boundary fallback */
+.route-error {
+  display: flex;
+  min-height: calc(100vh - 140px);
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 40px 24px;
+  text-align: center;
+  animation: apple-page-in var(--response-slow, 260ms) var(--ease-fluid, cubic-bezier(0.22, 1, 0.36, 1)) both;
+}
+.route-error__icon {
+  display: grid;
+  width: 52px;
+  height: 52px;
+  place-items: center;
+  margin-bottom: 10px;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  border-radius: 16px;
+}
+.route-error h2 { font-size: 19px; letter-spacing: -0.02em; }
+.route-error p { max-width: 420px; color: var(--text-2); font-size: 12px; }
+.route-error__actions { display: flex; align-items: center; gap: 14px; margin-top: 16px; }
+.route-error__actions button {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 15px;
+  color: var(--surface);
+  background: var(--primary);
+  border: 0;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  transition: filter var(--response-fast, 140ms) ease-out, transform var(--response-fast, 140ms) var(--ease-fluid, cubic-bezier(0.22, 1, 0.36, 1));
+}
+.route-error__actions button:hover { filter: brightness(1.06); }
+.route-error__actions button:active { transform: scale(0.97); }
+.route-error__actions a { font-size: 12px; }

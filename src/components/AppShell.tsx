@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useState } from 'react'
+import { Suspense, useEffect, useRef, useState } from 'react'
 import {
   Bell,
   ChevronDown,
@@ -18,10 +18,14 @@ import { Link, NavLink, Outlet, useLocation } from 'react-router'
 import { fetchJobs, fetchProjectReadiness } from '../api/client'
 import { ProjectReadinessContext } from '../store/ProjectReadinessContext'
 import { useStudio } from '../store/StudioContext'
-import type { Job, ProjectReadiness } from '../types'
+import { useToast } from '../store/ToastContext'
+import type { Job, JobStatus, ProjectReadiness } from '../types'
 import { localizeDisplayText } from '../utils/localizeDisplayText'
 import { Button, getStatusLabel } from './ui'
+import { ErrorBoundary } from './ErrorBoundary'
 import { ProjectWorkflowBar } from './ProjectWorkflowBar'
+
+const ACTIVE_JOB_STATUSES: JobStatus[] = ['PENDING', 'RETRY_WAIT', 'RUNNING', 'CANCEL_REQUESTED']
 
 const navigation = [
   { to: '/projects', label: '项目', icon: FolderKanban },
@@ -46,8 +50,16 @@ function breadcrumb(pathname: string, projectName: string): string[] {
   return ['项目']
 }
 
+const SIDEBAR_COLLAPSED_KEY = 'studio-sidebar-collapsed'
+
 export function AppShell() {
-  const [collapsed, setCollapsed] = useState(false)
+  const [collapsed, setCollapsed] = useState(() => {
+    try {
+      return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1'
+    } catch {
+      return false
+    }
+  })
   const [accountOpen, setAccountOpen] = useState(false)
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [globalJobs, setGlobalJobs] = useState<Job[]>([])
@@ -69,13 +81,14 @@ export function AppShell() {
   const currentProjectMeta = contextualProject && contextualProject.id !== project.id
     ? getStatusLabel(contextualProject.status)
     : '第 1 集 · 验证样片'
+  const { notify } = useToast()
   const visibleJobs = apiStatus === 'connected'
     ? (routeProjectId
       ? globalJobs.filter((job) => job.projectId === routeProjectId)
       : globalJobs)
     : (routeProjectId && routeProjectId !== project.id ? [] : contextJobs)
   const activeJobCount = visibleJobs.filter((job) =>
-    ['PENDING', 'RETRY_WAIT', 'RUNNING', 'CANCEL_REQUESTED'].includes(job.status),
+    ACTIVE_JOB_STATUSES.includes(job.status),
   ).length
   const latestJob = visibleJobs[0]
   const crumbs = breadcrumb(location.pathname, currentProjectName)
@@ -119,7 +132,56 @@ export function AppShell() {
   useEffect(() => {
     setAccountOpen(false)
     setNotificationsOpen(false)
+    window.scrollTo({ top: 0, left: 0, behavior: 'instant' as ScrollBehavior })
   }, [location.pathname])
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? '1' : '0')
+    } catch {
+      // 本地存储不可用时静默失败，折叠状态仅在本次会话内生效。
+    }
+  }, [collapsed])
+
+  useEffect(() => {
+    if (!accountOpen && !notificationsOpen) return
+    const onPointerDown = (event: PointerEvent) => {
+      if (!(event.target instanceof Element)) return
+      if (!event.target.closest('.popover-wrap')) {
+        setAccountOpen(false)
+        setNotificationsOpen(false)
+      }
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setAccountOpen(false)
+        setNotificationsOpen(false)
+      }
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [accountOpen, notificationsOpen])
+
+  const jobStatusSnapshot = useRef<Map<string, JobStatus> | null>(null)
+  useEffect(() => {
+    const nextSnapshot = new Map(visibleJobs.map((job) => [job.id, job.status]))
+    const previousSnapshot = jobStatusSnapshot.current
+    jobStatusSnapshot.current = nextSnapshot
+    if (previousSnapshot === null) return
+    for (const job of visibleJobs) {
+      const previousStatus = previousSnapshot.get(job.id)
+      if (!previousStatus || previousStatus === job.status) continue
+      if (!ACTIVE_JOB_STATUSES.includes(previousStatus)) continue
+      const label = localizeDisplayText(job.label)
+      if (job.status === 'SUCCEEDED') notify(`${label} 已完成。`)
+      else if (job.status === 'FAILED') notify(`${label} 失败，可在生成任务页查看原因。`, 'error')
+      else if (job.status === 'CANCELLED') notify(`${label} 已取消。`, 'info')
+    }
+  }, [visibleJobs, notify])
 
   return (
     <div className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}>
@@ -211,12 +273,15 @@ export function AppShell() {
                 aria-expanded={notificationsOpen}
                 aria-haspopup="dialog"
                 aria-label="通知"
-                onClick={() => setNotificationsOpen((value) => !value)}
+                onClick={() => {
+                  setNotificationsOpen((value) => !value)
+                  setAccountOpen(false)
+                }}
                 size="sm"
                 variant="ghost"
               >
                 <Bell size={18} />
-                {latestJob ? <span className="notification-dot" /> : null}
+                {activeJobCount > 0 ? <span className="notification-dot" /> : null}
               </Button>
               {notificationsOpen ? (
                 <div className="popover popover--notification" id="notification-popover" role="status">
@@ -229,16 +294,19 @@ export function AppShell() {
             <div className="popover-wrap">
               <button
                 aria-label="演示用户账户"
-                className="account-button"
+                className={`account-button ${accountOpen ? 'account-button--open' : ''}`}
                 aria-controls="account-popover"
                 aria-expanded={accountOpen}
                 aria-haspopup="menu"
-                onClick={() => setAccountOpen((value) => !value)}
+                onClick={() => {
+                  setAccountOpen((value) => !value)
+                  setNotificationsOpen(false)
+                }}
                 type="button"
               >
                 <CircleUserRound size={22} />
                 <span>演示用户</span>
-                <ChevronDown size={15} />
+                <ChevronDown className="account-button__chevron" size={15} />
               </button>
               {accountOpen ? (
                 <div className="popover" id="account-popover" role="menu">
@@ -253,14 +321,16 @@ export function AppShell() {
         <ProjectReadinessContext.Provider value={{ loading: readinessLoading, readiness }}>
           <main className="content-area" id="main-content" tabIndex={-1}>
             {pathProjectId && pathProjectId !== 'new' ? <ProjectWorkflowBar /> : null}
-            <Suspense fallback={
-              <div className="route-loading" role="status">
-                <LoaderCircle className="spin" size={20} />
-                <span>正在打开工作区…</span>
-              </div>
-            }>
-              <Outlet />
-            </Suspense>
+            <ErrorBoundary key={location.pathname}>
+              <Suspense fallback={
+                <div className="route-loading" role="status">
+                  <LoaderCircle className="spin" size={20} />
+                  <span>正在打开工作区…</span>
+                </div>
+              }>
+                <Outlet />
+              </Suspense>
+            </ErrorBoundary>
           </main>
         </ProjectReadinessContext.Provider>
       </div>
