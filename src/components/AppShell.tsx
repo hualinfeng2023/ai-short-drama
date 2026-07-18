@@ -31,6 +31,7 @@ import { localizeDisplayText } from '../utils/localizeDisplayText'
 import { buildLocalReadiness } from '../utils/localReadiness'
 import { Button, getStatusLabel } from './ui'
 import { ErrorBoundary } from './ErrorBoundary'
+import { GlossaryTip } from './GlossaryTip'
 import { ProjectWorkflowBar } from './ProjectWorkflowBar'
 
 const ACTIVE_JOB_STATUSES: JobStatus[] = ['PENDING', 'RETRY_WAIT', 'RUNNING', 'CANCEL_REQUESTED']
@@ -311,10 +312,17 @@ export function AppShell() {
           <div className="topbar__actions">
             <span
               className={`system-status system-status--${apiStatus}`}
-              title={apiStatus === 'connected' ? '后端服务已连接' : apiStatus === 'loading' ? '正在连接后端服务' : '当前使用本地回退数据'}
+              title={apiStatus === 'loading' ? '正在连接后端服务' : undefined}
             >
               {apiStatus === 'connected' ? <Wifi size={14} /> : <CloudOff size={14} />}
-              <span>{apiStatus === 'connected' ? '已连接' : apiStatus === 'loading' ? '连接中' : '本地模式'}</span>
+              {apiStatus === 'connected' ? <span>已连接</span> : apiStatus === 'loading' ? <span>连接中</span> : (
+                <GlossaryTip
+                  focusable
+                  align="end"
+                  label="本地模式"
+                  tip="当前是浏览器演示模式：数据只保存在本浏览器中，可直接体验镜头制作全流程；启动本地服务端后解锁五阶段制作流与数据持久化。"
+                />
+              )}
             </span>
             <div className="credit-balance" title="演示积分，不对应真实货币">
               <span />

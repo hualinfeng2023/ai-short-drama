@@ -2174,3 +2174,225 @@ a.project-workflow__stage:focus-visible {
 :root[data-visual-mode="cinema"] a.project-workflow__stage:hover {
   background: rgb(255 255 255 / 0.06);
 }
+
+/* ---------------------------------------------------------------------------
+ * Glossary tips, inspector tab badges, collapsible params, kbd hints.
+ * ------------------------------------------------------------------------- */
+
+/* Glossary term + explanation card */
+.glossary { position: relative; display: inline-flex; }
+.glossary__term {
+  border-bottom: 1px dashed var(--text-3);
+  cursor: help;
+  transition: color var(--response-fast, 140ms) ease-out, border-color var(--response-fast, 140ms) ease-out;
+}
+.glossary:hover .glossary__term { color: var(--primary); border-bottom-color: var(--primary); }
+.glossary__card {
+  position: absolute;
+  bottom: calc(100% + 9px);
+  left: 50%;
+  z-index: 60;
+  width: max-content;
+  min-width: 200px;
+  max-width: 280px;
+  padding: 10px 12px;
+  color: #f5f6f8;
+  background: rgba(22, 24, 30, 0.95);
+  border-radius: 12px;
+  box-shadow: 0 12px 30px rgba(15, 18, 25, 0.28);
+  font-size: 11.5px;
+  font-weight: 450;
+  line-height: 1.7;
+  letter-spacing: 0;
+  text-align: left;
+  white-space: normal;
+  opacity: 0;
+  visibility: hidden;
+  transform: translate(-50%, 5px);
+  transition: opacity var(--response-fast, 140ms) ease-out,
+    transform 180ms var(--ease-fluid, cubic-bezier(0.22, 1, 0.36, 1)),
+    visibility var(--response-fast, 140ms);
+  pointer-events: none;
+}
+.glossary--start .glossary__card { left: 0; transform: translate(0, 5px); }
+.glossary--end .glossary__card { left: auto; right: 0; transform: translate(0, 5px); }
+.glossary:hover .glossary__card,
+.glossary:focus .glossary__card,
+.glossary:focus-within .glossary__card { opacity: 1; visibility: visible; transform: translate(-50%, 0); }
+.glossary--start:hover .glossary__card,
+.glossary--start:focus .glossary__card,
+.glossary--start:focus-within .glossary__card,
+.glossary--end:hover .glossary__card,
+.glossary--end:focus .glossary__card,
+.glossary--end:focus-within .glossary__card { transform: translate(0, 0); }
+:root[data-visual-mode="cinema"] .glossary__card {
+  background: #232833;
+  border: 1px solid rgb(255 255 255 / 0.12);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55);
+}
+.glossary:focus { outline: none; }
+.glossary:focus-visible .glossary__term { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 3px; }
+/* topbar 徽章内的术语不加下划线，保持徽章整洁 */
+.system-status .glossary__term { border-bottom: 0; cursor: help; }
+
+/* Inspector tab count badges */
+.inspector__tab-badge {
+  display: inline-grid;
+  min-width: 17px;
+  height: 17px;
+  margin-left: 6px;
+  padding: 0 5px;
+  place-items: center;
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 13%, var(--surface));
+  border-radius: 999px;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 750;
+  animation: apple-badge-in 220ms var(--ease-fluid, cubic-bezier(0.22, 1, 0.36, 1)) both;
+}
+.inspector__tabs button.active .inspector__tab-badge { color: #fff; background: var(--primary); }
+@keyframes apple-badge-in {
+  from { transform: scale(0.6); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+/* Collapsible generation params */
+.params-fold {
+  margin: 2px 0 12px;
+  padding: 0 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.params-fold summary {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+  list-style: none;
+  user-select: none;
+}
+.params-fold summary::-webkit-details-marker { display: none; }
+.params-fold summary small {
+  flex: 1;
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 500;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.params-fold__chevron { flex: 0 0 auto; color: var(--text-3); transition: transform 160ms var(--ease-fluid, cubic-bezier(0.22, 1, 0.36, 1)); }
+.params-fold[open] .params-fold__chevron { transform: rotate(180deg); }
+.params-fold[open] summary { margin-bottom: 4px; border-bottom: 1px solid var(--border); }
+.params-fold[open] { padding-bottom: 12px; }
+.params-fold[open] .field { margin-top: 10px; }
+.params-fold summary:hover small { color: var(--text-2); }
+
+/* Keyboard hint under the filmstrip */
+.shot-workspace__kbd-hint {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  margin: 6px 2px 0;
+  color: var(--text-3);
+  font-size: 11px;
+}
+.shot-workspace__kbd-hint kbd {
+  padding: 1px 7px;
+  color: var(--text-2);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 11px;
+}
+
+@media (max-width: 800px) {
+  .glossary__card { display: none; }
+  .shot-workspace__kbd-hint { display: none; }
+}
+
+/* ---------------------------------------------------------------------------
+ * Visual compelling pass: segmented inspector tabs, filmstrip depth,
+ * version-row hierarchy, glossary card arrows.
+ * ------------------------------------------------------------------------- */
+
+/* Inspector tabs -> Apple segmented control */
+.inspector__tabs {
+  gap: 4px;
+  padding: 6px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+.inspector__tabs button {
+  border-radius: 8px;
+  transition: background var(--response-fast, 140ms) ease-out,
+    color var(--response-fast, 140ms) ease-out,
+    box-shadow var(--response-fast, 140ms) ease-out;
+}
+.inspector__tabs button:not(.active):hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+}
+.inspector__tabs button.active {
+  color: var(--primary);
+  background: var(--surface-elevated);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.12), 0 0 0 1px var(--border);
+}
+.inspector__tabs button:active { transform: scale(0.97); }
+
+/* Filmstrip: depth + playful hover */
+.filmstrip > button {
+  transition: transform 180ms var(--ease-fluid, cubic-bezier(0.22, 1, 0.36, 1)),
+    box-shadow 180ms ease-out;
+}
+.filmstrip > button:hover { transform: translateY(-2px); }
+.filmstrip > button:hover .filmstrip__thumb { box-shadow: 0 8px 18px rgba(15, 23, 42, 0.24); }
+.filmstrip > button:active { transform: translateY(0) scale(0.97); }
+.filmstrip > button.active {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 20%, transparent);
+}
+.filmstrip__thumb { box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.1); transition: box-shadow 180ms ease-out; }
+:root[data-visual-mode="cinema"] .filmstrip > button:hover .filmstrip__thumb { box-shadow: 0 8px 18px rgba(0, 0, 0, 0.5); }
+
+/* Version rows: clear current/candidate hierarchy */
+.version-row {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-top: 1px solid var(--border);
+  border-radius: 12px;
+  transition: box-shadow var(--response-fast, 140ms) ease-out, transform 180ms var(--ease-fluid, cubic-bezier(0.22, 1, 0.36, 1));
+}
+.version-row:hover { box-shadow: var(--shadow); transform: translateY(-1px); }
+.version-row--current {
+  background: color-mix(in srgb, var(--success) 7%, var(--surface));
+  border-color: color-mix(in srgb, var(--success) 26%, transparent);
+  border-top-color: color-mix(in srgb, var(--success) 26%, transparent);
+}
+.version-row--current > span { color: #fff; background: var(--success); }
+:root[data-visual-mode="cinema"] .version-row--current > span { color: #08210f; }
+
+/* Glossary card arrow */
+.glossary__card::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  border: 5px solid transparent;
+  border-top-color: rgba(22, 24, 30, 0.95);
+  transform: translateX(-50%);
+}
+.glossary--start .glossary__card::after { left: 20px; }
+.glossary--end .glossary__card::after { left: auto; right: 20px; transform: none; }
+:root[data-visual-mode="cinema"] .glossary__card::after { border-top-color: #232833; }
