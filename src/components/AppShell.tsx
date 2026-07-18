@@ -32,6 +32,7 @@ import { buildLocalReadiness } from '../utils/localReadiness'
 import { Button, getStatusLabel } from './ui'
 import { ErrorBoundary } from './ErrorBoundary'
 import { GlossaryTip } from './GlossaryTip'
+import { OnboardingDialog, markOnboardingDone, shouldShowOnboarding } from './OnboardingDialog'
 import { ProjectWorkflowBar } from './ProjectWorkflowBar'
 
 const ACTIVE_JOB_STATUSES: JobStatus[] = ['PENDING', 'RETRY_WAIT', 'RUNNING', 'CANCEL_REQUESTED']
@@ -76,6 +77,18 @@ export function AppShell() {
   })
   const [accountOpen, setAccountOpen] = useState(false)
   const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const [onboardingOpen, setOnboardingOpen] = useState(false)
+
+  useEffect(() => {
+    if (!shouldShowOnboarding()) return
+    const timer = window.setTimeout(() => setOnboardingOpen(true), 700)
+    return () => window.clearTimeout(timer)
+  }, [])
+
+  const finishOnboarding = () => {
+    markOnboardingDone()
+    setOnboardingOpen(false)
+  }
   const [globalJobs, setGlobalJobs] = useState<Job[]>([])
   const [readiness, setReadiness] = useState<ProjectReadiness | null>(null)
   const [readinessLoading, setReadinessLoading] = useState(false)
@@ -374,6 +387,16 @@ export function AppShell() {
                 <div className="popover" id="account-popover" role="menu">
                   <p className="popover__meta">本地单用户模式</p>
                   <Link role="menuitem" to="/settings" onClick={() => setAccountOpen(false)}>打开系统设置</Link>
+                  <button
+                    role="menuitem"
+                    onClick={() => {
+                      setAccountOpen(false)
+                      setOnboardingOpen(true)
+                    }}
+                    type="button"
+                  >
+                    查看新手引导
+                  </button>
                 </div>
               ) : null}
             </div>
@@ -396,6 +419,7 @@ export function AppShell() {
           </main>
         </ProjectReadinessContext.Provider>
       </div>
+      <OnboardingDialog open={onboardingOpen} onFinish={finishOnboarding} />
     </div>
   )
 }

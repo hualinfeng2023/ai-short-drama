@@ -4,6 +4,7 @@ import {
   Check,
   ChevronRight,
   Cloud,
+  CloudOff,
   Database,
   Eye,
   EyeOff,
@@ -361,7 +362,21 @@ export function SettingsPage() {
         </div>
       </header>
       {notice ? <div className={`brief-save-message brief-save-message--${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'}>{notice.message}</div> : null}
-      {!draft ? <div className="provider-settings-loading"><LoaderCircle className="spin" size={20} />{apiConnected ? '正在读取服务端 API 设置…' : '连接服务端后才能管理 API 设置'}</div> : <div className="api-settings-shell">
+      {!draft ? (apiConnected
+        ? <div className="provider-settings-loading"><LoaderCircle className="spin" size={20} />正在读取服务端 API 设置…</div>
+        : <div className="provider-offline" role="status">
+            <span className="provider-offline__icon"><CloudOff size={22} /></span>
+            <strong>连接服务端后可管理 API 凭证</strong>
+            <p>演示模式下全部生成走模拟流程，无需配置密钥。启动本地服务端后，这里可以接入火山方舟（文本 · 图片 · 视频）与火山 TOS 媒体中转。</p>
+            <div className="provider-offline__how">
+              <strong>如何连接</strong>
+              <ol>
+                <li>在项目根目录运行 <code>docker compose up --build</code>，或 <code>uv run uvicorn app.main:app --port 8000</code></li>
+                <li>刷新本页，右上角状态变为「已连接」</li>
+              </ol>
+            </div>
+          </div>
+      ) : <div className="api-settings-shell">
         <nav aria-label="API 服务商" className="provider-sidebar">
           <p className="provider-sidebar__label">服务商</p>
           <button aria-pressed={activeProvider === 'ark'} className={activeProvider === 'ark' ? 'active' : ''} onClick={() => setActiveProvider('ark')} type="button">
