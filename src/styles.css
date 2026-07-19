@@ -2906,7 +2906,7 @@ p {
 .modal--identity-image-viewer[open] { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
 .modal--identity-image-viewer .modal__body { min-height: 0; overflow: hidden; padding: 12px; }
 .identity-image-viewer { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; gap: 10px; height: 100%; min-height: 0; }
-.identity-image-viewer__toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; padding: 6px 8px 6px 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; }
+.identity-image-viewer__toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .identity-image-viewer__toolbar > span { display: inline-flex; align-items: center; gap: 7px; color: var(--text-2); }
 .identity-image-viewer__toolbar > span svg { color: var(--primary); }
 .identity-image-viewer__toolbar > span strong { color: var(--text); font-size: 12px; }
