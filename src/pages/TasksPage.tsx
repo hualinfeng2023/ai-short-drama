@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ArrowRight, Ban, Clock3, Filter, LoaderCircle, RotateCcw, Sparkles, X } from 'lucide-react'
+import { ArrowRight, Ban, Clock3, Filter, LoaderCircle, RotateCcw, X } from 'lucide-react'
 import { Link, useSearchParams } from 'react-router'
 import {
   cancelPersistedJob,
   fetchJobs,
   fetchProjectJobs,
-  retryPersistedJob,
+  recoverPersistedJob,
 } from '../api/client'
+import { JobRecoveryPanel } from '../components/JobRecoveryPanel'
 import { Button, PageHeader, ProgressBar, StatusBadge } from '../components/ui'
 import { useStudio } from '../store/StudioContext'
 import { useToast } from '../store/ToastContext'
-import type { Job, JobStatus } from '../types'
+import type { Job, JobRecoveryAction, JobRecoveryRequest, JobStatus } from '../types'
 import { getCompletedJobCta, getFailedJobGuidance } from '../utils/jobCta'
 import { elapsedJobSeconds, formatElapsedTime } from '../utils/jobTiming'
 import { localizeDisplayText } from '../utils/localizeDisplayText'
@@ -32,6 +33,9 @@ const eventTypes = [
   'job.cancelled',
   'job.failed',
   'job.succeeded',
+  'job.recovery_requested',
+  'job.intermediate_saved',
+  'job.handoff_requested',
   'proposal.ready',
   'story.approved',
   'characters.candidates_ready',
@@ -184,17 +188,41 @@ export function TasksPage() {
   const currentProjectTasksHref = `/tasks?project=${projectId ?? project.id}${focusedJobTypeQuery ? `&${focusedJobTypeQuery}` : ''}`
   const globalTasksHref = focusedJobTypeQuery ? `/tasks?${focusedJobTypeQuery}` : '/tasks'
 
-  async function act(jobId: string, action: 'cancel' | 'retry') {
+  async function cancel(jobId: string) {
     setActingJobId(jobId)
     setError(null)
     try {
-      const updated = action === 'cancel'
-        ? await cancelPersistedJob(jobId)
-        : await retryPersistedJob(jobId)
+      const updated = await cancelPersistedJob(jobId)
       setJobs((current) => current.map((job) => job.id === jobId ? updated : job))
-      notify(action === 'cancel' ? '已发送取消请求，任务会在安全点停止。' : '任务已重新排队。', action === 'cancel' ? 'info' : 'success')
+      notify('已发送取消请求，任务会在安全点停止。', 'info')
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '任务操作失败')
+    } finally {
+      setActingJobId(null)
+    }
+  }
+
+  async function recover(
+    jobId: string,
+    action: JobRecoveryAction,
+    request: Omit<JobRecoveryRequest, 'action'> = {},
+  ) {
+    setActingJobId(jobId)
+    setError(null)
+    try {
+      const updated = await recoverPersistedJob(jobId, { action, ...request })
+      setJobs((current) => current.map((job) => job.id === jobId ? updated : job))
+      notify({
+        RESUME_FROM_FAILURE: '任务将从失败步骤继续。',
+        RETRY_FAILED_PARTS: '只重新排队了失败部分。',
+        SWITCH_MODEL: '任务将使用备用模型或方案继续。',
+        FALLBACK_EXECUTION: '任务将采用降级方案执行，完成后仍需人工复核。',
+        SAVE_INTERMEDIATE: '中间结果已经保存。',
+        PROVIDE_INPUT: '补充信息已保存，任务将从失败处继续。',
+        ESCALATE_HUMAN: '任务已经转入人工处理队列。',
+      }[action], action === 'ESCALATE_HUMAN' || action === 'FALLBACK_EXECUTION' ? 'info' : 'success')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '任务恢复失败')
     } finally {
       setActingJobId(null)
     }
@@ -207,7 +235,7 @@ export function TasksPage() {
       description={projectId ? '查看当前项目的生成进度与历史记录。' : '汇总查看所有项目的生成进度与历史记录。'}
       actions={<Link className="button button--primary button--md" to={nextWorkspace}>{projectId ? '打开当前工作区' : '返回项目列表'} <ArrowRight size={16} /></Link>}
     />
-    {focusedJobType ? <div className="task-scope-banner"><div><Sparkles size={17} /><span><strong>{{
+    {focusedJobType ? <div className="task-scope-banner"><div><Clock3 size={17} /><span><strong>{{
       GENERATE_STORY_DIRECTIONS: '故事方向生成',
       GENERATE_STORY_STRUCTURE: '故事结构生成',
       GENERATE_SCRIPT_PACKAGE: '分集大纲与剧本生成',
@@ -234,7 +262,12 @@ export function TasksPage() {
         <div className="task-list__lead"><span className={`activity-dot activity-dot--${job.status.toLowerCase()}`} /><div><strong>{localizeDisplayText(job.label)}</strong><small>{taskSourceLabel(job)}{projectId ? '' : ` · 项目 ${job.projectId.slice(0, 8)}`} · {createdLabel(job.createdAt)}</small></div></div>
         <div className="task-list__stage"><div className={!active ? 'task-list__stage-summary' : undefined}>{active ? <strong title={localizeDisplayText(job.stage)}>{localizeDisplayText(job.stage)}</strong> : null}<span className="task-list__stage-meta">{active ? <span className="task-list__stage-progress">{Math.round(job.progress)}%</span> : null}<StatusBadge status={job.status} /></span></div>{active ? <ProgressBar value={job.progress} /> : job.status === 'SUCCEEDED' ? null : <small>{taskDetail}{visibleErrorCode}</small>}</div>
         <span className="task-list__timing"><span><Clock3 size={14} />{formatElapsedTime(elapsedSeconds)}</span></span>
-        <div className="task-list__actions">{active ? <Button disabled={actingJobId === job.id} onClick={() => void act(job.id, 'cancel')} size="sm" variant="ghost">{actingJobId === job.id ? <LoaderCircle className="spin" size={15} /> : <Ban size={15} />}取消</Button> : null}{(job.status === 'FAILED' || job.status === 'CANCELLED') && job.retryable ? <Button disabled={actingJobId === job.id} onClick={() => void act(job.id, 'retry')} size="sm" variant="secondary">{actingJobId === job.id ? <LoaderCircle className="spin" size={15} /> : <RotateCcw size={15} />}{failedGuidance?.retryLabel ?? '重试'}</Button> : null}{failedGuidance?.secondaryCta ? <Link className="button button--secondary button--sm task-list__cta" to={failedGuidance.secondaryCta.href}>{failedGuidance.secondaryCta.label}<ArrowRight size={14} /></Link> : null}{completedCta ? <Link className="button button--secondary button--sm task-list__cta" to={completedCta.href}>{completedCta.label}<ArrowRight size={14} /></Link> : null}</div>
+        <div className="task-list__actions">{active ? <Button disabled={actingJobId === job.id} onClick={() => void cancel(job.id)} size="sm" variant="ghost">{actingJobId === job.id ? <LoaderCircle className="spin" size={15} /> : <Ban size={15} />}取消</Button> : null}{failedGuidance?.secondaryCta ? <Link className="button button--secondary button--sm task-list__cta" to={failedGuidance.secondaryCta.href}>{failedGuidance.secondaryCta.label}<ArrowRight size={14} /></Link> : null}{completedCta ? <Link className="button button--secondary button--sm task-list__cta" to={completedCta.href}>{completedCta.label}<ArrowRight size={14} /></Link> : null}</div>
+        <JobRecoveryPanel
+          busy={actingJobId === job.id}
+          job={job}
+          onRecover={(action, request) => recover(job.id, action, request)}
+        />
       </article>
     })}</section>
   </div>

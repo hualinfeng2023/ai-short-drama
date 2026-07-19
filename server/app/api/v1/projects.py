@@ -23,7 +23,7 @@ from app.schemas import (
     SceneRead,
 )
 from app.services.brief_assistant import suggest_brief_avoidances, suggest_brief_requirements
-from app.services.project_naming import suggest_project_name
+from app.services.project_naming import ProjectNamingError, suggest_project_name
 from app.services.project_readiness import get_project_readiness
 from app.services.projects import (
     create_project,
@@ -69,7 +69,21 @@ async def project_name_suggestion(
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
     project_or_404(session, project_id)
-    result: ProjectNameSuggestionRead = await suggest_project_name(payload.model_dump(mode="json"))
+    try:
+        result: ProjectNameSuggestionRead = await suggest_project_name(
+            payload.model_dump(mode="json"),
+            allow_fallback=False,
+        )
+    except ProjectNamingError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "PROJECT_NAMING_UNAVAILABLE",
+                "message": str(exc),
+                "user_action": "检查文本生成服务配置后重试；原名称不会被修改",
+                "retryable": True,
+            },
+        ) from exc
     return success(result)
 
 

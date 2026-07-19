@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, Header, Response, status
 from sqlalchemy.orm import Session
 
 from app.api.trace import get_trace_id, success
+from app.config import get_settings
 from app.db.session import get_session
 from app.schemas import (
     CharacterRevisionCreateRequest,
@@ -9,12 +10,13 @@ from app.schemas import (
     ProposalGenerateRequest,
     ScriptApprovalRequest,
     ScriptEpisodeUpdateRequest,
+    ScriptExcerptRewriteApplyRequest,
+    ScriptExcerptRewriteRequest,
     ScriptLineUpdateRequest,
     ScriptSceneUpdateRequest,
     StoryDirectionMergeRequest,
     StoryPackageGenerateRequest,
 )
-from app.config import get_settings
 from app.services.character_revisions import create_character_revision, review_character_revision
 from app.services.creative_story import (
     approve_script,
@@ -25,6 +27,11 @@ from app.services.creative_story import (
     revise_script,
     story_package_estimate,
     story_workspace,
+)
+from app.services.script_rewrites import (
+    apply_script_excerpt_rewrite,
+    create_script_excerpt_rewrite,
+    list_script_excerpt_rewrites,
 )
 
 router = APIRouter(prefix="/api/v1", tags=["story"])
@@ -120,16 +127,18 @@ async def review_story_character_revision(
     payload: CharacterRevisionReviewRequest,
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
-    return success(await review_character_revision(
-        session,
-        get_settings(),
-        project_id=project_id,
-        base_story_bible_id=payload.base_story_bible_id,
-        base_relationship_graph_id=payload.base_relationship_graph_id,
-        character_key=payload.character_key,
-        changes=payload.changes,
-        expected_version=payload.expected_version,
-    ))
+    return success(
+        await review_character_revision(
+            session,
+            get_settings(),
+            project_id=project_id,
+            base_story_bible_id=payload.base_story_bible_id,
+            base_relationship_graph_id=payload.base_relationship_graph_id,
+            character_key=payload.character_key,
+            changes=payload.changes,
+            expected_version=payload.expected_version,
+        )
+    )
 
 
 @router.post("/projects/{project_id}/character-revisions", status_code=status.HTTP_201_CREATED)
@@ -138,18 +147,20 @@ def confirm_story_character_revision(
     payload: CharacterRevisionCreateRequest,
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
-    return success(create_character_revision(
-        session,
-        project_id=project_id,
-        base_story_bible_id=payload.base_story_bible_id,
-        base_relationship_graph_id=payload.base_relationship_graph_id,
-        character_key=payload.character_key,
-        changes=payload.changes,
-        expected_version=payload.expected_version,
-        confirmed=payload.confirmed,
-        impact_hash=payload.impact_hash,
-        actor=payload.actor,
-    ))
+    return success(
+        create_character_revision(
+            session,
+            project_id=project_id,
+            base_story_bible_id=payload.base_story_bible_id,
+            base_relationship_graph_id=payload.base_relationship_graph_id,
+            character_key=payload.character_key,
+            changes=payload.changes,
+            expected_version=payload.expected_version,
+            confirmed=payload.confirmed,
+            impact_hash=payload.impact_hash,
+            actor=payload.actor,
+        )
+    )
 
 
 @router.post("/scripts/{script_id}/approve", status_code=status.HTTP_202_ACCEPTED)
@@ -223,5 +234,64 @@ def update_script_line(
             scope="LINE",
             entity_id=line_id,
             changes=payload.model_dump(exclude={"expected_version"}, exclude_none=True),
+        )
+    )
+
+
+@router.post(
+    "/scripts/{script_id}/lines/{line_id}/rewrites",
+    status_code=status.HTTP_201_CREATED,
+)
+async def generate_script_excerpt_rewrite(
+    script_id: str,
+    line_id: str,
+    payload: ScriptExcerptRewriteRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return success(
+        await create_script_excerpt_rewrite(
+            session,
+            get_settings(),
+            script_id=script_id,
+            line_id=line_id,
+            expected_version=payload.expected_version,
+            selection_start=payload.selection_start,
+            selection_end=payload.selection_end,
+            action=payload.action,
+            custom_instruction=payload.custom_instruction,
+            tone=payload.tone,
+            parent_revision_id=payload.parent_revision_id,
+        )
+    )
+
+
+@router.get("/scripts/{script_id}/lines/{line_id}/rewrites")
+def get_script_excerpt_rewrites(
+    script_id: str,
+    line_id: str,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return success(
+        list_script_excerpt_rewrites(
+            session,
+            script_id=script_id,
+            line_id=line_id,
+        )
+    )
+
+
+@router.post("/script-excerpt-rewrites/{revision_id}/apply")
+def use_script_excerpt_rewrite(
+    revision_id: str,
+    payload: ScriptExcerptRewriteApplyRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return success(
+        apply_script_excerpt_rewrite(
+            session,
+            revision_id=revision_id,
+            script_id=payload.script_id,
+            line_id=payload.line_id,
+            expected_version=payload.expected_version,
         )
     )

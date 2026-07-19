@@ -3,9 +3,8 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect, text
-
 from app.config import SERVER_ROOT
+from sqlalchemy import create_engine, inspect, text
 
 
 def test_v1_upgrade_recovers_from_partial_sqlite_ddl(
@@ -54,6 +53,7 @@ def test_v1_upgrade_recovers_from_partial_sqlite_ddl(
         "script_versions",
         "script_scenes",
         "script_lines",
+        "script_excerpt_revisions",
         "character_look_versions",
         "voice_profiles",
         "location_versions",
@@ -167,8 +167,7 @@ def test_v1_upgrade_recovers_from_partial_sqlite_ddl(
         "independence_constraints_json",
         "status",
     } <= {
-        item["name"]
-        for item in inspector.get_columns("character_family_resemblance_constraints")
+        item["name"] for item in inspector.get_columns("character_family_resemblance_constraints")
     }
     assert "family_constraint_version_id" in {
         item["name"] for item in inspector.get_columns("character_candidate_batches")
@@ -188,11 +187,23 @@ def test_v1_upgrade_recovers_from_partial_sqlite_ddl(
     assert {item["name"] for item in inspector.get_columns("script_versions")} >= {
         "relationship_graph_version_id"
     }
+    assert {item["name"] for item in inspector.get_columns("script_excerpt_revisions")} >= {
+        "base_script_version_id",
+        "base_line_id",
+        "parent_revision_id",
+        "applied_script_version_id",
+        "selection_start",
+        "selection_end",
+        "original_text",
+        "proposed_text",
+        "action",
+        "status",
+    }
     assert {item["name"] for item in inspector.get_columns("change_sets")} >= {
         "base_relationship_graph_id",
         "result_relationship_graph_id",
     }
-    assert revision == "0024_family_resemblance_constraints"
+    assert revision == "0025_script_excerpt_revisions"
     if platform_targets is not None:
         assert '"priority":"PRIMARY"' in platform_targets
     command.check(config)

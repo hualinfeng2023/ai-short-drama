@@ -8,6 +8,7 @@ from app.services.media import deterministic_png_bytes
 
 MAX_IMAGE_BYTES = 32 * 1024 * 1024
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+ARK_IMAGE_SEED_MODULUS = 2**31
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,11 @@ def _optional_positive_int(value: object) -> int | None:
     return value if isinstance(value, int) and value > 0 else None
 
 
+def normalize_ark_image_seed(seed: int) -> int:
+    """Map deterministic application seeds into Ark's signed int32 seed range."""
+    return seed % ARK_IMAGE_SEED_MODULUS
+
+
 async def generate_image(
     settings: Settings,
     prompt: str,
@@ -75,12 +81,12 @@ async def generate_image(
         "response_format": "url",
         "size": size,
         "stream": False,
-        "watermark": True,
+        "watermark": False,
     }
     if resolved_references:
         request_payload["image"] = resolved_references
     if seed is not None:
-        request_payload["seed"] = seed
+        request_payload["seed"] = normalize_ark_image_seed(seed)
     timeout = httpx.Timeout(settings.ark_request_timeout_seconds)
     async with httpx.AsyncClient(
         timeout=timeout,

@@ -3,12 +3,14 @@ from sqlalchemy.orm import Session
 
 from app.api.trace import success
 from app.db.session import get_session
+from app.schemas import JobRecoveryRequest
 from app.services.jobs import (
     job_or_404,
     job_to_read,
     list_jobs,
     list_project_jobs,
     request_cancel,
+    request_job_recovery,
     request_retry,
 )
 
@@ -46,3 +48,13 @@ def retry_job(
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
     return success(request_retry(session, job_id))
+
+
+@router.post("/jobs/{job_id}/recovery")
+def recover_job(
+    job_id: str,
+    request: JobRecoveryRequest,
+    _idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=160),
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return success(request_job_recovery(session, job_id, request))

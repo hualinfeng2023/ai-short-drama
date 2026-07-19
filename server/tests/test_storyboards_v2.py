@@ -1,6 +1,12 @@
+from io import BytesIO
 from types import SimpleNamespace
 
-from app.services.storyboards_v2 import _line_character_keys, _scene_character_keys
+from app.services.storyboards_v2 import (
+    _line_character_keys,
+    _scene_character_keys,
+    mask_character_reference_watermark,
+)
+from PIL import Image, ImageDraw
 
 
 def _characters() -> dict[str, SimpleNamespace]:
@@ -51,3 +57,25 @@ def test_dialogue_line_keeps_the_speaking_character_when_no_one_else_is_named() 
         characters_by_key=characters,  # type: ignore[arg-type]
         scene_character_keys=["protagonist", "witness"],
     ) == ["witness"]
+
+
+def test_character_reference_masks_the_lower_right_watermark_region() -> None:
+    source = Image.new("RGB", (200, 120), (20, 40, 70))
+    draw = ImageDraw.Draw(source)
+    draw.rectangle((160, 106, 196, 116), fill=(240, 240, 240))
+    encoded = BytesIO()
+    source.save(encoded, format="PNG")
+
+    cleaned = mask_character_reference_watermark(encoded.getvalue(), "image/png")
+
+    with Image.open(BytesIO(cleaned)) as output:
+        result = output.convert("RGB")
+        assert result.size == source.size
+        assert result.getpixel((190, 110)) != (240, 240, 240)
+        assert result.getpixel((20, 20)) == (20, 40, 70)
+
+
+def test_character_reference_mask_leaves_unsupported_content_unchanged() -> None:
+    content = b"not-an-image"
+
+    assert mask_character_reference_watermark(content, "image/gif") == content

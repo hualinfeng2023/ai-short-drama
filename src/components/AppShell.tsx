@@ -31,9 +31,25 @@ import { localizeDisplayText } from '../utils/localizeDisplayText'
 import { buildLocalReadiness } from '../utils/localReadiness'
 import { Button, getStatusLabel } from './ui'
 import { ErrorBoundary } from './ErrorBoundary'
+import { GlossaryTip } from './GlossaryTip'
+import { OnboardingDialog, markOnboardingDone, shouldShowOnboarding } from './OnboardingDialog'
 import { ProjectWorkflowBar } from './ProjectWorkflowBar'
 
 const ACTIVE_JOB_STATUSES: JobStatus[] = ['PENDING', 'RETRY_WAIT', 'RUNNING', 'CANCEL_REQUESTED']
+const DATA_REFRESH_INTERVAL_MS = 3_000
+const DATA_REQUEST_TIMEOUT_MS = 5_000
+
+async function requestWithTimeout<T>(
+  request: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController()
+  const timeoutId = window.setTimeout(() => controller.abort(), DATA_REQUEST_TIMEOUT_MS)
+  try {
+    return await request(controller.signal)
+  } finally {
+    window.clearTimeout(timeoutId)
+  }
+}
 
 const navigation = [
   { to: '/projects', label: '项目', icon: FolderKanban },
@@ -48,7 +64,7 @@ interface Crumb {
 }
 
 function breadcrumb(pathname: string, projectName: string, projectHref: string): Crumb[] {
-  if (pathname === '/projects/new') return [{ label: '项目', to: '/projects' }, { label: 'AI 新建项目' }]
+  if (pathname === '/projects/new') return [{ label: '项目', to: '/projects' }, { label: '新建项目' }]
   if (pathname.includes('/scenes/')) return [{ label: projectName, to: projectHref }, { label: '第 1 集', to: projectHref }, { label: '场景工作台' }]
   if (pathname.endsWith('/preview')) return [{ label: projectName, to: projectHref }, { label: '第 1 集', to: projectHref }, { label: '完整小样' }]
   if (pathname.endsWith('/story')) return [{ label: projectName, to: projectHref }, { label: '故事与剧本' }]
@@ -75,8 +91,27 @@ export function AppShell() {
   })
   const [accountOpen, setAccountOpen] = useState(false)
   const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const [onboardingOpen, setOnboardingOpen] = useState(false)
+
+  useEffect(() => {
+    if (!shouldShowOnboarding()) return
+    const timer = window.setTimeout(() => setOnboardingOpen(true), 700)
+    return () => window.clearTimeout(timer)
+  }, [])
+
+  useEffect(() => {
+    const onShowOnboarding = () => setOnboardingOpen(true)
+    window.addEventListener('studio:show-onboarding', onShowOnboarding)
+    return () => window.removeEventListener('studio:show-onboarding', onShowOnboarding)
+  }, [])
+
+  const finishOnboarding = () => {
+    markOnboardingDone()
+    setOnboardingOpen(false)
+  }
   const [globalJobs, setGlobalJobs] = useState<Job[]>([])
   const [readiness, setReadiness] = useState<ProjectReadiness | null>(null)
+  const [readinessErrorProjectId, setReadinessErrorProjectId] = useState<string | null>(null)
   const [readinessLoading, setReadinessLoading] = useState(false)
   const { apiStatus, jobs: contextJobs, project, projectSummaries } = useStudio()
   const location = useLocation()
@@ -112,15 +147,23 @@ export function AppShell() {
       })
       : null
   ), [apiStatus, routeProjectId, project.id, project.episodeId, activeJobCount])
-  const contextReadiness = apiStatus === 'connected' ? readiness : fallbackReadiness
-  const contextReadinessLoading = apiStatus === 'connected' ? readinessLoading : false
+  const routeReadiness = readiness?.projectId === routeProjectId ? readiness : null
+  const contextReadiness = apiStatus === 'connected' ? routeReadiness : fallbackReadiness
+  const contextReadinessError = apiStatus === 'connected'
+    && readinessErrorProjectId === routeProjectId
+  const contextReadinessLoading = apiStatus === 'connected'
+    ? readinessLoading || (
+      Boolean(routeProjectId)
+      && !routeReadiness
+      && !contextReadinessError
+    )
+    : false
   const latestJob = visibleJobs[0]
   const crumbs = breadcrumb(location.pathname, currentProjectName, currentProjectLink)
 
   useEffect(() => {
     if (apiStatus !== 'connected') {
       setGlobalJobs([])
-      setReadiness(null)
       return
     }
     let active = true
@@ -129,24 +172,61 @@ export function AppShell() {
       if (refreshInFlight) return
       refreshInFlight = true
       try {
-        if (routeProjectId) setReadinessLoading(true)
-        const [latest, nextReadiness] = await Promise.all([
-          fetchJobs(),
-          routeProjectId ? fetchProjectReadiness(routeProjectId) : Promise.resolve(null),
-        ])
+        const latest = await requestWithTimeout((signal) => fetchJobs(signal))
+        if (active) setGlobalJobs(latest)
+      } catch {
+        // Keep the last successful task snapshot; project-stage polling is independent.
+      } finally {
+        refreshInFlight = false
+      }
+    }
+    void refresh()
+    const interval = window.setInterval(refresh, DATA_REFRESH_INTERVAL_MS)
+    return () => {
+      active = false
+      window.clearInterval(interval)
+    }
+  }, [apiStatus])
+
+  useEffect(() => {
+    if (apiStatus !== 'connected' || !routeProjectId) {
+      setReadiness(null)
+      setReadinessErrorProjectId(null)
+      setReadinessLoading(false)
+      return
+    }
+
+    let active = true
+    let refreshInFlight = false
+    let hasSnapshot = false
+    setReadiness(null)
+    setReadinessErrorProjectId(null)
+    setReadinessLoading(true)
+
+    const refresh = async () => {
+      if (refreshInFlight) return
+      refreshInFlight = true
+      try {
+        const nextReadiness = await requestWithTimeout(
+          (signal) => fetchProjectReadiness(routeProjectId, signal),
+        )
         if (active) {
-          setGlobalJobs(latest)
+          hasSnapshot = true
           setReadiness(nextReadiness)
+          setReadinessErrorProjectId(null)
         }
       } catch {
-        // Keep the last successful snapshot; the task page reports fetch errors in detail.
+        if (active && !hasSnapshot) {
+          setReadinessErrorProjectId(routeProjectId)
+        }
       } finally {
         if (active) setReadinessLoading(false)
         refreshInFlight = false
       }
     }
+
     void refresh()
-    const interval = window.setInterval(refresh, 3000)
+    const interval = window.setInterval(refresh, DATA_REFRESH_INTERVAL_MS)
     return () => {
       active = false
       window.clearInterval(interval)
@@ -262,6 +342,7 @@ export function AppShell() {
                 return (
                   <NavLink
                     className={({ isActive }) => `sidebar__subnav-item ${isActive ? 'sidebar__subnav-item--active' : ''}`}
+                    end={label === '样片工作台'}
                     key={to}
                     title={locked ? `${label} · 连接服务端后可用` : label}
                     to={to}
@@ -311,10 +392,17 @@ export function AppShell() {
           <div className="topbar__actions">
             <span
               className={`system-status system-status--${apiStatus}`}
-              title={apiStatus === 'connected' ? '后端服务已连接' : apiStatus === 'loading' ? '正在连接后端服务' : '当前使用本地回退数据'}
+              title={apiStatus === 'loading' ? '正在连接后端服务' : undefined}
             >
               {apiStatus === 'connected' ? <Wifi size={14} /> : <CloudOff size={14} />}
-              <span>{apiStatus === 'connected' ? '已连接' : apiStatus === 'loading' ? '连接中' : '本地模式'}</span>
+              {apiStatus === 'connected' ? <span>已连接</span> : apiStatus === 'loading' ? <span>连接中</span> : (
+                <GlossaryTip
+                  focusable
+                  align="end"
+                  label="本地模式"
+                  tip="当前是浏览器演示模式：数据只保存在本浏览器中，可直接体验镜头制作全流程；启动本地服务端后解锁五阶段制作流与数据持久化。"
+                />
+              )}
             </span>
             <div className="credit-balance" title="演示积分，不对应真实货币">
               <span />
@@ -366,13 +454,27 @@ export function AppShell() {
                 <div className="popover" id="account-popover" role="menu">
                   <p className="popover__meta">本地单用户模式</p>
                   <Link role="menuitem" to="/settings" onClick={() => setAccountOpen(false)}>打开系统设置</Link>
+                  <button
+                    role="menuitem"
+                    onClick={() => {
+                      setAccountOpen(false)
+                      setOnboardingOpen(true)
+                    }}
+                    type="button"
+                  >
+                    查看新手引导
+                  </button>
                 </div>
               ) : null}
             </div>
           </div>
         </header>
 
-        <ProjectReadinessContext.Provider value={{ loading: contextReadinessLoading, readiness: contextReadiness }}>
+        <ProjectReadinessContext.Provider value={{
+          error: contextReadinessError,
+          loading: contextReadinessLoading,
+          readiness: contextReadiness,
+        }}>
           <main className="content-area" id="main-content" tabIndex={-1}>
             {pathProjectId && pathProjectId !== 'new' ? <ProjectWorkflowBar /> : null}
             <ErrorBoundary key={location.pathname}>
@@ -388,6 +490,7 @@ export function AppShell() {
           </main>
         </ProjectReadinessContext.Provider>
       </div>
+      <OnboardingDialog open={onboardingOpen} onFinish={finishOnboarding} />
     </div>
   )
 }

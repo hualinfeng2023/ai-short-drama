@@ -9,6 +9,9 @@ from sqlalchemy.orm import Session, aliased
 
 from app.db.models import (
     ChangeSet,
+    Character,
+    CharacterCandidateBatch,
+    CharacterIdentityVersion,
     ExportRecord,
     Job,
     JobDependency,
@@ -20,7 +23,7 @@ from app.db.models import (
     UsageLedger,
     WorkerState,
 )
-from app.schemas import JobRead
+from app.schemas import JobRead, JobRecoveryRequest
 from app.services.events import append_event
 from app.services.projects import canonical_json
 from app.services.workspace import not_found, project_or_404
@@ -29,6 +32,76 @@ QUEUED_STATUSES = {"PENDING", "RETRY_WAIT"}
 ACTIVE_STATUSES = {"RUNNING", "CANCEL_REQUESTED"}
 TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "CANCELLED"}
 RETRY_DELAYS = (5, 20, 60)
+RECOVERY_REQUEUE_ACTIONS = {
+    "RESUME_FROM_FAILURE",
+    "RETRY_FAILED_PARTS",
+    "SWITCH_MODEL",
+    "FALLBACK_EXECUTION",
+    "PROVIDE_INPUT",
+}
+
+
+def _json_object(value: str | None) -> dict[str, object]:
+    if not value:
+        return {}
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str) and item.strip()]
+
+
+def _failure_details_with_recovery(
+    job: Job,
+    details: dict[str, object] | None,
+) -> dict[str, object]:
+    merged = dict(details or {})
+    failed_parts = _string_list(merged.get("failed_parts"))
+    if not failed_parts and job.entity_type == "shot":
+        failed_parts = [job.entity_id]
+    completed_steps = _string_list(merged.get("completed_steps"))
+    unreliable_outputs = _string_list(merged.get("unreliable_outputs"))
+    output = _json_object(job.output_json)
+    failed_step = merged.get("failed_step")
+    if not isinstance(failed_step, str) or not failed_step.strip():
+        failed_step = job.stage
+    if not unreliable_outputs:
+        unreliable_outputs = [f"{failed_step}及其后续结果尚未完成验证"]
+
+    actions = [
+        "SAVE_INTERMEDIATE",
+        "PROVIDE_INPUT",
+        "ESCALATE_HUMAN",
+        "SWITCH_MODEL",
+        "FALLBACK_EXECUTION",
+    ]
+    if job.retryable:
+        actions.insert(0, "RESUME_FROM_FAILURE")
+    if failed_parts:
+        actions.insert(1 if job.retryable else 0, "RETRY_FAILED_PARTS")
+
+    merged["recovery"] = {
+        "completion_state": "PARTIAL" if job.progress > 0 else "NOT_COMPLETED",
+        "completed_percent": round(job.progress),
+        "failed_step": failed_step,
+        "completed_steps": completed_steps,
+        "failed_parts": failed_parts,
+        "intermediate_result_saved": bool(output),
+        "intermediate_result_keys": sorted(output),
+        "available_actions": actions,
+        "unreliable_outputs": unreliable_outputs,
+        "reliability_note": (
+            "已完成步骤与中间结果可以保留，但失败步骤及其下游结果不能视为最终可信结果。"
+        ),
+        "handoff_status": "NOT_REQUESTED",
+    }
+    return merged
 
 
 def release_project_after_terminal_job(session: Session, job: Job, now: datetime) -> None:
@@ -301,6 +374,28 @@ def mark_entity_job_running(session: Session, job: Job, now: datetime) -> None:
                 project.export_ready = False
                 project.lock_version += 1
                 project.updated_at = now
+    if job.job_type == "GENERATE_CHARACTER_IDENTITY_DOSSIER":
+        payload = _json_object(job.input_json)
+        character = session.get(Character, str(payload.get("character_id", "")))
+        identity = session.get(CharacterIdentityVersion, job.entity_id)
+        if character is not None:
+            character.status = "PENDING_REVIEW"
+            character.lock_version += 1
+            character.updated_at = now
+        if identity is not None:
+            identity.status = "GENERATING_DOSSIER"
+        return
+    if job.job_type == "GENERATE_CHARACTER_VISUAL_CANDIDATE":
+        payload = _json_object(job.input_json)
+        character = session.get(Character, str(payload.get("character_id", "")))
+        batch = session.get(CharacterCandidateBatch, str(payload.get("batch_id", "")))
+        if character is not None:
+            character.status = "GENERATING"
+            character.lock_version += 1
+            character.updated_at = now
+        if batch is not None:
+            batch.status = "GENERATING"
+        return
     if job.job_type != "GENERATE_SHOT_IMAGE":
         return
     shot = session.get(Shot, job.entity_id)
@@ -478,6 +573,180 @@ def request_retry(session: Session, job_id: str) -> JobRead:
         job_id=job.id,
         event_type="job.retry_requested",
         payload={"job_id": job.id, "status": job.status, "attempt": job.attempt},
+    )
+    session.commit()
+    session.refresh(job)
+    return job_to_read(job)
+
+
+def request_job_recovery(
+    session: Session,
+    job_id: str,
+    request: JobRecoveryRequest,
+) -> JobRead:
+    job = job_or_404(session, job_id)
+    if job.status not in {"FAILED", "CANCELLED"}:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "JOB_RECOVERY_NOT_AVAILABLE",
+                "message": "只有失败或已取消的任务可以发起恢复",
+                "user_action": "等待当前任务结束后再选择恢复方式",
+                "retryable": False,
+                "details": {"job_id": job.id, "status": job.status},
+            },
+        )
+
+    details = _json_object(job.error_details_json)
+    recovery = details.get("recovery")
+    if not isinstance(recovery, dict):
+        details = _failure_details_with_recovery(job, details)
+        recovery = details["recovery"]
+    failed_parts = _string_list(recovery.get("failed_parts"))
+    if not failed_parts and job.entity_type == "shot":
+        failed_parts = [job.entity_id]
+        recovery["failed_parts"] = failed_parts
+        recovery["available_actions"] = [
+            *[
+                action
+                for action in _string_list(recovery.get("available_actions"))
+                if action != "RETRY_FAILED_PARTS"
+            ],
+            "RETRY_FAILED_PARTS",
+        ]
+        details["recovery"] = recovery
+    available_actions = _string_list(recovery.get("available_actions"))
+    if request.action not in available_actions:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "JOB_RECOVERY_ACTION_NOT_AVAILABLE",
+                "message": "当前任务不支持所选恢复方式",
+                "user_action": "选择任务详情中列出的恢复方式",
+                "retryable": False,
+                "details": {
+                    "job_id": job.id,
+                    "action": request.action,
+                    "available_actions": available_actions,
+                },
+            },
+        )
+
+    now = datetime.now(UTC)
+    if request.action == "SAVE_INTERMEDIATE":
+        output = _json_object(job.output_json)
+        output.setdefault(
+            "_checkpoint",
+            {
+                "progress": job.progress,
+                "stage": job.stage,
+                "saved_at": now.isoformat(),
+            },
+        )
+        job.output_json = canonical_json(output)
+        recovery["intermediate_result_saved"] = True
+        recovery["intermediate_result_keys"] = sorted(output)
+        recovery["intermediate_result_saved_at"] = now.isoformat()
+        details["recovery"] = recovery
+        job.error_details_json = canonical_json(details)
+        job.stage = "中间结果已保存"
+        job.updated_at = now
+        append_event(
+            session,
+            project_id=job.project_id,
+            job_id=job.id,
+            event_type="job.intermediate_saved",
+            payload={"job_id": job.id, "progress": job.progress},
+        )
+        session.commit()
+        session.refresh(job)
+        return job_to_read(job)
+
+    if request.action == "ESCALATE_HUMAN":
+        recovery["handoff_status"] = "REQUESTED"
+        recovery["handoff_requested_at"] = now.isoformat()
+        recovery["handoff_note"] = request.note or "请人工复核失败步骤和中间结果"
+        details["recovery"] = recovery
+        job.error_details_json = canonical_json(details)
+        job.stage = "等待人工处理"
+        job.updated_at = now
+        append_event(
+            session,
+            project_id=job.project_id,
+            job_id=job.id,
+            event_type="job.handoff_requested",
+            payload={"job_id": job.id, "status": job.status},
+        )
+        session.commit()
+        session.refresh(job)
+        return job_to_read(job)
+
+    failed_part_ids = request.failed_part_ids or _string_list(recovery.get("failed_parts"))
+    if request.action == "RETRY_FAILED_PARTS" and not failed_part_ids:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "JOB_FAILED_PARTS_MISSING",
+                "message": "当前失败没有可单独重试的处理单元",
+                "user_action": "改用从失败步骤继续或切换执行方案",
+                "retryable": False,
+                "details": {"job_id": job.id},
+            },
+        )
+
+    input_payload = _json_object(job.input_json)
+    input_payload["_recovery"] = {
+        "action": request.action,
+        "requested_at": now.isoformat(),
+        "resume_from": recovery.get("failed_step"),
+        "failed_part_ids": failed_part_ids,
+        "model": request.model,
+        "strategy": request.strategy,
+        "additional_input": request.additional_input,
+        "note": request.note,
+        "preserve_intermediate_output": True,
+    }
+    job.input_json = canonical_json(input_payload)
+    job.status = "RETRY_WAIT"
+    job.stage = {
+        "RESUME_FROM_FAILURE": "等待从失败步骤继续",
+        "RETRY_FAILED_PARTS": "等待重试失败部分",
+        "SWITCH_MODEL": "等待切换模型或方案",
+        "FALLBACK_EXECUTION": "等待降级执行",
+        "PROVIDE_INPUT": "已补充信息，等待继续",
+    }[request.action]
+    job.available_at = now
+    job.lease_until = None
+    job.heartbeat_at = None
+    job.worker_id = None
+    job.cancel_requested = False
+    job.completed_at = None
+    job.error_code = None
+    job.error_message = None
+    job.error_details_json = canonical_json(
+        {
+            "recovery": {
+                **recovery,
+                "last_action": request.action,
+                "last_requested_at": now.isoformat(),
+            }
+        }
+    )
+    job.retryable = True
+    job.max_attempts = max(job.max_attempts, job.attempt + 1)
+    job.updated_at = now
+    mark_entity_job_running(session, job, now)
+    append_event(
+        session,
+        project_id=job.project_id,
+        job_id=job.id,
+        event_type="job.recovery_requested",
+        payload={
+            "job_id": job.id,
+            "status": job.status,
+            "action": request.action,
+            "progress": job.progress,
+        },
     )
     session.commit()
     session.refresh(job)
@@ -673,13 +942,53 @@ def finish_job_success(
     session.refresh(job)
     if job.worker_id != worker_id:
         return
+    input_payload = _json_object(job.input_json)
+    recovery_directive = input_payload.get("_recovery")
+    recovery_action = (
+        recovery_directive.get("action")
+        if isinstance(recovery_directive, dict)
+        else None
+    )
+    persisted_output = dict(output)
+    recovery_details: dict[str, object] | None = None
+    if isinstance(recovery_action, str):
+        degraded = recovery_action == "FALLBACK_EXECUTION"
+        persisted_output["recovery"] = {
+            "action": recovery_action,
+            "degraded": degraded,
+        }
+        recovery_details = {
+            "recovery": {
+                "completion_state": "DEGRADED_SUCCEEDED" if degraded else "RECOVERED",
+                "last_action": recovery_action,
+                "unreliable_outputs": (
+                    ["降级执行生成的结果需要人工复核后才能作为最终交付"]
+                    if degraded
+                    else []
+                ),
+                "reliability_note": (
+                    "任务已通过降级方案完成；可继续后续流程，但交付前必须人工复核。"
+                    if degraded
+                    else "任务已从失败点恢复并完成。"
+                ),
+                "handoff_status": "NOT_REQUESTED",
+            }
+        }
     job.status = "SUCCEEDED"
     job.progress = 100
-    job.stage = "已完成"
-    job.output_json = canonical_json(output)
+    job.stage = (
+        "已降级完成"
+        if recovery_action == "FALLBACK_EXECUTION"
+        else "恢复后已完成"
+        if isinstance(recovery_action, str)
+        else "已完成"
+    )
+    job.output_json = canonical_json(persisted_output)
     job.error_code = None
     job.error_message = None
-    job.error_details_json = None
+    job.error_details_json = (
+        canonical_json(recovery_details) if recovery_details is not None else None
+    )
     job.completed_at = now
     job.updated_at = now
     job.lease_until = None
@@ -689,7 +998,12 @@ def finish_job_success(
         project_id=job.project_id,
         job_id=job.id,
         event_type="job.succeeded",
-        payload={"job_id": job.id, "status": job.status, "progress": 100, "output": output},
+        payload={
+            "job_id": job.id,
+            "status": job.status,
+            "progress": 100,
+            "output": persisted_output,
+        },
     )
     session.commit()
 
@@ -747,7 +1061,7 @@ def finish_job_failure(
         release_entity_after_terminal_job(session, job, now)
     job.error_code = code
     job.error_message = message
-    job.error_details_json = canonical_json(details or {})
+    job.error_details_json = canonical_json(_failure_details_with_recovery(job, details))
     job.updated_at = now
     job.lease_until = None
     job.worker_id = None

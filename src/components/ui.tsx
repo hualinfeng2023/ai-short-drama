@@ -1,5 +1,21 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type ComponentPropsWithoutRef, type ReactNode } from 'react'
-import { AlertCircle, AlertTriangle, Check, CheckCircle2, ChevronDown, CircleDot, Info, LoaderCircle, X } from 'lucide-react'
+import {
+  Children,
+  Fragment,
+  isValidElement,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ButtonHTMLAttributes,
+  type ComponentPropsWithoutRef,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from 'react'
+import { createPortal } from 'react-dom'
+import { AlertCircle, AlertTriangle, Check, CheckCircle2, ChevronDown, CircleDot, Info, LoaderCircle, LockKeyhole, Search, X } from 'lucide-react'
 
 export function Button({
   variant = 'primary',
@@ -19,35 +35,447 @@ export function Button({
   )
 }
 
-export function SelectControl({ children, className = '', onChange, ...props }: ComponentPropsWithoutRef<'select'>) {
+type SelectOptionData = {
+  disabled: boolean
+  group?: string
+  label: string
+  value: string
+}
+
+type SelectControlProps = ComponentPropsWithoutRef<'select'> & {
+  searchable?: boolean
+}
+
+function optionText(node: ReactNode): string {
+  return Children.toArray(node).map((item) => typeof item === 'string' || typeof item === 'number' ? String(item) : '').join('').trim()
+}
+
+function collectSelectOptions(children: ReactNode, group?: string): SelectOptionData[] {
+  const options: SelectOptionData[] = []
+  Children.forEach(children, (child) => {
+    if (!isValidElement(child)) return
+    if (child.type === 'option') {
+      const optionProps = child.props as ComponentPropsWithoutRef<'option'>
+      const label = optionText(optionProps.children)
+      options.push({
+        disabled: Boolean(optionProps.disabled),
+        group,
+        label,
+        value: String(optionProps.value ?? label),
+      })
+      return
+    }
+    if (child.type === 'optgroup') {
+      const groupProps = child.props as ComponentPropsWithoutRef<'optgroup'>
+      options.push(...collectSelectOptions(groupProps.children, groupProps.label))
+    }
+  })
+  return options
+}
+
+function normalizedSelectValue(value: ComponentPropsWithoutRef<'select'>['value']): string {
+  if (Array.isArray(value)) return String(value[0] ?? '')
+  return value === undefined || value === null ? '' : String(value)
+}
+
+export function SelectControl({
+  children,
+  className = '',
+  defaultValue,
+  disabled = false,
+  id,
+  onChange,
+  searchable,
+  title,
+  value,
+  ...props
+}: SelectControlProps) {
+  const {
+    'aria-describedby': ariaDescribedBy,
+    'aria-label': ariaLabel,
+    'aria-labelledby': ariaLabelledBy,
+    ...nativeProps
+  } = props
+  const options = useMemo(() => collectSelectOptions(children), [children])
+  const firstEnabledValue = options.find((option) => !option.disabled)?.value ?? ''
+  const controlled = value !== undefined
+  const [internalValue, setInternalValue] = useState(() => normalizedSelectValue(value ?? defaultValue) || firstEnabledValue)
+  const selectedValue = controlled ? normalizedSelectValue(value) : internalValue
+  const selectedOption = options.find((option) => option.value === selectedValue)
+  const selectedLabel = selectedOption?.label ?? selectedValue
+  const searchEnabled = searchable ?? options.length >= 8
   const selectRef = useRef<HTMLSelectElement>(null)
-  const [selectedLabel, setSelectedLabel] = useState('')
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
+  const focusSearchOnOpenRef = useRef(false)
+  const typeaheadRef = useRef('')
+  const typeaheadTimerRef = useRef<number | null>(null)
+  const rawId = useId()
+  const componentId = rawId.replace(/:/g, '')
+  const triggerId = id ?? `${componentId}-trigger`
+  const listboxId = `${componentId}-listbox`
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const [activeValue, setActiveValue] = useState(selectedOption?.disabled ? firstEnabledValue : selectedValue || firstEnabledValue)
+  const [menuPosition, setMenuPosition] = useState({
+    left: 0,
+    maxHeight: 320,
+    placement: 'bottom' as 'bottom' | 'top',
+    top: 0,
+    width: 240,
+  })
+  const visibleOptions = useMemo(() => {
+    const normalizedQuery = query.trim().toLocaleLowerCase('zh-CN')
+    if (!normalizedQuery) return options
+    return options.filter((option) => `${option.label} ${option.group ?? ''}`.toLocaleLowerCase('zh-CN').includes(normalizedQuery))
+  }, [options, query])
+  const enabledVisibleOptions = visibleOptions.filter((option) => !option.disabled)
+  const activeIndex = visibleOptions.findIndex((option) => option.value === activeValue && !option.disabled)
+  const activeOptionId = activeIndex >= 0 ? `${listboxId}-option-${activeIndex}` : undefined
+
+  useEffect(() => {
+    if (!controlled && !options.some((option) => option.value === internalValue)) {
+      setInternalValue(firstEnabledValue)
+    }
+  }, [controlled, firstEnabledValue, internalValue, options])
+
+  useEffect(() => () => {
+    if (typeaheadTimerRef.current !== null) window.clearTimeout(typeaheadTimerRef.current)
+  }, [])
+
+  const updateMenuPosition = useCallback(() => {
+    const trigger = triggerRef.current
+    if (!trigger) return
+    const rect = trigger.getBoundingClientRect()
+    const visualViewport = window.visualViewport
+    const viewportLeft = visualViewport?.offsetLeft ?? 0
+    const viewportTop = visualViewport?.offsetTop ?? 0
+    const viewportWidth = visualViewport?.width ?? window.innerWidth
+    const viewportHeight = visualViewport?.height ?? window.innerHeight
+    const gutter = 8
+    const gap = 6
+    const groupCount = new Set(visibleOptions.map((option) => option.group).filter(Boolean)).size
+    const estimatedHeight = Math.min(420, visibleOptions.length * 38 + groupCount * 25 + (searchEnabled ? 54 : 0) + 14)
+    const spaceBelow = viewportTop + viewportHeight - rect.bottom - gutter - gap
+    const spaceAbove = rect.top - viewportTop - gutter - gap
+    const placement = spaceBelow < Math.min(estimatedHeight, 240) && spaceAbove > spaceBelow ? 'top' : 'bottom'
+    const availableHeight = Math.max(132, placement === 'bottom' ? spaceBelow : spaceAbove)
+    const maxHeight = Math.min(420, availableHeight)
+    const menu = menuRef.current
+    const menuViewport = menu?.querySelector<HTMLElement>('.select-menu__viewport')
+    const menuHeight = menu?.getBoundingClientRect().height ?? 0
+    const menuViewportHeight = menuViewport?.getBoundingClientRect().height ?? 0
+    const naturalHeight = menuViewport ? menuViewport.scrollHeight + Math.max(0, menuHeight - menuViewportHeight) : menuHeight
+    const renderedHeight = Math.min(naturalHeight > 0 ? naturalHeight : estimatedHeight, maxHeight)
+    const width = Math.min(Math.max(rect.width, Math.min(280, viewportWidth - gutter * 2)), viewportWidth - gutter * 2)
+    const left = Math.min(
+      Math.max(rect.left, viewportLeft + gutter),
+      viewportLeft + viewportWidth - gutter - width,
+    )
+    const top = placement === 'bottom'
+      ? rect.bottom + gap
+      : Math.max(viewportTop + gutter, rect.top - gap - renderedHeight)
+    setMenuPosition({ left, maxHeight, placement, top, width })
+  }, [searchEnabled, visibleOptions])
 
   useLayoutEffect(() => {
-    setSelectedLabel(selectRef.current?.selectedOptions[0]?.textContent?.trim() ?? '')
-  }, [children, props.value])
+    if (open) updateMenuPosition()
+  }, [open, updateMenuPosition])
 
-  return <span className="select-control">
-    <select
-      {...props}
-      className={className}
-      onChange={(event) => {
-        setSelectedLabel(event.currentTarget.selectedOptions[0]?.textContent?.trim() ?? '')
-        onChange?.(event)
+  useEffect(() => {
+    if (!open) return
+    const handleOutsidePointer = (event: PointerEvent) => {
+      const target = event.target as Node
+      if (triggerRef.current?.contains(target) || menuRef.current?.contains(target)) return
+      setOpen(false)
+      setQuery('')
+    }
+    window.addEventListener('pointerdown', handleOutsidePointer, true)
+    window.addEventListener('resize', updateMenuPosition)
+    window.addEventListener('scroll', updateMenuPosition, true)
+    window.visualViewport?.addEventListener('resize', updateMenuPosition)
+    window.visualViewport?.addEventListener('scroll', updateMenuPosition)
+    return () => {
+      window.removeEventListener('pointerdown', handleOutsidePointer, true)
+      window.removeEventListener('resize', updateMenuPosition)
+      window.removeEventListener('scroll', updateMenuPosition, true)
+      window.visualViewport?.removeEventListener('resize', updateMenuPosition)
+      window.visualViewport?.removeEventListener('scroll', updateMenuPosition)
+    }
+  }, [open, updateMenuPosition])
+
+  useEffect(() => {
+    if (!open) return
+    const nextActive = visibleOptions.find((option) => option.value === activeValue && !option.disabled)
+      ?? visibleOptions.find((option) => option.value === selectedValue && !option.disabled)
+      ?? enabledVisibleOptions[0]
+    if (nextActive && nextActive.value !== activeValue) setActiveValue(nextActive.value)
+  }, [activeValue, enabledVisibleOptions, open, selectedValue, visibleOptions])
+
+  useEffect(() => {
+    if (!open || !searchEnabled) return
+    if (!focusSearchOnOpenRef.current) return
+    focusSearchOnOpenRef.current = false
+    const frame = window.requestAnimationFrame(() => searchRef.current?.focus())
+    return () => window.cancelAnimationFrame(frame)
+  }, [open, searchEnabled])
+
+  useEffect(() => {
+    if (!open || !activeOptionId) return
+    document.getElementById(activeOptionId)?.scrollIntoView({ block: 'nearest' })
+  }, [activeOptionId, open])
+
+  const openMenu = (preferredValue = selectedValue, focusSearch = false) => {
+    if (disabled) return
+    focusSearchOnOpenRef.current = focusSearch
+    setQuery('')
+    setActiveValue(options.find((option) => option.value === preferredValue && !option.disabled)?.value ?? firstEnabledValue)
+    setOpen(true)
+  }
+
+  const closeMenu = (restoreFocus = false) => {
+    if (restoreFocus) triggerRef.current?.focus({ preventScroll: true })
+    setOpen(false)
+    setQuery('')
+  }
+
+  const focusAdjacentControl = (backward: boolean) => {
+    const trigger = triggerRef.current
+    if (!trigger) return
+    const controls = Array.from(document.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    )).filter((element) => !menuRef.current?.contains(element) && element.getClientRects().length > 0)
+    const currentIndex = controls.indexOf(trigger)
+    const nextControl = controls[currentIndex + (backward ? -1 : 1)]
+    nextControl?.focus({ preventScroll: false })
+  }
+
+  const commitValue = (nextValue: string) => {
+    const option = options.find((item) => item.value === nextValue)
+    if (!option || option.disabled) return
+    if (!controlled) setInternalValue(nextValue)
+    const select = selectRef.current
+    if (select) {
+      const valueSetter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value')?.set
+      valueSetter?.call(select, nextValue)
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+    }
+    closeMenu(true)
+  }
+
+  const moveActive = (direction: 1 | -1, boundary?: 'end' | 'start') => {
+    if (!enabledVisibleOptions.length) return
+    if (boundary === 'start') {
+      setActiveValue(enabledVisibleOptions[0].value)
+      return
+    }
+    if (boundary === 'end') {
+      setActiveValue(enabledVisibleOptions[enabledVisibleOptions.length - 1].value)
+      return
+    }
+    const currentIndex = enabledVisibleOptions.findIndex((option) => option.value === activeValue)
+    const nextIndex = currentIndex < 0
+      ? direction === 1 ? 0 : enabledVisibleOptions.length - 1
+      : (currentIndex + direction + enabledVisibleOptions.length) % enabledVisibleOptions.length
+    setActiveValue(enabledVisibleOptions[nextIndex].value)
+  }
+
+  const handleTriggerKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (disabled) return
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      if (!open) openMenu(selectedValue, searchEnabled)
+      else moveActive(event.key === 'ArrowDown' ? 1 : -1)
+      return
+    }
+    if (event.key === 'Home' && open) {
+      event.preventDefault()
+      moveActive(1, 'start')
+      return
+    }
+    if (event.key === 'End' && open) {
+      event.preventDefault()
+      moveActive(1, 'end')
+      return
+    }
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault()
+      if (open && activeValue) commitValue(activeValue)
+      else openMenu(selectedValue, searchEnabled)
+      return
+    }
+    if (event.key === 'Escape' && open) {
+      event.preventDefault()
+      closeMenu()
+      return
+    }
+    if (event.key === 'Tab' && open) {
+      closeMenu()
+      return
+    }
+    if (!open && !searchEnabled && event.key.length === 1 && !event.altKey && !event.ctrlKey && !event.metaKey) {
+      typeaheadRef.current += event.key.toLocaleLowerCase('zh-CN')
+      if (typeaheadTimerRef.current !== null) window.clearTimeout(typeaheadTimerRef.current)
+      typeaheadTimerRef.current = window.setTimeout(() => { typeaheadRef.current = '' }, 650)
+      const match = options.find((option) => !option.disabled && option.label.toLocaleLowerCase('zh-CN').startsWith(typeaheadRef.current))
+      if (match) commitValue(match.value)
+    }
+  }
+
+  const handleSearchKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.nativeEvent.isComposing) return
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      moveActive(event.key === 'ArrowDown' ? 1 : -1)
+      return
+    }
+    if (event.key === 'Enter' && activeValue) {
+      event.preventDefault()
+      commitValue(activeValue)
+      return
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      closeMenu(true)
+      return
+    }
+    if (event.key === 'Tab') {
+      event.preventDefault()
+      const backward = event.shiftKey
+      closeMenu()
+      window.requestAnimationFrame(() => focusAdjacentControl(backward))
+    }
+  }
+
+  const dropdown = open && typeof document !== 'undefined' ? createPortal(
+    <div
+      className="select-menu"
+      data-placement={menuPosition.placement}
+      ref={menuRef}
+      style={{
+        left: menuPosition.left,
+        maxHeight: menuPosition.maxHeight,
+        top: menuPosition.top,
+        width: menuPosition.width,
       }}
-      ref={selectRef}
-      title={props.title ?? selectedLabel}
-    >{children}</select>
-    <span aria-hidden="true" className="select-control__value" title={selectedLabel}>{selectedLabel}</span>
-    <ChevronDown aria-hidden="true" className="select-control__chevron" size={14} strokeWidth={1.8} />
-  </span>
+    >
+      {searchEnabled ? (
+        <div className="select-menu__search">
+          <Search aria-hidden="true" size={15} />
+          <input
+            aria-activedescendant={activeOptionId}
+            aria-autocomplete="list"
+            aria-controls={listboxId}
+            aria-label={`搜索${ariaLabel ?? '选项'}`}
+            autoComplete="off"
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={handleSearchKeyDown}
+            placeholder="搜索选项"
+            ref={searchRef}
+            type="search"
+            value={query}
+          />
+          {query ? <button aria-label="清空搜索" onClick={() => setQuery('')} type="button"><X size={13} /></button> : null}
+        </div>
+      ) : null}
+      <div
+        aria-label={ariaLabel ?? selectedLabel}
+        className="select-menu__viewport"
+        id={listboxId}
+        role="listbox"
+      >
+        {visibleOptions.length ? visibleOptions.map((option, index) => {
+          const showGroup = Boolean(option.group && option.group !== visibleOptions[index - 1]?.group)
+          const selected = option.value === selectedValue
+          const active = option.value === activeValue && !option.disabled
+          return (
+            <Fragment key={`${option.group ?? 'option'}-${option.value}-${index}`}>
+              {showGroup ? <div className="select-menu__group" role="presentation">{option.group}</div> : null}
+              <div
+                aria-disabled={option.disabled || undefined}
+                aria-selected={selected}
+                className={`select-menu__option${active ? ' is-active' : ''}${selected ? ' is-selected' : ''}${option.disabled ? ' is-disabled' : ''}`}
+                data-active={active || undefined}
+                id={`${listboxId}-option-${index}`}
+                onClick={() => commitValue(option.value)}
+                onMouseEnter={() => { if (!option.disabled) setActiveValue(option.value) }}
+                onPointerDown={(event) => { if (event.pointerType === 'mouse') event.preventDefault() }}
+                role="option"
+                title={option.label}
+              >
+                <span aria-hidden="true" className="select-menu__indicator">{selected ? <Check size={14} strokeWidth={2.3} /> : null}</span>
+                <span className="select-menu__option-label">{option.label}</span>
+                {selected ? <small>当前</small> : null}
+              </div>
+            </Fragment>
+          )
+        }) : (
+          <div aria-live="polite" className="select-menu__empty" role="status">
+            <Search aria-hidden="true" size={16} />
+            <span>没有匹配的选项</span>
+            <small>换个关键词试试</small>
+          </div>
+        )}
+      </div>
+      <div aria-hidden="true" className="select-menu__hint">
+        {searchEnabled ? `${visibleOptions.length} 个选项` : '↑↓ 移动 · Enter 选择 · Esc 关闭'}
+      </div>
+    </div>,
+    document.body,
+  ) : null
+
+  return (
+    <span className={`select-control${open ? ' is-open' : ''}${disabled ? ' is-disabled' : ''}`}>
+      <button
+        aria-activedescendant={open && !searchEnabled ? activeOptionId : undefined}
+        aria-controls={open ? listboxId : undefined}
+        aria-describedby={ariaDescribedBy}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        aria-label={ariaLabel}
+        aria-labelledby={ariaLabelledBy}
+        className={`select-control__trigger ${className}`}
+        disabled={disabled}
+        id={triggerId}
+        onClick={() => open ? closeMenu() : openMenu()}
+        onKeyDown={handleTriggerKeyDown}
+        ref={triggerRef}
+        role="combobox"
+        title={title ?? selectedLabel}
+        type="button"
+      >
+        <span className="select-control__value">{selectedLabel}</span>
+        <ChevronDown aria-hidden="true" className="select-control__chevron" size={15} strokeWidth={1.9} />
+      </button>
+      <select
+        {...nativeProps}
+        aria-hidden="true"
+        className="select-control__native"
+        disabled={disabled}
+        id={`${triggerId}--native`}
+        onChange={(event) => {
+          if (!controlled) setInternalValue(event.currentTarget.value)
+          onChange?.(event)
+        }}
+        ref={selectRef}
+        tabIndex={-1}
+        value={selectedValue}
+      >
+        {children}
+      </select>
+      {dropdown}
+    </span>
+  )
 }
 
 const statusMeta: Record<string, { label: string; tone: string; icon: ReactNode }> = {
   DRAFT: { label: '草稿', tone: 'neutral', icon: <CircleDot size={12} /> },
+  BRIEF_LOCKED: { label: '简报已锁定', tone: 'neutral', icon: <LockKeyhole size={12} /> },
   READY: { label: '待开始', tone: 'neutral', icon: <CircleDot size={12} /> },
   QUEUED: { label: '排队中', tone: 'info', icon: <LoaderCircle size={12} /> },
   GENERATING: { label: '生成中', tone: 'info', icon: <LoaderCircle size={12} className="spin" /> },
+  GENERATING_DOSSIER: { label: '身份档案生成中', tone: 'info', icon: <LoaderCircle size={12} className="spin" /> },
   GENERATED: { label: '已生成', tone: 'info', icon: <Check size={12} /> },
   PENDING_REVIEW: { label: '待审核', tone: 'warning', icon: <AlertTriangle size={12} /> },
   APPROVED: { label: '已批准', tone: 'success', icon: <Check size={12} /> },
@@ -94,6 +522,7 @@ const statusMeta: Record<string, { label: string; tone: string; icon: ReactNode 
   READY_FOR_REVIEW: { label: '待审核', tone: 'warning', icon: <AlertTriangle size={12} /> },
   RESTRICTED_DEMO: { label: '仅限演示', tone: 'warning', icon: <AlertTriangle size={12} /> },
   SELECTED: { label: '已选择', tone: 'info', icon: <Check size={12} /> },
+  SUPERSEDED: { label: '历史版本', tone: 'neutral', icon: <CircleDot size={12} /> },
   STORYBOARDING: { label: '分镜生成中', tone: 'info', icon: <LoaderCircle size={12} className="spin" /> },
   SYNTHETIC_ALLOWED: { label: '允许合成', tone: 'success', icon: <Check size={12} /> },
   SYNTHETIC_OWNED: { label: '自有合成素材', tone: 'success', icon: <Check size={12} /> },
@@ -110,11 +539,25 @@ export function getStatusLabel(status: string): string {
   return statusMeta[status]?.label ?? status
 }
 
-export function StatusBadge({ status, label }: { status: string; label?: string }) {
+export function StatusBadge({
+  status,
+  label,
+  description,
+}: {
+  status: string
+  label?: string
+  description?: string
+}) {
   const meta = statusMeta[status] ?? statusMeta.DRAFT
   const displayLabel = label ?? meta.label
   return (
-    <span className={`status-badge status-badge--${meta.tone}`} data-tone={meta.tone} title={displayLabel}>
+    <span
+      aria-label={description}
+      className={`status-badge status-badge--${meta.tone}`}
+      data-tone={meta.tone}
+      role={description ? 'status' : undefined}
+      title={description ?? displayLabel}
+    >
       {meta.icon}
       {displayLabel}
     </span>

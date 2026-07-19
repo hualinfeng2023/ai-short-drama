@@ -5,10 +5,6 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from httpx import AsyncClient
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
 from app.config import get_settings
 from app.db.models import (
     Asset,
@@ -41,6 +37,9 @@ from app.services.jobs import (
     update_job_diagnostics,
     update_job_progress,
 )
+from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 pytestmark = pytest.mark.anyio
 
@@ -1233,6 +1232,131 @@ async def test_cancel_retry_and_worker_completion(client: AsyncClient) -> None:
     completed = (await client.get(f"/api/v1/jobs/{job_id}")).json()["data"]
     assert completed["status"] == "SUCCEEDED"
     assert completed["attempt"] == 1
+
+
+async def test_failed_job_exposes_and_executes_recovery_actions(client: AsyncClient) -> None:
+    with Session(get_engine(get_settings().database_url)) as session:
+        job, _ = enqueue_job(
+            session,
+            project_id=PROJECT_ID,
+            job_type="DEMO_RENDER",
+            entity_type="project",
+            entity_id=PROJECT_ID,
+            idempotency_key="test:graceful-job-recovery",
+            input_payload={"steps": 4},
+            label="优雅恢复测试",
+            stage="等待渲染",
+            trace_id="graceful-job-recovery-trace",
+            retryable=True,
+        )
+        session.commit()
+        claimed = claim_next_job(session, "graceful-recovery-worker", 15)
+        assert claimed is not None and claimed.id == job.id
+        claimed.progress = 64
+        claimed.stage = "生成主镜头"
+        claimed.attempt = claimed.max_attempts
+        claimed.output_json = json.dumps(
+            {"completed_shot_ids": ["shot-01", "shot-02"]},
+            ensure_ascii=False,
+        )
+        session.commit()
+        finish_job_failure(
+            session,
+            job_id=job.id,
+            worker_id="graceful-recovery-worker",
+            code="MODEL_TEMPORARY_FAILURE",
+            message="主镜头生成暂时失败",
+            details={
+                "completed_steps": ["解析脚本", "生成关键帧"],
+                "failed_step": "生成主镜头",
+                "failed_parts": ["shot-03"],
+                "unreliable_outputs": ["shot-03 的视频和后续时间线"],
+            },
+            retryable=True,
+        )
+        job_id = job.id
+
+    failed = (await client.get(f"/api/v1/jobs/{job_id}")).json()["data"]
+    recovery = failed["error_details"]["recovery"]
+    assert recovery["completion_state"] == "PARTIAL"
+    assert recovery["completed_percent"] == 64
+    assert recovery["intermediate_result_saved"] is True
+    assert recovery["failed_parts"] == ["shot-03"]
+    assert "RETRY_FAILED_PARTS" in recovery["available_actions"]
+    assert recovery["unreliable_outputs"] == ["shot-03 的视频和后续时间线"]
+
+    saved = await client.post(
+        f"/api/v1/jobs/{job_id}/recovery",
+        json={"action": "SAVE_INTERMEDIATE"},
+        headers={"Idempotency-Key": "save-intermediate-v1"},
+    )
+    assert saved.status_code == 200
+    assert saved.json()["data"]["status"] == "FAILED"
+    assert saved.json()["data"]["error_details"]["recovery"]["intermediate_result_saved"] is True
+
+    handoff = await client.post(
+        f"/api/v1/jobs/{job_id}/recovery",
+        json={"action": "ESCALATE_HUMAN", "note": "请检查主镜头连续性"},
+        headers={"Idempotency-Key": "handoff-job-v1"},
+    )
+    assert handoff.status_code == 200
+    assert handoff.json()["data"]["stage"] == "等待人工处理"
+    assert handoff.json()["data"]["error_details"]["recovery"]["handoff_status"] == "REQUESTED"
+
+    resumed = await client.post(
+        f"/api/v1/jobs/{job_id}/recovery",
+        json={"action": "RETRY_FAILED_PARTS"},
+        headers={"Idempotency-Key": "retry-failed-parts-v1"},
+    )
+    assert resumed.status_code == 200
+    assert resumed.json()["data"]["status"] == "RETRY_WAIT"
+    assert resumed.json()["data"]["progress"] == 64
+    with Session(get_engine(get_settings().database_url)) as session:
+        persisted = session.get(Job, job_id)
+        assert persisted is not None
+        directive = json.loads(persisted.input_json)["_recovery"]
+        assert directive["action"] == "RETRY_FAILED_PARTS"
+        assert directive["failed_part_ids"] == ["shot-03"]
+        assert persisted.output_json is not None
+
+    worker = PersistentJobWorker(get_settings())
+    assert await worker.run_once() is True
+    recovered = (await client.get(f"/api/v1/jobs/{job_id}")).json()["data"]
+    assert recovered["status"] == "SUCCEEDED"
+    assert recovered["stage"] == "恢复后已完成"
+    assert recovered["error_details"]["recovery"]["completion_state"] == "RECOVERED"
+
+    with Session(get_engine(get_settings().database_url)) as session:
+        fallback_job, _ = enqueue_job(
+            session,
+            project_id=PROJECT_ID,
+            job_type="DEMO_RENDER",
+            entity_type="project",
+            entity_id=PROJECT_ID,
+            idempotency_key="test:graceful-fallback-recovery",
+            input_payload={"steps": 1},
+            label="降级执行测试",
+            stage="等待渲染",
+            trace_id="graceful-fallback-recovery-trace",
+            retryable=True,
+        )
+        session.commit()
+        fallback_job_id = fallback_job.id
+    await client.post(
+        f"/api/v1/jobs/{fallback_job_id}/cancel",
+        headers={"Idempotency-Key": "cancel-fallback-job-v1"},
+    )
+    fallback = await client.post(
+        f"/api/v1/jobs/{fallback_job_id}/recovery",
+        json={"action": "FALLBACK_EXECUTION", "strategy": "stability-first"},
+        headers={"Idempotency-Key": "fallback-job-v1"},
+    )
+    assert fallback.status_code == 200
+    assert await worker.run_once() is True
+    degraded = (await client.get(f"/api/v1/jobs/{fallback_job_id}")).json()["data"]
+    assert degraded["stage"] == "已降级完成"
+    assert degraded["error_details"]["recovery"]["completion_state"] == "DEGRADED_SUCCEEDED"
+    assert degraded["error_details"]["recovery"]["unreliable_outputs"]
 
 
 async def test_retry_backoff_and_expired_lease_recovery(client: AsyncClient) -> None:

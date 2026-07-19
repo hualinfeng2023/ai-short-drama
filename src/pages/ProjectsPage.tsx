@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { AlertTriangle, ArrowRight, CalendarDays, Clapperboard, Clock3, LoaderCircle, Plus, RotateCcw, Trash2 } from 'lucide-react'
-import { Link } from 'react-router'
+import { Link, useNavigate } from 'react-router'
 import { calculateProgress } from '../data/demo'
 import { useStudio } from '../store/StudioContext'
 import { useToast } from '../store/ToastContext'
@@ -13,6 +13,7 @@ export function ProjectsPage() {
   const progress = calculateProgress(project.shots)
   const featureImage = project.shots.find((shot) => shot.currentImageUrl)?.currentImageUrl
   const { notify } = useToast()
+  const navigate = useNavigate()
   const [pendingDelete, setPendingDelete] = useState<ProjectSummary | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
@@ -117,7 +118,16 @@ export function ProjectsPage() {
           </div>
           {projectSummaries.map((item) => {
             const itemProgress = item.id === project.id ? progress : 0
-            return <div className="project-table__row" key={item.id} role="row">
+            const itemHref = item.id === project.id
+              ? `/projects/${item.id}/episodes/${project.episodeId}`
+              : `/projects/${item.id}`
+            return <div
+              className="project-table__row project-table__row--clickable"
+              key={item.id}
+              onClick={() => navigate(itemHref)}
+              role="row"
+              title={`打开${item.name}`}
+            >
               <span className="project-table__name">
                 <span className="project-monogram">{item.name.slice(0, 1)}</span>
                 <span><strong>{item.name}</strong><small>{localizeDisplayText(item.genre)}</small></span>
@@ -131,7 +141,8 @@ export function ProjectsPage() {
                   aria-label={`删除${item.name}`}
                   className="project-table__delete"
                   disabled={item.id === project.id}
-                  onClick={() => {
+                  onClick={(event) => {
+                    event.stopPropagation()
                     setDeleteError(null)
                     setPendingDelete(item)
                   }}
@@ -140,7 +151,7 @@ export function ProjectsPage() {
                 >
                   <Trash2 size={16} />
                 </button>
-                <Link aria-label={`打开${item.name}`} to={`/projects/${item.id}`}>
+                <Link aria-label={`打开${item.name}`} onClick={(event) => event.stopPropagation()} to={itemHref}>
                   <ArrowRight size={17} />
                 </Link>
               </span>

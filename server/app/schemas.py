@@ -269,6 +269,11 @@ class ProjectNameSuggestionRequest(BaseModel):
     production_format: ProductionFormat = "live_action"
     primary_market: str = Field(default="CN", min_length=2, max_length=16)
     canonical_language: str = Field(default="zh-CN", min_length=2, max_length=24)
+    target_duration_sec: int = Field(default=60, ge=45, le=90)
+    aspect_ratio: Literal["9:16", "16:9"] = "9:16"
+    target_platform: str = Field(default="douyin", min_length=1, max_length=40)
+    content_requirements: list[str] = Field(default_factory=list, max_length=40)
+    content_avoidances: list[str] = Field(default_factory=list, max_length=40)
 
 
 class ProjectNameSuggestionRead(BaseModel):
@@ -643,6 +648,33 @@ class JobRead(OrmModel):
         return aware.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
+class JobRecoveryRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    action: Literal[
+        "RESUME_FROM_FAILURE",
+        "RETRY_FAILED_PARTS",
+        "SWITCH_MODEL",
+        "FALLBACK_EXECUTION",
+        "SAVE_INTERMEDIATE",
+        "PROVIDE_INPUT",
+        "ESCALATE_HUMAN",
+    ]
+    failed_part_ids: list[str] = Field(default_factory=list, max_length=100)
+    model: str | None = Field(default=None, max_length=120)
+    strategy: str | None = Field(default=None, max_length=120)
+    additional_input: str | None = Field(default=None, max_length=4000)
+    note: str | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_action_payload(self) -> "JobRecoveryRequest":
+        if self.action == "PROVIDE_INPUT" and not self.additional_input:
+            raise ValueError("补充信息不能为空")
+        if self.action == "SWITCH_MODEL" and not (self.model or self.strategy):
+            raise ValueError("切换模型或方案时至少需要提供一个目标")
+        return self
+
+
 class ProposalGenerateRequest(BaseModel):
     expected_version: int = Field(ge=1)
 
@@ -731,6 +763,42 @@ class ScriptLineUpdateRequest(BaseModel):
         return self
 
 
+class ScriptExcerptRewriteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    expected_version: int = Field(ge=1)
+    selection_start: int = Field(ge=0)
+    selection_end: int = Field(ge=1)
+    action: Literal[
+        "REWRITE",
+        "SHORTEN",
+        "INTENSIFY_CONFLICT",
+        "ADJUST_TONE",
+        "CUSTOM",
+    ]
+    custom_instruction: str | None = Field(default=None, max_length=500)
+    tone: str | None = Field(default=None, max_length=80)
+    parent_revision_id: str | None = Field(default=None, min_length=36, max_length=36)
+
+    @model_validator(mode="after")
+    def validate_rewrite_instruction(self) -> "ScriptExcerptRewriteRequest":
+        if self.selection_end <= self.selection_start:
+            raise ValueError("选区结束位置必须晚于开始位置")
+        if self.action == "CUSTOM" and not self.custom_instruction:
+            raise ValueError("自定义改写需要填写要求")
+        if self.action == "ADJUST_TONE" and not self.tone:
+            raise ValueError("调整语气需要选择目标语气")
+        return self
+
+
+class ScriptExcerptRewriteApplyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    expected_version: int = Field(ge=1)
+    script_id: str = Field(min_length=36, max_length=36)
+    line_id: str = Field(min_length=36, max_length=36)
+
+
 class GenericReviewDecisionRequest(BaseModel):
     expected_version: int = Field(ge=1)
     decision: Literal["APPROVE", "REJECT"]
@@ -781,6 +849,21 @@ class FamilyKinshipPayload(BaseModel):
         "UNKNOWN",
     ] = "UNKNOWN"
     upbringing_context: str | None = Field(default=None, max_length=1000)
+
+
+class RelationshipUpbringingSuggestionRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    family_kinship: FamilyKinshipPayload
+    surface_relationship: str = Field(min_length=1, max_length=2000)
+    true_relationship: str = Field(min_length=1, max_length=2000)
+
+
+class RelationshipUpbringingSuggestionRead(BaseModel):
+    suggestion: str = Field(min_length=20, max_length=1000)
+    provider: str
+    model: str
+    warning: str | None = None
 
 
 class RelationshipEdgePayload(BaseModel):
@@ -1106,10 +1189,20 @@ class CharacterVisualProfileConfirmRequest(BaseModel):
 
 
 class CharacterCandidateGenerateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
     expected_version: int = Field(ge=1)
     profile_version_id: str = Field(min_length=36, max_length=36)
     count: int = Field(default=3, ge=1, le=3)
+    source_candidate_id: str | None = Field(default=None, min_length=36, max_length=36)
+    refinement_note: str | None = Field(default=None, max_length=500)
     actor: str = Field(default="创作者", min_length=1, max_length=80)
+
+    @model_validator(mode="after")
+    def validate_refinement(self) -> "CharacterCandidateGenerateRequest":
+        if bool(self.source_candidate_id) != bool(self.refinement_note):
+            raise ValueError("微调生成必须同时提供来源候选和调整说明")
+        return self
 
 
 class CharacterCandidateSelectRequest(BaseModel):
@@ -1121,6 +1214,19 @@ class CharacterCandidateSelectRequest(BaseModel):
 class CharacterIdentityLockRequest(BaseModel):
     expected_version: int = Field(ge=1)
     identity_version_id: str = Field(min_length=36, max_length=36)
+    actor: str = Field(default="创作者", min_length=1, max_length=80)
+
+
+class CharacterIdentityRestoreRequest(CharacterIdentityLockRequest):
+    pass
+
+
+class CharacterIdentityViewGenerateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    expected_version: int = Field(ge=1)
+    view_type: Literal["FRONT", "THREE_QUARTER", "PROFILE", "FULL_BODY", "EXPRESSIONS"]
+    refinement_note: str | None = Field(default=None, min_length=4, max_length=300)
     actor: str = Field(default="创作者", min_length=1, max_length=80)
 
 

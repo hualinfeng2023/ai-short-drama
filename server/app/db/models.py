@@ -490,6 +490,49 @@ class ScriptLine(Base):
     localization_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
+class ScriptExcerptRevision(Base):
+    __tablename__ = "script_excerpt_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "episode_ordinal",
+            "scene_ordinal",
+            "line_ordinal",
+            "version",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    base_script_version_id: Mapped[str] = mapped_column(
+        ForeignKey("script_versions.id"), index=True
+    )
+    base_line_id: Mapped[str] = mapped_column(ForeignKey("script_lines.id"), index=True)
+    parent_revision_id: Mapped[str | None] = mapped_column(
+        ForeignKey("script_excerpt_revisions.id"), nullable=True, index=True
+    )
+    applied_script_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("script_versions.id"), nullable=True, index=True
+    )
+    episode_ordinal: Mapped[int] = mapped_column(Integer)
+    scene_ordinal: Mapped[int] = mapped_column(Integer)
+    line_ordinal: Mapped[int] = mapped_column(Integer)
+    version: Mapped[int] = mapped_column(Integer)
+    selection_start: Mapped[int] = mapped_column(Integer)
+    selection_end: Mapped[int] = mapped_column(Integer)
+    original_text: Mapped[str] = mapped_column(Text)
+    proposed_text: Mapped[str] = mapped_column(Text)
+    action: Mapped[str] = mapped_column(String(32), index=True)
+    custom_instruction: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tone: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    rationale: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    provider: Mapped[str] = mapped_column(String(48))
+    model: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class Asset(Base):
     __tablename__ = "assets"
     __table_args__ = (UniqueConstraint("project_id", "sha256", "kind"),)
