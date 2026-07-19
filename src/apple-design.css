@@ -1733,7 +1733,7 @@ summary:focus-visible,
     display: grid;
     min-height: 0;
     grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-rows: auto auto auto auto;
+    grid-template-rows: repeat(7, auto);
     gap: 14px 10px;
     margin-bottom: 12px;
     padding: 18px 16px;
@@ -1744,9 +1744,13 @@ summary:focus-visible,
     box-shadow: var(--shadow);
   }
   .task-list__lead { grid-column: 1; grid-row: 1; }
-  .task-list__stage { grid-column: 1 / -1; grid-row: 2; }
-  .task-list__timing { grid-column: 1 / -1; grid-row: 3; flex-direction: row; flex-wrap: wrap; }
-  .task-list__actions { grid-column: 1 / -1; grid-row: 4; justify-content: flex-start; }
+  .task-list__source { grid-column: 1 / -1; grid-row: 2; }
+  .task-list__created { grid-column: 1 / -1; grid-row: 3; }
+  .task-list__id { grid-column: 1 / -1; grid-row: 4; width: fit-content; }
+  .task-list__stage { grid-column: 1 / -1; grid-row: 5; }
+  .task-list__status { grid-column: 2; grid-row: 1; justify-self: end; }
+  .task-list__timing { grid-column: 1 / -1; grid-row: 6; flex-direction: row; flex-wrap: wrap; }
+  .task-list__actions { grid-column: 1 / -1; grid-row: 7; justify-content: flex-start; }
   .task-list__actions .button { flex: 1 1 auto; min-height: 42px; }
 
   .review-grid article { grid-template-columns: 1fr; }

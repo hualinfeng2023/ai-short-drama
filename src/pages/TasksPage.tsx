@@ -246,7 +246,10 @@ export function TasksPage() {
     {error ? <div className="brief-save-message brief-save-message--error" role="alert">{error}<Button onClick={refresh} size="sm" variant="ghost"><RotateCcw size={14} />重试读取</Button></div> : null}
     {loading ? <div className="brief-page-state"><LoaderCircle className="spin" size={20} />正在读取持久化任务…</div> : null}
     <section className="task-list">
-      <div className="task-list__header" aria-hidden="true"><span>任务</span><span>进度</span><span>用时</span><span /></div>
+      <div className="task-list__header" aria-hidden="true">
+        <span>任务</span><span>来源</span><span>创建时间</span><span>任务 ID</span>
+        <span>当前步骤</span><span>状态</span><span>用时</span><span />
+      </div>
       {filtered.map((job) => {
       const active = ACTIVE_JOB_STATUSES.has(job.status)
       const elapsedSeconds = elapsedJobSeconds(job, nowMs)
@@ -259,8 +262,18 @@ export function TasksPage() {
         ? ` · 错误码：${job.errorCode}`
         : ''
       return <article data-active={active || undefined} data-focused={focusedJobType === job.jobType || undefined} key={job.id}>
-        <div className="task-list__lead"><span className={`activity-dot activity-dot--${job.status.toLowerCase()}`} /><div><strong>{localizeDisplayText(job.label)}</strong><small>{taskSourceLabel(job)}{projectId ? '' : ` · 项目 ${job.projectId.slice(0, 8)}`} · {createdLabel(job.createdAt)}</small></div></div>
-        <div className="task-list__stage"><div className={!active ? 'task-list__stage-summary' : undefined}>{active ? <strong title={localizeDisplayText(job.stage)}>{localizeDisplayText(job.stage)}</strong> : null}<span className="task-list__stage-meta">{active ? <span className="task-list__stage-progress">{Math.round(job.progress)}%</span> : null}<StatusBadge status={job.status} /></span></div>{active ? <ProgressBar value={job.progress} /> : job.status === 'SUCCEEDED' ? null : <small>{taskDetail}{visibleErrorCode}</small>}</div>
+        <div className="task-list__lead"><span className={`activity-dot activity-dot--${job.status.toLowerCase()}`} /><div><strong>{localizeDisplayText(job.label)}</strong></div></div>
+        <span className="task-list__source" title={projectId ? taskSourceLabel(job) : `${taskSourceLabel(job)} · 项目 ${job.projectId}`}>{taskSourceLabel(job)}{projectId ? '' : ` · ${job.projectId.slice(0, 8)}`}</span>
+        <span className="task-list__created">{createdLabel(job.createdAt)}</span>
+        <code className="task-list__id" title={job.id}>{job.id.slice(0, 8)}</code>
+        <div className="task-list__stage">
+          <strong title={localizeDisplayText(job.stage)}>{localizeDisplayText(job.stage)}</strong>
+          {active ? <ProgressBar value={job.progress} /> : job.status === 'SUCCEEDED' ? null : <small>{taskDetail}{visibleErrorCode}</small>}
+        </div>
+        <div className="task-list__status">
+          {active ? <span className="task-list__stage-progress">{Math.round(job.progress)}%</span> : null}
+          <StatusBadge status={job.status} />
+        </div>
         <span className="task-list__timing"><span><Clock3 size={14} />{formatElapsedTime(elapsedSeconds)}</span></span>
         <div className="task-list__actions">{active ? <Button disabled={actingJobId === job.id} onClick={() => void cancel(job.id)} size="sm" variant="ghost">{actingJobId === job.id ? <LoaderCircle className="spin" size={15} /> : <Ban size={15} />}取消</Button> : null}{failedGuidance?.secondaryCta ? <Link className="button button--secondary button--sm task-list__cta" to={failedGuidance.secondaryCta.href}>{failedGuidance.secondaryCta.label}<ArrowRight size={14} /></Link> : null}{completedCta ? <Link className="button button--secondary button--sm task-list__cta" to={completedCta.href}>{completedCta.label}<ArrowRight size={14} /></Link> : null}</div>
         <JobRecoveryPanel

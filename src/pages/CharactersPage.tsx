@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Check,
   Dna,
+  Eye,
   GitCompare,
   History,
   LoaderCircle,
@@ -34,7 +35,7 @@ import {
   type CharacterVisualRecord,
   type CharacterVisualWorkspace,
 } from '../api/client'
-import { Button, getStatusLabel, Modal, PageHeader, SelectControl, StatusBadge } from '../components/ui'
+import { Button, getStatusLabel, Modal, PageHeader, StatusBadge } from '../components/ui'
 import { ServiceRequiredState } from '../components/ServiceRequiredState'
 import { buildCharacterVisualSummary } from '../utils/characterVisualSummary'
 import { localizeDisplayText } from '../utils/localizeDisplayText'
@@ -84,6 +85,21 @@ const CANDIDATE_PLACEHOLDERS = [
   { label: '候选方向 3', description: '生成时动态抽取' },
 ] as const
 
+function familyRelationshipLabel(character?: CharacterVisualRecord): string {
+  const role = character?.role ?? ''
+  if (/母亲|妈妈/.test(role)) return '母亲'
+  if (/父亲|爸爸/.test(role)) return '父亲'
+  if (/女儿/.test(role)) return '女儿'
+  if (/儿子/.test(role)) return '儿子'
+  if (/姐姐|姊姊/.test(role)) return '姐姐'
+  if (/妹妹/.test(role)) return '妹妹'
+  if (/哥哥/.test(role)) return '哥哥'
+  if (/弟弟/.test(role)) return '弟弟'
+  if (/祖母|奶奶|外婆/.test(role)) return '祖母'
+  if (/祖父|爷爷|外公/.test(role)) return '祖父'
+  return '亲属'
+}
+
 interface ProfileDraft {
   age: string
   genderExpression: string
@@ -114,7 +130,6 @@ interface ProfileDraft {
   accessories: string
   forbiddenElements: string
   negativeConstraints: string
-  selectedDirection: string
 }
 
 interface IdentityViewAction {
@@ -128,7 +143,10 @@ interface IdentityViewAction {
 }
 
 interface IdentityImageViewer {
+  characterId: string
   characterName: string
+  identityVersionId: string
+  viewType: string
   viewLabel: string
   assetUrl: string
 }
@@ -180,7 +198,6 @@ function profileDraft(character: CharacterVisualRecord): ProfileDraft | null {
     accessories: listText(styling.accessories),
     forbiddenElements: listText(styling.forbidden_elements),
     negativeConstraints: profile.negativeConstraints.join('、'),
-    selectedDirection: profile.selectedDirection ?? 'cinematic',
   }
 }
 
@@ -230,6 +247,7 @@ export function CharactersPage() {
   const [identityViewNote, setIdentityViewNote] = useState('')
   const [identityImageViewer, setIdentityImageViewer] = useState<IdentityImageViewer | null>(null)
   const [identityImageZoom, setIdentityImageZoom] = useState(100)
+  const [identityReviewSelection, setIdentityReviewSelection] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -376,11 +394,31 @@ export function CharactersPage() {
     setIdentityImageZoom(100)
   }
 
-  function jumpToCharacter(characterId: string) {
-    const target = document.getElementById(`character-${characterId}`)
-    if (!target) return
+  function regenerateIdentityImageViewer() {
+    if (!identityImageViewer) return
+    const viewer = identityImageViewer
+    closeIdentityImageViewer()
+    window.setTimeout(() => {
+      openIdentityViewAction({
+        characterId: viewer.characterId,
+        characterName: viewer.characterName,
+        identityVersionId: viewer.identityVersionId,
+        viewType: viewer.viewType,
+        viewLabel: viewer.viewLabel,
+        assetUrl: viewer.assetUrl,
+        mode: 'regenerate',
+      })
+    }, 0)
+  }
+
+  function jumpToCharacter(characterId: string, actionSelector?: string) {
+    const characterCard = document.getElementById(`character-${characterId}`)
+    if (!characterCard) return
+    const target = actionSelector
+      ? characterCard.querySelector<HTMLElement>(actionSelector) ?? characterCard
+      : characterCard
     setActiveCharacterId(characterId)
-    target.focus({ preventScroll: true })
+    characterCard.focus({ preventScroll: true })
     const nextUrl = new URL(window.location.href)
     nextUrl.hash = `character-${characterId}`
     window.history.replaceState(window.history.state, '', nextUrl)
@@ -460,7 +498,6 @@ export function CharactersPage() {
           forbidden_elements: splitItems(draft.forbiddenElements),
         },
         negative_constraints: splitItems(draft.negativeConstraints),
-        selected_direction: draft.selectedDirection,
       })
       setEditingId(null)
       setDraft(null)
@@ -487,7 +524,7 @@ export function CharactersPage() {
 
   return <div className="page page--characters page--character-visuals">
     <PageHeader
-      eyebrow="角色文字设定之后 · 角色形象"
+          eyebrow="角色身份 · 基准管理"
       title="生成并锁定角色身份"
       description="检查角色设定后生成形象，选择满意版本并锁定。系统不会自动生图或采用候选，锁定后才会用于后续剧本与分镜。"
       actions={<><Link className="button button--secondary button--md" to={`/projects/${projectId}/story`}><ArrowLeft size={16} />返回角色文字设定</Link><Button onClick={() => void refresh()} variant="secondary"><RefreshCw size={16} />刷新</Button></>}
@@ -517,10 +554,43 @@ export function CharactersPage() {
           familyConstraint.inheritedFeatures.map((feature) => feature.sourceCharacterName),
         )]
         : []
+      const familySourceReferences = familyConstraint
+        ? [...new Map(
+          familyConstraint.inheritedFeatures.map((feature) => {
+            const sourceCharacter = workspace.characters.find(
+              (item) => item.id === feature.sourceCharacterId,
+            )
+            return [
+              feature.sourceCharacterId,
+              `${familyRelationshipLabel(sourceCharacter)}${feature.sourceCharacterName}`,
+            ]
+          }),
+        ).values()]
+        : []
+      const familyFeatureLabels = familyConstraint
+        ? [...new Set(familyConstraint.inheritedFeatures.map((feature) => feature.label))]
+        : []
+      const relativeToLock = familyConstraint?.status === 'WAITING_FOR_LOCKED_RELATIVE'
+        ? familyConstraint.relationshipEvidence
+          .map((evidence) => workspace.characters.find(
+            (item) => item.characterKey === evidence.relativeCharacterKey,
+          ))
+          .find((item) => item && item.status !== 'LOCKED')
+        : undefined
       const selectedCandidateId = selected[character.id]
       const selectedCandidate = character.candidates.find((item) => item.id === selectedCandidateId)
-      const pendingIdentity = [...character.identities].reverse().find(
+      const latestPendingIdentity = [...character.identities].reverse().find(
         (identity) => ['GENERATING_DOSSIER', 'READY_FOR_REVIEW'].includes(identity.status),
+      )
+      const selectedReviewIdentity = character.identities.find(
+        (identity) => (
+          identity.id === identityReviewSelection[character.id]
+          && ['GENERATING_DOSSIER', 'READY_FOR_REVIEW'].includes(identity.status)
+        ),
+      )
+      const pendingIdentity = selectedReviewIdentity ?? latestPendingIdentity
+      const viewingReplacedIdentity = Boolean(
+        pendingIdentity && latestPendingIdentity && pendingIdentity.id !== latestPendingIdentity.id,
       )
       const pendingIdentityAssets = new Map(
         pendingIdentity?.assets.map((asset) => [asset.viewType, asset]) ?? [],
@@ -572,12 +642,11 @@ export function CharactersPage() {
         </header>
 
         {profile ? <section className="character-profile-summary">
-          <div className="character-profile-summary__heading"><div><span>系统自动整理 · 第 {profile.version} 版</span><strong>角色设定摘要</strong></div><Button disabled={generating || busy !== null} onClick={() => edit(character)} size="sm" variant="secondary"><Pencil size={14} />调整设定</Button></div>
+          <div className="character-profile-summary__heading"><div><strong>角色设定摘要</strong><span>第 {profile.version} 版</span></div><Button disabled={generating || busy !== null} onClick={() => edit(character)} size="sm" variant="secondary"><Pencil size={14} />调整设定</Button></div>
           <p className="character-profile-summary__line">{profileSummary}</p>
           <details className="character-profile-details" open={blockers.length > 0}>
             <summary>查看完整设定与一致性检查</summary>
             <dl><div><dt>身份</dt><dd>{profile.identityFields.region} · {profile.identityFields.era} · {profile.identityFields.social_class}</dd></div><div><dt>外貌</dt><dd>{profile.appearanceFields.face_shape}；{profile.appearanceFields.identifying_features}</dd></div><div><dt>可见性格</dt><dd>{profile.personalityVisualization.expression}；{profile.personalityVisualization.gaze}</dd></div><div><dt>造型</dt><dd>{String(profile.stylingFields.wardrobe)}；{String(profile.stylingFields.colors)}</dd></div></dl>
-            <div className="character-direction-list">{profile.recommendedDirections.map((direction) => <span className={direction.key === profile.selectedDirection ? 'is-selected' : ''} key={direction.key}><strong>{direction.label}</strong><small>{direction.reason}</small></span>)}</div>
             <div className="character-profile-audit"><strong><ShieldCheck size={15} />一致性检查</strong><ul>{profile.conflictReport.map((issue) => <li data-severity={issue.severity.toLowerCase()} key={issue.code}><span>{issue.message}</span><small>{issue.suggestion}</small></li>)}</ul></div>
           </details>
         </section> : null}
@@ -586,40 +655,52 @@ export function CharactersPage() {
           <header>
             <div className="character-family-constraint__title">
               <span><Dna size={18} /></span>
-              <div><small>血缘身份约束 · V{familyConstraint.version}</small><strong>家族特征继承</strong></div>
+              <strong>家族相似性</strong>
             </div>
-            <em><i />{familyConstraint.status === 'ACTIVE' ? '生效中' : '等待建立基准'}</em>
+            {familyConstraint.status === 'WAITING_FOR_LOCKED_RELATIVE' ? <em><i />等待亲属基准</em> : null}
           </header>
           {familyConstraint.status === 'ACTIVE' ? <>
-            <div className="character-family-constraint__body">
-              <div className="character-family-overview">
-                <span>相似强度</span>
-                <strong>{familySimilarity.label}</strong>
-                <div aria-label={`家族相似强度：${familySimilarity.label}`} className="character-family-meter">
-                  {[1, 2, 3, 4].map((step) => <i className={step <= familySimilarity.strength ? 'is-active' : ''} key={step} />)}
+            <p className="character-family-conclusion">
+              生成{character.name}时，将参考{familySourceReferences.join('、') || '已锁定亲属'}的{familyFeatureLabels.join('和')}，保持{familySimilarity.label}，但不会复制五官或覆盖已锁定身份。
+            </p>
+            <dl className="character-family-facts">
+              <div><dt>来源</dt><dd>{familySources.join('、') || '待确认'}</dd></div>
+              <div><dt>继承特征</dt><dd>{familyFeatureLabels.join('、') || '待确认'}</dd></div>
+            </dl>
+            <div className="character-family-actions">
+              <Link className="button button--secondary button--sm" to={`/projects/${projectId}/story#relationship-review`}>
+                <SlidersHorizontal size={14} />调整相似度
+              </Link>
+              <details className="character-family-rules">
+                <summary className="button button--ghost button--sm"><ShieldCheck size={14} />查看规则</summary>
+                <div>
+                  <p><strong>系统详情</strong><span>约束版本 V{familyConstraint.version} · {familySimilarity.label}</span></p>
+                  <ul className="character-family-rule-traits">
+                    {familyConstraint.inheritedFeatures.map((feature) => <li key={`${feature.field}-${feature.sourceIdentityVersionId}`}><strong>{feature.label}</strong><span>{feature.value}</span><small>来源：{feature.sourceCharacterName}</small></li>)}
+                  </ul>
+                  <strong>生成边界</strong>
+                  <ul>{familyConstraint.independenceConstraints.map((item) => <li key={item}>{item}</li>)}</ul>
+                  {character.status === 'LOCKED' ? <small>当前角色已锁定，调整只影响未来生成。</small> : null}
                 </div>
-                <small><b>{familyConstraint.inheritedFeatures.length}</b> 项特征 · 来源 {familySources.join('、') || '待确认'}</small>
-              </div>
-              <div className="character-family-traits">
-                {familyConstraint.inheritedFeatures.map((feature, index) => <article key={`${feature.field}-${feature.sourceIdentityVersionId}`}>
-                  <span>{String(index + 1).padStart(2, '0')}</span>
-                  <div><strong>{feature.label}</strong><p>{feature.value}</p></div>
-                  <em>源自 {feature.sourceCharacterName}</em>
-                </article>)}
-              </div>
-            </div>
-            <footer>
-              <ShieldCheck size={17} />
-              <div><strong>继承特征，不复制身份</strong><small>{familyConstraint.temperamentAffinity.instruction}</small></div>
-              {character.status === 'LOCKED' ? <span>仅影响未来生成</span> : null}
-              <details>
-                <summary>查看生成边界</summary>
-                <ul>{familyConstraint.independenceConstraints.map((item) => <li key={item}>{item}</li>)}</ul>
               </details>
-            </footer>
+            </div>
           </> : <div className="character-family-waiting">
             <LockKeyhole size={18} />
-            <div><strong>先锁定一位亲属，系统再提取稳定家族特征</strong><small>不会自动生图，也不会覆盖已有角色身份或镜头。</small></div>
+            <div className="character-family-waiting__copy">
+              <strong>先锁定一位亲属，系统才会提取稳定家族特征，不会自动生图或覆盖已有内容。</strong>
+            </div>
+            {relativeToLock ? <Button
+              aria-label={`去完成${relativeToLock.name}的角色基准锁定`}
+              className="character-family-waiting__action"
+              onClick={() => jumpToCharacter(
+                relativeToLock.id,
+                '[data-character-lock-action="true"], .character-identity-dossier, .character-candidate-section',
+              )}
+              size="sm"
+              variant="secondary"
+            >
+              <UserRoundCheck size={14} />去锁定{relativeToLock.name}
+            </Button> : null}
           </div>}
         </section> : null}
 
@@ -655,7 +736,6 @@ export function CharactersPage() {
             <label>配饰<input onChange={(event) => setDraft({ ...draft, accessories: event.target.value })} value={draft.accessories} /></label>
             <label className="is-wide">禁止元素<input onChange={(event) => setDraft({ ...draft, forbiddenElements: event.target.value })} value={draft.forbiddenElements} /></label>
             <label className="is-wide">负面约束<textarea onChange={(event) => setDraft({ ...draft, negativeConstraints: event.target.value })} rows={2} value={draft.negativeConstraints} /></label>
-            <label>视觉方向<SelectControl aria-label="视觉方向" onChange={(event) => setDraft({ ...draft, selectedDirection: event.target.value })} value={draft.selectedDirection}>{(profile?.recommendedDirections ?? []).map((direction) => <option key={direction.key} value={direction.key}>{direction.label}</option>)}</SelectControl></label>
           </div>
           <footer><Button onClick={() => { setEditingId(null); setDraft(null) }} variant="secondary">取消</Button><Button disabled={busy !== null} onClick={() => void saveProfile(character)}>{busy === `save-${character.id}` ? <LoaderCircle className="spin" size={15} /> : <ShieldCheck size={15} />}保存并重新审核</Button></footer>
         </section> : null}
@@ -666,7 +746,7 @@ export function CharactersPage() {
           {character.candidates.length ? <div className="character-candidate-collection">
             <div className={`character-candidate-grid ${compare[character.id] ? 'is-comparing' : ''}`}>{latestCandidates.map((candidate) => {
               const batchVersion = candidateBatchVersions.get(candidate.batchId ?? '')
-              return <button aria-pressed={selectedCandidateId === candidate.id} className={`character-candidate ${selectedCandidateId === candidate.id ? 'character-candidate--selected' : ''}`} disabled={generating || candidate.profileVersionId !== profile.id} key={candidate.id} onClick={() => setSelected((current) => ({ ...current, [character.id]: candidate.id }))}><img alt={`${character.name} 形象候选 ${candidate.ordinal}`} src={candidate.assetUrl} /><span><strong>{candidate.variantLabel ?? `候选 ${candidate.ordinal}`}</strong><small className="character-candidate__description">{candidate.variantDescription ?? '统一构图角色胸像'}</small><small>第 {batchVersion ?? 1} 批 · 候选 {candidate.ordinal}</small></span>{selectedCandidateId === candidate.id ? <em><Check size={15} />已选择</em> : null}</button>
+              return <button aria-pressed={selectedCandidateId === candidate.id} className={`character-candidate ${selectedCandidateId === candidate.id ? 'character-candidate--selected' : ''}`} disabled={generating || candidate.profileVersionId !== profile.id} key={candidate.id} onClick={() => setSelected((current) => ({ ...current, [character.id]: candidate.id }))}><img alt={`${character.name} 形象候选 ${candidate.ordinal}`} src={candidate.assetUrl} /><span><strong>{candidate.variantLabel ?? `候选 ${candidate.ordinal}`}</strong><small>第 {batchVersion ?? 1} 批 · 候选 {candidate.ordinal}</small></span>{selectedCandidateId === candidate.id ? <em><Check size={15} />已选择</em> : null}</button>
             })}</div>
             {historicalCandidates.length ? <section className="character-candidate-history"><header><strong>历史候选</strong><small>{historicalCandidates.length} 张</small></header><div className="character-candidate-history__grid">{historicalCandidates.map((candidate) => {
               const batchVersion = candidateBatchVersions.get(candidate.batchId ?? '')
@@ -688,8 +768,8 @@ export function CharactersPage() {
           {selectedCandidate && !selectedHasIdentity && !generating ? <footer><div><strong>已选“{selectedCandidate.variantLabel ?? `候选 ${selectedCandidate.ordinal}`}”</strong><small>下一步会生成多角度检查图，确认五官、年龄感、体型和识别特征稳定。</small></div><Button disabled={busy !== null} onClick={() => void run(`select-${character.id}`, () => selectCharacterVisualCandidate(projectId, character.id, character.lockVersion, selectedCandidate.id))}><UserRoundCheck size={15} />生成基准检查图</Button></footer> : null}
         </section> : null}
 
-        {pendingIdentity ? <section className="character-identity-dossier">
-          <header><div><span>第二步 · 基准检查</span><h3>角色身份 · 第 {pendingIdentity.version} 版</h3></div><StatusBadge description={failedIdentityJobs.length ? `${failedIdentityJobs.length} 个角色身份视角生成失败，可以单独重新生成` : generatingDossier ? '正在生成多角度角色身份基准检查图' : '角色身份基准检查图已生成，等待确认'} label={failedIdentityJobs.length ? `${failedIdentityJobs.length} 个视角生成失败` : undefined} status={failedIdentityJobs.length ? 'GENERATION_FAILED' : pendingIdentity.status} /></header>
+        {pendingIdentity ? <section className="character-identity-dossier" data-identity-version-id={pendingIdentity.id}>
+          <header><div><span>{viewingReplacedIdentity ? '历史版本 · 仅供查看' : '第二步 · 基准检查'}</span><h3>角色身份 · 第 {pendingIdentity.version} 版</h3></div><StatusBadge description={viewingReplacedIdentity ? `当前以第 ${latestPendingIdentity?.version ?? pendingIdentity.version} 版为审核目标` : failedIdentityJobs.length ? `${failedIdentityJobs.length} 个角色身份视角生成失败，可以单独重新生成` : generatingDossier ? '正在生成多角度角色身份基准检查图' : '角色身份基准检查图已生成，等待确认'} label={viewingReplacedIdentity ? '已被新版本替代' : failedIdentityJobs.length ? `${failedIdentityJobs.length} 个视角生成失败` : undefined} status={viewingReplacedIdentity ? 'SUPERSEDED' : failedIdentityJobs.length ? 'GENERATION_FAILED' : pendingIdentity.status} /></header>
           <div aria-busy={generatingDossier} aria-live="polite">
             {DOSSIER_VIEW_TYPES.map((viewType) => {
               const asset = pendingIdentityAssets.get(viewType)
@@ -701,17 +781,19 @@ export function CharactersPage() {
               return asset
                 ? <figure aria-busy={active} className={`character-dossier-asset ${active ? 'is-updating' : ''} ${failed ? 'has-error' : ''}`} key={viewType}>
                     <div className="character-dossier-asset__media">
-                      <button aria-label={`查看${character.name}${label}的完整原图`} className="character-dossier-asset__open" onClick={() => openIdentityImageViewer({ characterName: character.name, viewLabel: label, assetUrl: asset.assetUrl })} type="button">
+                      <button aria-label={`查看${character.name}${label}的完整原图`} className="character-dossier-asset__open" onClick={() => openIdentityImageViewer({ characterId: character.id, characterName: character.name, identityVersionId: pendingIdentity.id, viewType, viewLabel: label, assetUrl: asset.assetUrl })} type="button">
                         <img alt={`${character.name} ${label}`} src={asset.assetUrl} />
-                        <span><Maximize2 size={13} />查看原图</span>
+                        <span aria-hidden="true"><Maximize2 size={14} /></span>
                       </button>
                       {active ? <div className="character-dossier-regeneration" role="status">
                         <DossierGenerationMark />
                         <strong>正在生成新版本</strong>
                         <small>旧图会保留到新版本完成</small>
                       </div> : failed ? <span className="character-dossier-asset__status is-error"><AlertTriangle size={14} />上次生成失败</span> : null}
-                      <Button aria-label={`调整${character.name}${label}的细节`} className="character-dossier-asset__action character-dossier-asset__action--adjust" disabled={busy !== null || active} onClick={() => openIdentityViewAction({ characterId: character.id, characterName: character.name, identityVersionId: pendingIdentity.id, viewType, viewLabel: label, assetUrl: asset.assetUrl, mode: 'adjust' })} size="sm" variant="secondary"><SlidersHorizontal size={13} />调整细节</Button>
-                      <Button aria-label={`重新生成${character.name}${label}`} className="character-dossier-asset__action character-dossier-asset__action--regenerate" disabled={busy !== null || active} onClick={() => openIdentityViewAction({ characterId: character.id, characterName: character.name, identityVersionId: pendingIdentity.id, viewType, viewLabel: label, assetUrl: asset.assetUrl, mode: 'regenerate' })} size="sm" variant="secondary"><RefreshCw size={13} />重新生成</Button>
+                      {!viewingReplacedIdentity ? <>
+                        <Button aria-label={`调整${character.name}${label}的细节`} className="character-dossier-asset__action character-dossier-asset__action--adjust" disabled={busy !== null || active} onClick={() => openIdentityViewAction({ characterId: character.id, characterName: character.name, identityVersionId: pendingIdentity.id, viewType, viewLabel: label, assetUrl: asset.assetUrl, mode: 'adjust' })} size="sm" variant="secondary">调整细节</Button>
+                        <Button aria-label={`重新生成${character.name}${label}`} className="character-dossier-asset__action character-dossier-asset__action--regenerate" disabled={busy !== null || active} onClick={() => openIdentityViewAction({ characterId: character.id, characterName: character.name, identityVersionId: pendingIdentity.id, viewType, viewLabel: label, assetUrl: asset.assetUrl, mode: 'regenerate' })} size="sm" variant="secondary">重新生成</Button>
+                      </> : null}
                     </div>
                     <figcaption>{label}</figcaption>
                   </figure>
@@ -727,26 +809,67 @@ export function CharactersPage() {
             })}
             {failedIdentityJobs.length ? <div className="character-dossier-error-summary"><AlertTriangle size={18} />{failedIdentityJobs.length} 个视角未完成，可在对应卡片重新生成。</div> : null}
           </div>
-          {pendingIdentity.status === 'READY_FOR_REVIEW' ? <footer><div><strong>确认五官、年龄感、体型和识别特征一致</strong><small>设为基准后才会用于后续剧本和分镜；此前版本仍会保留。</small></div><Button disabled={busy !== null} onClick={() => void run(`lock-${character.id}`, async () => { const result = await lockCharacterVisualIdentity(projectId, character.id, character.lockVersion, pendingIdentity.id); if (result.script_job) navigate(`/tasks?project=${projectId}&jobType=GENERATE_SCRIPT_PACKAGE`) })}>{busy === `lock-${character.id}` ? <LoaderCircle className="spin" size={15} /> : <LockKeyhole size={15} />}设为角色基准</Button></footer> : null}
         </section> : null}
 
         {character.identities.length ? <section className="character-version-history">
           <header><div><History size={17} /><span><strong>角色基准版本</strong><small>每次设为基准都会保留完整版本，可恢复但不会覆盖既有镜头。</small></span></div><em>{character.identities.length} 个版本</em></header>
           <div>{[...character.identities].reverse().map((identity) => {
             const isActive = identity.id === character.lockedIdentityVersionId
+            const reviewable = identity.id === latestPendingIdentity?.id
+            const replacedPending = !isActive
+              && !reviewable
+              && !identity.lockedAt
+              && ['GENERATING_DOSSIER', 'READY_FOR_REVIEW'].includes(identity.status)
+            const viewingThisVersion = identity.id === pendingIdentity?.id
+            const readyToLock = reviewable
+              && viewingThisVersion
+              && identity.status === 'READY_FOR_REVIEW'
             const restorable = !isActive && Boolean(identity.lockedAt)
               && ['LOCKED', 'SUPERSEDED'].includes(identity.status)
-            return <article className={isActive ? 'is-active' : ''} key={identity.id}>{identity.sourceCandidateAssetUrl ? <img alt={`${character.name}角色基准第${identity.version}版`} src={identity.sourceCandidateAssetUrl} /> : <div className="character-version-history__placeholder"><UserRoundCheck size={18} /></div>}<div><span>第 {identity.version} 版</span><strong>{isActive ? '当前角色基准' : getStatusLabel(identity.status)}</strong><small>{identity.lockedAt ? `曾由 ${identity.lockedBy ?? '创作者'} 设为基准` : '尚未完成基准确认'}</small></div>{restorable ? <Button disabled={busy !== null} onClick={() => void run(`restore-${identity.id}`, () => restoreCharacterVisualIdentity(projectId, character.id, character.lockVersion, identity.id))} size="sm" variant="secondary">{busy === `restore-${identity.id}` ? <LoaderCircle className="spin" size={14} /> : <RotateCcw size={14} />}恢复此版本</Button> : null}</article>
+            return <article className={`${isActive ? 'is-active' : ''} ${viewingThisVersion ? 'is-viewing' : ''}`.trim()} key={identity.id}>
+              {identity.sourceCandidateAssetUrl ? <img alt={`${character.name}角色基准第${identity.version}版`} src={identity.sourceCandidateAssetUrl} /> : <div className="character-version-history__placeholder"><UserRoundCheck size={18} /></div>}
+              <div>
+                <span>第 {identity.version} 版</span>
+                <strong>{isActive ? '当前角色基准' : replacedPending ? '已被新版本替代' : getStatusLabel(identity.status)}</strong>
+                <small>{identity.lockedAt ? `曾由 ${identity.lockedBy ?? '创作者'} 设为基准` : replacedPending ? `当前以第 ${latestPendingIdentity?.version ?? identity.version} 版为审核目标` : '尚未完成基准确认'}</small>
+              </div>
+              {reviewable ? <Button disabled={busy !== null} onClick={() => {
+                if (!viewingThisVersion) {
+                  setIdentityReviewSelection((current) => ({ ...current, [character.id]: identity.id }))
+                  window.setTimeout(() => jumpToCharacter(character.id, `.character-identity-dossier[data-identity-version-id="${identity.id}"]`), 0)
+                } else if (readyToLock) {
+                  void run(`lock-${character.id}`, async () => {
+                    const result = await lockCharacterVisualIdentity(projectId, character.id, character.lockVersion, identity.id)
+                    if (result.script_job) navigate(`/tasks?project=${projectId}&jobType=GENERATE_SCRIPT_PACKAGE`)
+                  })
+                } else {
+                  jumpToCharacter(character.id, `.character-identity-dossier[data-identity-version-id="${identity.id}"]`)
+                }
+              }} size="md" variant={readyToLock ? 'primary' : 'secondary'}>{busy === `lock-${character.id}` ? <LoaderCircle className="spin" size={15} /> : <UserRoundCheck size={15} />}{readyToLock ? '审核并设为基准' : viewingThisVersion ? '查看生成进度' : '返回审核'}</Button> : replacedPending ? <Button onClick={() => {
+                setIdentityReviewSelection((current) => ({ ...current, [character.id]: identity.id }))
+                window.setTimeout(() => jumpToCharacter(character.id, `.character-identity-dossier[data-identity-version-id="${identity.id}"]`), 0)
+              }} size="sm" variant="secondary"><Eye size={14} />{viewingThisVersion ? '正在查看' : '查看此版本'}</Button> : restorable ? <Button disabled={busy !== null} onClick={() => void run(`restore-${identity.id}`, () => restoreCharacterVisualIdentity(projectId, character.id, character.lockVersion, identity.id))} size="sm" variant="secondary">{busy === `restore-${identity.id}` ? <LoaderCircle className="spin" size={14} /> : <RotateCcw size={14} />}恢复此版本</Button> : null}
+            </article>
           })}</div>
         </section> : null}
 
-        {character.status === 'LOCKED' ? <div className="character-locked-summary"><LockKeyhole size={18} /><div><strong>当前角色基准已锁定</strong><small>身份、造型和剧情状态均已按版本保存，历史版本可随时恢复。</small></div></div> : null}
         {['TEXT_CHANGED', 'RE_REVIEW_REQUIRED'].includes(character.status) ? <div className="character-change-decision"><AlertTriangle size={18} /><div><strong>文字设定包含重大身份变化</strong><small>已锁定身份与既有镜头不会自动覆盖，请明确选择。</small></div><Button disabled={busy !== null} onClick={() => void run(`preserve-${character.id}`, () => applyCharacterVisualChange(projectId, character.id, character.lockVersion, 'PRESERVE_IDENTITY'))} variant="secondary">保留原身份</Button><Button disabled={busy !== null} onClick={() => void run(`regenerate-${character.id}`, () => applyCharacterVisualChange(projectId, character.id, character.lockVersion, 'REGENERATE'))}>重新生成</Button></div> : null}
       </article>
     })}</div>
     </div>
 
-    <section className="character-lock-bar"><div>{allLocked ? <Check size={18} /> : <LockKeyhole size={18} />}<span><strong>{allLocked ? '全部角色身份已锁定' : '等待全部角色人工锁定'}</strong><small>{allLocked ? '剧本任务已由最后一次锁定操作启动；后续分镜将引用这些固定版本。' : '台词和普通剧情修改不触发生图；服装与临时状态分别进入 Look Version 和 Story State。'}</small></span></div>{allLocked ? <Link className="button button--primary button--md" to={`/projects/${projectId}/story`}>查看剧本进度</Link> : null}</section>
+    {allLocked ? <section className="character-lock-bar">
+      <div>
+        <Check size={18} />
+        <span>
+          <strong>全部角色身份已锁定</strong>
+          <small>后续剧本与分镜将引用这些固定版本。</small>
+        </span>
+      </div>
+      <Link className="button button--primary button--md" to={`/projects/${projectId}/story`}>
+        查看剧本进度
+      </Link>
+    </section> : null}
 
     <Modal
       className="modal--identity-view"
@@ -775,7 +898,7 @@ export function CharactersPage() {
     <Modal
       className="modal--identity-image-viewer"
       description={identityImageViewer ? `${identityImageViewer.characterName} · ${identityImageViewer.viewLabel} · 完整原图` : undefined}
-      footer={<Button onClick={closeIdentityImageViewer}>完成查看</Button>}
+      footer={<Button onClick={regenerateIdentityImageViewer}><RefreshCw size={15} />重新生成</Button>}
       onClose={closeIdentityImageViewer}
       open={identityImageViewer !== null}
       title={identityImageViewer ? `${identityImageViewer.viewLabel}原图` : '查看角色原图'}

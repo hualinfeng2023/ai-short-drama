@@ -90,7 +90,16 @@ DOSSIER_VIEWS: tuple[tuple[str, str], ...] = (
     ("THREE_QUARTER", "向右转 45 度的头肩身份照"),
     ("PROFILE", "标准右侧面头肩身份照"),
     ("FULL_BODY", "正面自然站立全身身份照，完整露出鞋履"),
-    ("EXPRESSIONS", "基础表情组：中性、微笑、警觉、悲伤，四宫格"),
+    (
+        "EXPRESSIONS",
+        "严格的 2×2 等分四宫格，四格均为同一人、同一正面头肩构图："
+        "左上中性（眉眼和嘴角自然放松、闭口）；"
+        "右上微笑（嘴角明显上扬、双颊抬起、眼神温暖）；"
+        "左下警觉（双眼明显睁大、眉头略收紧、嘴唇微张、直视前方）；"
+        "右下悲伤（眉头内侧抬起并靠拢、眼睑下垂、嘴角下压、视线微垂）。"
+        "四种表情必须在缩略图尺寸下也一眼可辨，但不得改变脸型、五官、年龄感、"
+        "发型、服装和人物身份；不得出现四张近似中性微表情、重复格、文字标签或额外分格",
+    ),
 )
 
 CANDIDATE_VARIANTS: tuple[dict[str, str], ...] = (
@@ -1297,7 +1306,6 @@ def assemble_character_prompt(
         [
             "单人角色选角照，正面胸像，视线平视镜头，中性纯色背景，统一 85mm 等效焦段和相机高度",
             *fragments,
-            f"视觉方向：{content.get('selected_direction') or 'cinematic'}",
             f"负面约束：{negatives}",
             "画面中只能出现一人，不得出现拼贴",
             CHARACTER_CLEAN_FRAME_CONSTRAINT,
@@ -1838,12 +1846,18 @@ def generate_character_identity_view(
     note = refinement_note.strip() if refinement_note else None
     mode = "REFINE" if note else "REGENERATE"
     reference_asset_id = existing.asset_id if note else candidate.asset_id
-    adjustment = (
-        f"用户只要求调整以下细节：{note}。除这些细节外，必须保持当前图的脸型、五官、年龄感、"
-        "体型、发型、服装和人物身份不变。"
-        if note
-        else "重新生成一个构图要求相同、人物身份一致但画面细节自然变化的替代版本。"
-    )
+    if note:
+        adjustment = (
+            f"用户只要求调整以下细节：{note}。除这些细节外，必须保持当前图的脸型、五官、"
+            "年龄感、体型、发型、服装和人物身份不变。"
+        )
+    elif view_type == "EXPRESSIONS":
+        adjustment = (
+            "重新生成完整四宫格，优先纠正表情区分度；不能只做难以辨认的轻微变化，"
+            "也不能把同一张近似中性表情重复四次。"
+        )
+    else:
+        adjustment = "重新生成一个构图要求相同、人物身份一致但画面细节自然变化的替代版本。"
     request_fingerprint = content_hash(
         {
             "identity_version_id": identity.id,

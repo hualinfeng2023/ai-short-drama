@@ -2,6 +2,10 @@ import json
 from datetime import UTC, datetime
 
 import pytest
+from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.orm import sessionmaker
+
 from app.config import get_settings
 from app.db.models import (
     Asset,
@@ -35,9 +39,6 @@ from app.services.character_visuals import (
 )
 from app.services.image_provider import GeneratedImage
 from app.services.projects import canonical_json, content_hash
-from httpx import AsyncClient
-from sqlalchemy import select
-from sqlalchemy.orm import sessionmaker
 
 STORY_ID = "91000000-0000-4000-8000-000000000001"
 STORY_BIBLE_ID = "91000000-0000-4000-8000-000000000002"
@@ -870,6 +871,8 @@ async def test_character_generation_auto_confirms_summary_and_creates_distinct_r
         item["key"]
         for item in batch_prompt["candidate_variants"]
     } == variant_keys
+    assert "视觉方向：" not in batch_prompt["prompt"]
+    assert all("候选方向：" in item["prompt"] for item in payloads)
     assert len({item["prompt"] for item in payloads}) == 3
 
     worker = PersistentJobWorker(get_settings())

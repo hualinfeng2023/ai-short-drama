@@ -483,8 +483,6 @@ export interface CharacterVisualProfile {
   stylingFields: Record<string, string | string[]>
   projectStyle: Record<string, string>
   negativeConstraints: string[]
-  recommendedDirections: Array<{ key: string; label: string; reason: string }>
-  selectedDirection?: string
   conflictReport: Array<{
     severity: 'BLOCKER' | 'WARNING' | 'INFO'
     code: string
@@ -3212,14 +3210,6 @@ function mapCharacterVisualProfile(
     stylingFields: (profile.styling_fields ?? {}) as Record<string, string | string[]>,
     projectStyle: (profile.project_style ?? {}) as Record<string, string>,
     negativeConstraints: (profile.negative_constraints ?? []) as string[],
-    recommendedDirections: (profile.recommended_directions ?? []) as Array<{
-      key: string
-      label: string
-      reason: string
-    }>,
-    ...(profile.selected_direction == null
-      ? {}
-      : { selectedDirection: String(profile.selected_direction) }),
     conflictReport: (profile.conflict_report ?? []) as CharacterVisualProfile['conflictReport'],
     contentHash: String(profile.content_hash),
   }
@@ -3411,7 +3401,6 @@ export async function updateCharacterVisualProfile(
     personality_visualization?: Record<string, string>
     styling_fields?: Record<string, string | string[]>
     negative_constraints?: string[]
-    selected_direction?: string
   },
 ): Promise<CharacterVisualProfile> {
   const result = await requestJson<Record<string, unknown>>(
