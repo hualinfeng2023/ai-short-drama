@@ -567,7 +567,7 @@ export function CharactersPage() {
       }) : ''
       return <article className="character-visual-card" data-character-id={character.id} id={`character-${character.id}`} key={character.id} tabIndex={-1}>
         <header>
-          <div><p className="eyebrow">{localizeDisplayText(character.role)}</p><h2>{character.name}</h2><p>{character.visualBrief}</p></div>
+          <div><p className="eyebrow">{localizeDisplayText(character.role)}</p><h2>{character.name}</h2></div>
           <span className={`character-visual-status is-${character.status.toLowerCase()}`}>{statusLabel(character.status)}</span>
         </header>
 
