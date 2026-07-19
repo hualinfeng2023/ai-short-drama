@@ -12,9 +12,7 @@ import {
   Lock,
   RotateCcw,
   ShieldCheck,
-  Sparkles,
   Subtitles,
-  WandSparkles,
 } from 'lucide-react'
 import { Link, useParams } from 'react-router'
 import {
@@ -270,7 +268,7 @@ export function PreviewPage() {
           <div className="section-heading"><div><p className="eyebrow">局部修改</p><h2>局部修改</h2></div><span>已选择 {selectedShot.code} · {selectedShot.durationSec} 秒</span></div>
           <div className="revision-scope"><span><Film size={15} />{selectedShot.code} · {selectedShot.title}</span><small>先分析影响，再执行变更集</small></div>
           <textarea aria-label="修改指令" disabled={Boolean(activeRevision)} onChange={(event) => setInstruction(event.target.value)} value={instruction} />
-          <div className="revision-actions"><span><Sparkles size={15} />未受影响版本的编号与 SHA-256 哈希保持不变</span><Button disabled={instruction.trim().length < 6 || Boolean(activeRevision) || busy === 'impact'} onClick={inspectImpact}>{busy === 'impact' ? <LoaderCircle className="spin" size={16} /> : <WandSparkles size={16} />}先看影响</Button></div>
+          <div className="revision-actions"><span><ShieldCheck size={15} />未受影响版本的编号与 SHA-256 哈希保持不变</span><Button disabled={instruction.trim().length < 6 || Boolean(activeRevision) || busy === 'impact'} onClick={inspectImpact}>{busy === 'impact' ? <LoaderCircle className="spin" size={16} /> : <ArrowLeftRight size={16} />}先看影响</Button></div>
           {activeRevision ? <div className="inline-job"><div><strong>{localizeDisplayText(activeRevision.label)}</strong><small>{localizeDisplayText(activeRevision.stage)}</small></div><ProgressBar value={activeRevision.progress} /></div> : null}
         </section>
       </section>
@@ -299,7 +297,7 @@ export function PreviewPage() {
       </aside>
     </div>
 
-    <Modal open={impact !== null} onClose={() => setImpact(null)} title="局部修改影响范围" description="只有确认后才会创建持久化变更集。" footer={<><Button onClick={() => setImpact(null)} variant="secondary">返回修改</Button><Button disabled={busy === 'revision'} onClick={confirmRevision}>{busy === 'revision' ? <LoaderCircle className="spin" size={16} /> : <WandSparkles size={16} />}确认并执行</Button></>}><div className="impact-list"><div><span>解析意图</span><strong>{localizeDisplayText(impact?.intent.type ?? '')}</strong><small>{impact?.intent.instruction}</small></div><div><span>影响范围</span><strong>{impact?.affected.shots.length} 个镜头</strong><small>{impact?.affected.assetTypes.map(localizeDisplayText).join(' · ')}</small></div><div><span>预计消耗</span><strong>{impact?.estimatedPoints} 积分 · {impact?.estimatedSeconds} 秒</strong><small>保留 {impact?.affected.preservedHashes.length} 个未影响资产哈希</small></div></div></Modal>
+    <Modal open={impact !== null} onClose={() => setImpact(null)} title="局部修改影响范围" description="只有确认后才会创建持久化变更集。" footer={<><Button onClick={() => setImpact(null)} variant="secondary">返回修改</Button><Button disabled={busy === 'revision'} onClick={confirmRevision}>{busy === 'revision' ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}确认并执行</Button></>}><div className="impact-list"><div><span>解析意图</span><strong>{localizeDisplayText(impact?.intent.type ?? '')}</strong><small>{impact?.intent.instruction}</small></div><div><span>影响范围</span><strong>{impact?.affected.shots.length} 个镜头</strong><small>{impact?.affected.assetTypes.map(localizeDisplayText).join(' · ')}</small></div><div><span>预计消耗</span><strong>{impact?.estimatedPoints} 积分 · {impact?.estimatedSeconds} 秒</strong><small>保留 {impact?.affected.preservedHashes.length} 个未影响资产哈希</small></div></div></Modal>
 
     <Modal open={comparison !== null} onClose={() => setComparison(null)} title="时间线版本比较" description={localizeDisplayText(comparison?.summary ?? '')} footer={<><Button onClick={() => setComparison(null)} variant="secondary">保留当前版本</Button><Button disabled={busy === 'rollback'} onClick={rollback}>{busy === 'rollback' ? <LoaderCircle className="spin" size={16} /> : <RotateCcw size={16} />}回退到第 {previousTimeline?.version} 版</Button></>}><div className="timeline-compare"><div><span>第 {comparison?.left.version} 版</span><strong>历史基线</strong><p>状态：{getStatusLabel(comparison?.left.status ?? '')} · 基线 {comparison?.left.baselineHash.slice(0, 12)}</p></div><ArrowLeftRight size={20} /><div><span>第 {comparison?.right.version} 版</span><strong>当前小样</strong><p>变化媒体：{comparison?.changedAssets.map(localizeDisplayText).join('、') || '无'}；不变：{comparison?.unchangedAssets.map(localizeDisplayText).join('、') || '无'}</p></div></div></Modal>
   </div>

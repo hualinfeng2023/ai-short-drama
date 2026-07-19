@@ -1,21 +1,105 @@
+import asyncio
 import json
 from dataclasses import replace
 
 import httpx
 import pytest
+from app.config import get_settings
+from app.db.models import Asset, Job, Take
+from app.db.session import get_engine
+from app.jobs.contracts import JobExecutionContext, JobExecutionError
+from app.jobs.handlers.production import _generate_character_image
+from app.jobs.worker import PersistentJobWorker
+from app.seed import PROJECT_ID, SHOT_IDS
+from app.services.character_visuals import CHARACTER_CLEAN_FRAME_CONSTRAINT
+from app.services.identity_consistency import evaluate_identity_consistency
+from app.services.image_provider import GeneratedImage, generate_image
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.config import get_settings
-from app.db.models import Asset, Job, Take
-from app.db.session import get_engine
-from app.jobs.worker import PersistentJobWorker
-from app.seed import PROJECT_ID, SHOT_IDS
-from app.services.identity_consistency import evaluate_identity_consistency
-from app.services.image_provider import GeneratedImage, generate_image
-
 pytestmark = pytest.mark.anyio
+
+
+async def test_character_reference_prompt_forbids_reproducing_text_or_marks() -> None:
+    captured_prompt = ""
+
+    async def generate_clean_image(
+        _settings: object,
+        prompt: str,
+        **_kwargs: object,
+    ) -> GeneratedImage:
+        nonlocal captured_prompt
+        captured_prompt = prompt
+        return GeneratedImage(
+            content=b"clean-character-image",
+            mime="image/png",
+            width=1024,
+            height=1024,
+            model="test-image-model",
+            request_id=None,
+            source_url=None,
+        )
+
+    async def no_op(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    context = JobExecutionContext(
+        settings=get_settings(),
+        worker_id="clean-frame-test",
+        checkpoint=no_op,
+        record_diagnostics=no_op,
+        heartbeat=lambda *_args: None,
+        generate_image=generate_clean_image,
+        evaluate_identity_consistency=generate_clean_image,
+        generate_video=generate_clean_image,
+        cancel_video_task=generate_clean_image,
+    )
+
+    await _generate_character_image(
+        context,
+        Session(),
+        Job(id="clean-frame-job"),
+        {"prompt": "严格保持参考人物身份", "seed": 42},
+        reference_asset_ids=[],
+    )
+
+    assert CHARACTER_CLEAN_FRAME_CONSTRAINT in captured_prompt
+    assert "尤其右下角水印" in captured_prompt
+    assert "不能临摹、复制或迁移到结果图中" in captured_prompt
+
+
+async def test_character_identity_image_generation_has_a_hard_timeout() -> None:
+    async def never_complete(*_args: object, **_kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    async def no_op(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    context = JobExecutionContext(
+        settings=get_settings(),
+        worker_id="timeout-test",
+        checkpoint=no_op,
+        record_diagnostics=no_op,
+        heartbeat=lambda *_args: None,
+        generate_image=never_complete,
+        evaluate_identity_consistency=never_complete,
+        generate_video=never_complete,
+        cancel_video_task=never_complete,
+    )
+
+    with pytest.raises(JobExecutionError) as raised:
+        await _generate_character_image(
+            context,
+            Session(),
+            Job(id="timeout-job"),
+            {"prompt": "角色身份全身照", "seed": 42},
+            reference_asset_ids=[],
+            max_wait_seconds=0,
+        )
+
+    assert raised.value.code == "CHARACTER_IMAGE_TIMEOUT"
+    assert raised.value.retryable is False
 
 
 async def test_missing_key_uses_deterministic_mock_image() -> None:
@@ -47,7 +131,7 @@ async def test_seedream_rest_request_and_image_download() -> None:
                 "response_format": "url",
                 "size": "4K",
                 "stream": False,
-                "watermark": True,
+                "watermark": False,
                 "image": ["data:image/png;base64,cmVmZXJlbmNl"],
                 "seed": 24680,
             }
@@ -81,6 +165,37 @@ async def test_seedream_rest_request_and_image_download() -> None:
     assert result.content == b"generated-png"
     assert (result.width, result.height) == (1440, 2560)
     assert result.request_id == "ark-request-1"
+
+
+async def test_seedream_rest_normalizes_seed_to_ark_int32_range() -> None:
+    oversized_seed = 4_258_230_020
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/images/generations"):
+            payload = json.loads(request.content)
+            assert payload["model"] == "doubao-seedream-5-0-260128"
+            assert payload["watermark"] is False
+            assert payload["seed"] == oversized_seed % (2**31)
+            return httpx.Response(
+                200,
+                json={
+                    "model": "doubao-seedream-5-0-260128",
+                    "data": [{"url": "https://image.test/result.png"}],
+                },
+            )
+        return httpx.Response(200, content=b"generated-png", headers={"content-type": "image/png"})
+
+    settings = replace(get_settings(), ark_api_key="test-key")
+    result = await generate_image(
+        settings,
+        "测试角色候选图",
+        model="doubao-seedream-5-0-260128",
+        seed=oversized_seed,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.model == "doubao-seedream-5-0-260128"
+    assert result.content == b"generated-png"
 
 
 async def test_identity_qc_auto_passes_only_above_threshold() -> None:

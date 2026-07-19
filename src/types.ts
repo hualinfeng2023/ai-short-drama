@@ -167,6 +167,24 @@ export interface Job {
   errorDetails?: Record<string, unknown>
 }
 
+export type JobRecoveryAction =
+  | 'RESUME_FROM_FAILURE'
+  | 'RETRY_FAILED_PARTS'
+  | 'SWITCH_MODEL'
+  | 'FALLBACK_EXECUTION'
+  | 'SAVE_INTERMEDIATE'
+  | 'PROVIDE_INPUT'
+  | 'ESCALATE_HUMAN'
+
+export interface JobRecoveryRequest {
+  action: JobRecoveryAction
+  failedPartIds?: string[]
+  model?: string
+  strategy?: string
+  additionalInput?: string
+  note?: string
+}
+
 export interface ProjectRecord {
   id: string
   name: string

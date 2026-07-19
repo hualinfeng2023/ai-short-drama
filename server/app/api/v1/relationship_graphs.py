@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
 from app.api.trace import get_trace_id, success
+from app.config import get_settings
 from app.db.session import get_session
 from app.schemas import (
     RelationshipGraphActionRequest,
@@ -11,7 +12,9 @@ from app.schemas import (
     RelationshipGraphUpdateRequest,
     RelationshipRevisionCreateRequest,
     RelationshipRevisionImpactRequest,
+    RelationshipUpbringingSuggestionRequest,
 )
+from app.services.relationship_assistant import suggest_relationship_upbringing
 from app.services.relationship_graph_workflow import (
     analyze_relationship_revision,
     approve_relationship_graph,
@@ -63,6 +66,26 @@ def create_project_relationship_graph(
 @router.get("/relationship-graphs/{graph_id}")
 def relationship_graph(graph_id: str, session: Session = Depends(get_session)) -> dict[str, object]:
     return success(get_relationship_graph(session, graph_id))
+
+
+@router.post(
+    "/relationship-graphs/{graph_id}/relationships/{relationship_key}/upbringing-suggestion"
+)
+async def relationship_upbringing_suggestion(
+    graph_id: str,
+    relationship_key: str,
+    payload: RelationshipUpbringingSuggestionRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return success(
+        await suggest_relationship_upbringing(
+            session,
+            graph_id=graph_id,
+            relationship_key=relationship_key,
+            payload=payload,
+            settings=get_settings(),
+        )
+    )
 
 
 @router.patch("/relationship-graphs/{graph_id}")

@@ -7,8 +7,6 @@ import {
   Film,
   ListTodo,
   Play,
-  Sparkles,
-  WandSparkles,
 } from 'lucide-react'
 import { Link } from 'react-router'
 import { PageHeader, ProgressBar, StatusBadge } from '../components/ui'
@@ -58,7 +56,7 @@ export function EpisodePage() {
       </section>
 
       <section className="next-action">
-        <div className="next-action__icon"><WandSparkles size={20} /></div>
+        <div className="next-action__icon"><ListTodo size={20} /></div>
         <div>
           <p className="eyebrow">下一步最佳动作</p>
           <h2>{firstReview ? `审核 ${firstReview.code} 的候选版本` : '查看完整小样并批准'}</h2>
@@ -117,8 +115,8 @@ export function EpisodePage() {
 
           {assistantVisible ? (
             <section className="assistant-card">
-              <div className="assistant-card__mark"><Sparkles size={18} /></div>
-              <p className="eyebrow">AI 建议 · 规则估算</p>
+              <div className="assistant-card__mark"><CheckCircle2 size={18} /></div>
+              <p className="eyebrow">镜头建议 · 规则估算</p>
               <h2>让 S03 的妹妹只说半句</h2>
               <p>把剩下的威胁放进“手压住钥匙”的动作里，转折会更克制，也能缩短约 1.2 秒对白。</p>
               <div><Link className="button button--secondary button--sm" to={`/projects/${project.id}/episodes/${project.episodeId}/preview`}>带入局部修改</Link><button onClick={() => setAssistantVisible(false)}>忽略</button></div>

@@ -6,6 +6,7 @@ import type {
   ExportEstimate,
   ExportPackage,
   Job,
+  JobRecoveryRequest,
   ProjectRecord,
   ProjectReadiness,
   ProjectState,
@@ -475,6 +476,7 @@ export interface CharacterVisualProfile {
   id: string
   version: number
   status: string
+  summary: string
   identityFields: Record<string, string>
   appearanceFields: Record<string, string>
   personalityVisualization: Record<string, string>
@@ -557,6 +559,11 @@ export interface CharacterVisualRecord {
     status: string
     reviewStatus: string
     selected: boolean
+    variantKey?: string
+    variantLabel?: string
+    variantDescription?: string
+    refinementNote?: string
+    sourceCandidateId?: string
   }>
   identities: Array<{
     id: string
@@ -564,12 +571,27 @@ export interface CharacterVisualRecord {
     sourceCandidateId: string
     profileVersionId: string
     status: string
+    sourceCandidateAssetUrl?: string
+    lockedAt?: string
+    lockedBy?: string
     assets: Array<{
       id: string
       viewType: string
       assetId: string
       assetUrl: string
       status: string
+    }>
+    viewJobs: Array<{
+      id: string
+      viewType: string
+      status: string
+      stage: string
+      createdAt: string
+      updatedAt: string
+      completedAt?: string
+      retryable: boolean
+      errorCode?: string
+      maxWaitSeconds: number
     }>
   }>
   looks: Array<{ id: string; version: number; label: string; status: string }>
@@ -791,6 +813,11 @@ export interface ProjectNameSuggestionInput {
   production_format: ProductionFormat
   primary_market: string
   canonical_language: string
+  target_duration_sec: number
+  aspect_ratio: '9:16' | '16:9'
+  target_platform: string
+  content_requirements: string[]
+  content_avoidances: string[]
 }
 
 export interface ProjectNameSuggestion {
@@ -1889,6 +1916,19 @@ export interface FamilyKinshipRecord {
   upbringingContext?: string
 }
 
+export interface RelationshipUpbringingSuggestionInput {
+  familyKinship: FamilyKinshipRecord
+  surfaceRelationship: string
+  trueRelationship: string
+}
+
+export interface RelationshipUpbringingSuggestion {
+  suggestion: string
+  provider: string
+  model: string
+  warning?: string
+}
+
 export interface RelationshipPerspectiveRecord {
   perceivedRelationship: string
   belief: string
@@ -2082,6 +2122,65 @@ export interface ScriptVersionRecord extends CreativeVersion {
       localizations: Record<string, string>
     }>
   }>
+}
+
+export type ScriptExcerptRewriteAction =
+  | 'REWRITE'
+  | 'SHORTEN'
+  | 'INTENSIFY_CONFLICT'
+  | 'ADJUST_TONE'
+  | 'CUSTOM'
+
+export interface ScriptExcerptRewrite {
+  id: string
+  projectId: string
+  baseScriptVersionId: string
+  baseLineId: string
+  parentRevisionId: string | null
+  appliedScriptVersionId: string | null
+  episodeOrdinal: number
+  sceneOrdinal: number
+  lineOrdinal: number
+  version: number
+  selectionStart: number
+  selectionEnd: number
+  originalText: string
+  proposedText: string
+  action: ScriptExcerptRewriteAction
+  customInstruction: string | null
+  tone: string | null
+  rationale: string
+  status: 'GENERATED' | 'APPLIED'
+  provider: string
+  model: string
+  createdAt: string
+  appliedAt: string | null
+}
+
+interface ApiScriptExcerptRewrite {
+  id: string
+  project_id: string
+  base_script_version_id: string
+  base_line_id: string
+  parent_revision_id: string | null
+  applied_script_version_id: string | null
+  episode_ordinal: number
+  scene_ordinal: number
+  line_ordinal: number
+  version: number
+  selection_start: number
+  selection_end: number
+  original_text: string
+  proposed_text: string
+  action: ScriptExcerptRewriteAction
+  custom_instruction: string | null
+  tone: string | null
+  rationale: string
+  status: 'GENERATED' | 'APPLIED'
+  provider: string
+  model: string
+  created_at: string
+  applied_at: string | null
 }
 
 interface ApiCreativeVersion {
@@ -2337,6 +2436,36 @@ function mapCreativeVersion(version: ApiCreativeVersion): CreativeVersion {
   }
 }
 
+function mapScriptExcerptRewrite(
+  revision: ApiScriptExcerptRewrite,
+): ScriptExcerptRewrite {
+  return {
+    id: revision.id,
+    projectId: revision.project_id,
+    baseScriptVersionId: revision.base_script_version_id,
+    baseLineId: revision.base_line_id,
+    parentRevisionId: revision.parent_revision_id,
+    appliedScriptVersionId: revision.applied_script_version_id,
+    episodeOrdinal: revision.episode_ordinal,
+    sceneOrdinal: revision.scene_ordinal,
+    lineOrdinal: revision.line_ordinal,
+    version: revision.version,
+    selectionStart: revision.selection_start,
+    selectionEnd: revision.selection_end,
+    originalText: revision.original_text,
+    proposedText: revision.proposed_text,
+    action: revision.action,
+    customInstruction: revision.custom_instruction,
+    tone: revision.tone,
+    rationale: revision.rationale,
+    status: revision.status,
+    provider: revision.provider,
+    model: revision.model,
+    createdAt: revision.created_at,
+    appliedAt: revision.applied_at,
+  }
+}
+
 export async function fetchStoryWorkspace(
   projectId: string,
   signal?: AbortSignal,
@@ -2534,6 +2663,40 @@ export async function saveRelationshipGraph(
     },
   )
   return mapRelationshipGraphVersion(result)
+}
+
+export async function generateRelationshipUpbringingSuggestion(
+  graphId: string,
+  relationshipKey: string,
+  input: RelationshipUpbringingSuggestionInput,
+): Promise<RelationshipUpbringingSuggestion> {
+  const result = await requestJson<{
+    suggestion: string
+    provider: string
+    model: string
+    warning: string | null
+  }>(
+    `/api/v1/relationship-graphs/${graphId}/relationships/${encodeURIComponent(relationshipKey)}/upbringing-suggestion`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        family_kinship: {
+          relation_type: input.familyKinship.relationType,
+          shared_upbringing: input.familyKinship.sharedUpbringing,
+          upbringing_context: input.familyKinship.upbringingContext ?? null,
+        },
+        surface_relationship: input.surfaceRelationship,
+        true_relationship: input.trueRelationship,
+      }),
+    },
+  )
+  return {
+    suggestion: result.suggestion,
+    provider: result.provider,
+    model: result.model,
+    warning: result.warning ?? undefined,
+  }
 }
 
 export async function fetchRelationshipGraphValidation(
@@ -2885,6 +3048,79 @@ export async function confirmCharacterRevision(projectId: string, input: {
   })
 }
 
+export async function createScriptExcerptRewrite(
+  scriptId: string,
+  lineId: string,
+  input: {
+    expectedVersion: number
+    selectionStart: number
+    selectionEnd: number
+    action: ScriptExcerptRewriteAction
+    customInstruction?: string
+    tone?: string
+    parentRevisionId?: string
+  },
+): Promise<ScriptExcerptRewrite> {
+  const result = await requestJson<ApiScriptExcerptRewrite>(
+    `/api/v1/scripts/${scriptId}/lines/${lineId}/rewrites`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        expected_version: input.expectedVersion,
+        selection_start: input.selectionStart,
+        selection_end: input.selectionEnd,
+        action: input.action,
+        custom_instruction: input.customInstruction,
+        tone: input.tone,
+        parent_revision_id: input.parentRevisionId,
+      }),
+    },
+  )
+  return mapScriptExcerptRewrite(result)
+}
+
+export async function fetchScriptExcerptRewrites(
+  scriptId: string,
+  lineId: string,
+): Promise<ScriptExcerptRewrite[]> {
+  const result = await requestJson<ApiScriptExcerptRewrite[]>(
+    `/api/v1/scripts/${scriptId}/lines/${lineId}/rewrites`,
+  )
+  return result.map(mapScriptExcerptRewrite)
+}
+
+export async function applyScriptExcerptRewrite(
+  revisionId: string,
+  input: {
+    expectedVersion: number
+    scriptId: string
+    lineId: string
+  },
+): Promise<{ scriptId: string; scriptVersion: number; projectLockVersion: number }> {
+  const result = await requestJson<{
+    rewrite: ApiScriptExcerptRewrite
+    script: {
+      id: string
+      version: number
+      project_lock_version: number
+    }
+  }>(`/api/v1/script-excerpt-rewrites/${revisionId}/apply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      expected_version: input.expectedVersion,
+      script_id: input.scriptId,
+      line_id: input.lineId,
+    }),
+  })
+  return {
+    scriptId: result.script.id,
+    scriptVersion: result.script.version,
+    projectLockVersion: result.script.project_lock_version,
+  }
+}
+
 export async function approveScriptVersion(
   scriptId: string,
   expectedVersion: number,
@@ -2969,6 +3205,7 @@ function mapCharacterVisualProfile(
     id: String(profile.id),
     version: Number(profile.version),
     status: String(profile.status),
+    summary: String(profile.summary ?? ''),
     identityFields: (profile.identity_fields ?? {}) as Record<string, string>,
     appearanceFields: (profile.appearance_fields ?? {}) as Record<string, string>,
     personalityVisualization: (profile.personality_visualization ?? {}) as Record<string, string>,
@@ -3104,6 +3341,17 @@ export async function fetchCharacterVisuals(
           status: String(item.status),
           reviewStatus: String(item.review_status),
           selected: Boolean(item.selected),
+          ...(item.variant_key == null ? {} : { variantKey: String(item.variant_key) }),
+          ...(item.variant_label == null ? {} : { variantLabel: String(item.variant_label) }),
+          ...(item.variant_description == null
+            ? {}
+            : { variantDescription: String(item.variant_description) }),
+          ...(item.refinement_note == null
+            ? {}
+            : { refinementNote: String(item.refinement_note) }),
+          ...(item.source_candidate_id == null
+            ? {}
+            : { sourceCandidateId: String(item.source_candidate_id) }),
         })),
         identities: identities.map((item) => ({
           id: String(item.id),
@@ -3111,12 +3359,29 @@ export async function fetchCharacterVisuals(
           sourceCandidateId: String(item.source_candidate_id),
           profileVersionId: String(item.profile_version_id),
           status: String(item.status),
+          ...(item.source_candidate_asset_url == null
+            ? {}
+            : { sourceCandidateAssetUrl: String(item.source_candidate_asset_url) }),
+          ...(item.locked_at == null ? {} : { lockedAt: String(item.locked_at) }),
+          ...(item.locked_by == null ? {} : { lockedBy: String(item.locked_by) }),
           assets: ((item.assets ?? []) as Array<Record<string, unknown>>).map((asset) => ({
             id: String(asset.id),
             viewType: String(asset.view_type),
             assetId: String(asset.asset_id),
             assetUrl: String(asset.asset_url),
             status: String(asset.status),
+          })),
+          viewJobs: ((item.view_jobs ?? []) as Array<Record<string, unknown>>).map((job) => ({
+            id: String(job.id),
+            viewType: String(job.view_type),
+            status: String(job.status),
+            stage: String(job.stage),
+            createdAt: String(job.created_at),
+            updatedAt: String(job.updated_at),
+            ...(job.completed_at == null ? {} : { completedAt: String(job.completed_at) }),
+            retryable: Boolean(job.retryable),
+            ...(job.error_code == null ? {} : { errorCode: String(job.error_code) }),
+            maxWaitSeconds: Number(job.max_wait_seconds),
           })),
         })),
         looks: looks.map((item) => ({
@@ -3185,6 +3450,7 @@ export async function generateCharacterVisualCandidates(
   characterId: string,
   expectedVersion: number,
   profileVersionId: string,
+  refinement?: { sourceCandidateId: string; note: string },
 ) {
   return requestJson<{ batch: Record<string, unknown>; jobs: ApiJob[] }>(
     `/api/v1/projects/${projectId}/characters/${characterId}/visual-candidates`,
@@ -3195,6 +3461,12 @@ export async function generateCharacterVisualCandidates(
         expected_version: expectedVersion,
         profile_version_id: profileVersionId,
         count: 3,
+        ...(refinement
+          ? {
+              source_candidate_id: refinement.sourceCandidateId,
+              refinement_note: refinement.note,
+            }
+          : {}),
         actor: '创作者',
       }),
     },
@@ -3221,6 +3493,29 @@ export async function selectCharacterVisualCandidate(
   )
 }
 
+export async function generateCharacterIdentityView(
+  projectId: string,
+  characterId: string,
+  expectedVersion: number,
+  identityVersionId: string,
+  viewType: string,
+  refinementNote?: string,
+) {
+  return requestJson<{ job: ApiJob }>(
+    `/api/v1/projects/${projectId}/characters/${characterId}/identity/${identityVersionId}/views`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        expected_version: expectedVersion,
+        view_type: viewType,
+        ...(refinementNote ? { refinement_note: refinementNote } : {}),
+        actor: '创作者',
+      }),
+    },
+  )
+}
+
 export async function lockCharacterVisualIdentity(
   projectId: string,
   characterId: string,
@@ -3239,6 +3534,31 @@ export async function lockCharacterVisualIdentity(
       }),
     },
   )
+}
+
+export async function restoreCharacterVisualIdentity(
+  projectId: string,
+  characterId: string,
+  expectedVersion: number,
+  identityVersionId: string,
+) {
+  return requestJson<{
+    character_id: string
+    identity_version_id: string
+    look_version_id: string
+    story_state_version_id: string
+    status: string
+    lock_version: number
+    existing_shots_preserved: boolean
+  }>(`/api/v1/projects/${projectId}/characters/${characterId}/identity/restore`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      expected_version: expectedVersion,
+      identity_version_id: identityVersionId,
+      actor: '创作者',
+    }),
+  })
 }
 
 export async function applyCharacterVisualChange(
@@ -3952,6 +4272,28 @@ export async function retryPersistedJob(jobId: string): Promise<Job> {
   const job = await requestJson<ApiJob>(`/api/v1/jobs/${jobId}/retry`, {
     method: 'POST',
     headers: { 'Idempotency-Key': crypto.randomUUID() },
+  })
+  return mapJob(job)
+}
+
+export async function recoverPersistedJob(
+  jobId: string,
+  request: JobRecoveryRequest,
+): Promise<Job> {
+  const job = await requestJson<ApiJob>(`/api/v1/jobs/${jobId}/recovery`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': crypto.randomUUID(),
+    },
+    body: JSON.stringify({
+      action: request.action,
+      failed_part_ids: request.failedPartIds ?? [],
+      model: request.model ?? null,
+      strategy: request.strategy ?? null,
+      additional_input: request.additionalInput ?? null,
+      note: request.note ?? null,
+    }),
   })
   return mapJob(job)
 }

@@ -2,16 +2,15 @@ import asyncio
 from uuid import UUID
 
 import pytest
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy import func, select, text
-from sqlalchemy.orm import Session
-from sqlalchemy.pool import NullPool
-
 from app.config import get_settings
 from app.db.models import Asset, BriefVersion, IdempotencyKey
 from app.db.session import get_engine
 from app.main import app
 from app.seed import EPISODE_ID, PROJECT_ID, SCENE_IDS, SHOT_IDS
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import func, select, text
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import NullPool
 
 pytestmark = pytest.mark.anyio
 
@@ -247,11 +246,11 @@ async def test_project_name_is_generated_from_brief_and_can_be_suggested_again(
         },
     )
 
-    assert suggestion.status_code == 200
-    result = suggestion.json()["data"]
-    assert result["suggested"] == "婚礼前的沉默"
-    assert result["original"] == "双生神药"
-    assert result["provider"] == "local-fallback"
+    assert suggestion.status_code == 503
+    error = suggestion.json()["error"]
+    assert error["code"] == "PROJECT_NAMING_UNAVAILABLE"
+    assert error["retryable"] is True
+    assert "原名称不会被修改" in error["user_action"]
 
 
 async def test_brief_requirements_can_be_drafted_without_mutating_project(

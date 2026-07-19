@@ -1,9 +1,12 @@
+import base64
 import json
 from datetime import UTC, datetime
+from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
 
 from fastapi import HTTPException
+from PIL import Image, ImageDraw, ImageFilter, ImageOps, UnidentifiedImageError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -496,17 +499,67 @@ def reference_data_urls(
     session: Session,
     settings: Settings,
     asset_ids: list[str],
+    *,
+    mask_character_watermark: bool = False,
 ) -> list[str]:
-    import base64
-
     values: list[str] = []
     for asset_id in asset_ids:
         asset = session.get(Asset, asset_id)
         if asset is None:
             continue
         content = resolve_asset_path(settings, asset).read_bytes()
+        if mask_character_watermark:
+            content = mask_character_reference_watermark(content, asset.mime)
         values.append(f"data:{asset.mime};base64,{base64.b64encode(content).decode()}")
     return values
+
+
+def mask_character_reference_watermark(content: bytes, mime: str) -> bytes:
+    """Hide the known lower-right AI label before a character image is reused."""
+    if mime not in {"image/jpeg", "image/png", "image/webp"}:
+        return content
+    try:
+        with Image.open(BytesIO(content)) as source:
+            image = ImageOps.exif_transpose(source).convert("RGBA")
+    except (OSError, UnidentifiedImageError):
+        return content
+
+    width, height = image.size
+    if width < 64 or height < 64:
+        return content
+
+    left = round(width * 0.78)
+    top = round(height * 0.88)
+    patch_width = width - left
+    patch_height = height - top
+    source_top = max(0, top - patch_height)
+    replacement = image.crop((left, source_top, width, top)).resize(
+        (patch_width, patch_height),
+        Image.Resampling.LANCZOS,
+    )
+    replacement = replacement.filter(
+        ImageFilter.GaussianBlur(radius=max(1, round(min(patch_width, patch_height) * 0.04)))
+    )
+
+    patched = image.copy()
+    patched.paste(replacement, (left, top))
+    feather = max(2, round(min(width, height) * 0.006))
+    mask = Image.new("L", image.size, 0)
+    ImageDraw.Draw(mask).rectangle(
+        (left + feather, top + feather, width, height),
+        fill=255,
+    )
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=feather))
+    result = Image.composite(patched, image, mask)
+
+    output = BytesIO()
+    if mime == "image/jpeg":
+        result.convert("RGB").save(output, format="JPEG", quality=95, subsampling=0)
+    elif mime == "image/webp":
+        result.save(output, format="WEBP", quality=95)
+    else:
+        result.save(output, format="PNG", optimize=True)
+    return output.getvalue()
 
 
 def materialize_storyboard_take(

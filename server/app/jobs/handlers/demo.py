@@ -13,7 +13,15 @@ async def demo_render(
     payload: dict[str, object],
 ) -> dict[str, object]:
     steps = int(payload.get("steps", 4))
-    for index in range(steps):
+    recovery_action = payload.get("recovery_action")
+    resumable = recovery_action in {"RESUME_FROM_FAILURE", "RETRY_FAILED_PARTS"}
+    completed_steps = min(steps, int((job.progress / 90) * steps)) if resumable else 0
+    for index in range(completed_steps, steps):
         progress = ((index + 1) / steps) * 90
-        await context.checkpoint(session, job, progress, f"模拟渲染 {index + 1}/{steps}")
-    return {"rendered": True, "provider": "mock"}
+        stage_prefix = "恢复渲染" if resumable else "模拟渲染"
+        await context.checkpoint(session, job, progress, f"{stage_prefix} {index + 1}/{steps}")
+    return {
+        "rendered": True,
+        "provider": "mock",
+        "resumed_from_step": completed_steps if resumable else None,
+    }

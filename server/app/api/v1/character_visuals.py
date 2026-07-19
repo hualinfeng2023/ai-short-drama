@@ -8,6 +8,8 @@ from app.schemas import (
     CharacterCandidateSelectRequest,
     CharacterChangeApplyRequest,
     CharacterIdentityLockRequest,
+    CharacterIdentityRestoreRequest,
+    CharacterIdentityViewGenerateRequest,
     CharacterVisualProfileConfirmRequest,
     CharacterVisualProfileUpdateRequest,
 )
@@ -16,7 +18,9 @@ from app.services.character_visuals import (
     character_visual_workspace,
     confirm_visual_profile,
     generate_character_candidates,
+    generate_character_identity_view,
     lock_character_identity,
+    restore_character_identity,
     select_character_candidate,
     update_visual_profile,
 )
@@ -88,6 +92,8 @@ def create_character_visual_candidates(
         profile_version_id=payload.profile_version_id,
         expected_version=payload.expected_version,
         count=payload.count,
+        source_candidate_id=payload.source_candidate_id,
+        refinement_note=payload.refinement_note,
         actor=payload.actor,
         trace_id=get_trace_id(),
     )
@@ -138,6 +144,49 @@ def lock_visual_identity(
             "script_job": script_job.model_dump(mode="json") if script_job else None,
         }
     )
+
+
+@router.post("/projects/{project_id}/characters/{character_id}/identity/restore")
+def restore_visual_identity(
+    project_id: str,
+    character_id: str,
+    payload: CharacterIdentityRestoreRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    identity = restore_character_identity(
+        session,
+        project_id=project_id,
+        character_id=character_id,
+        identity_version_id=payload.identity_version_id,
+        expected_version=payload.expected_version,
+        actor=payload.actor,
+    )
+    return success(identity)
+
+
+@router.post(
+    "/projects/{project_id}/characters/{character_id}/identity/{identity_version_id}/views",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def create_character_identity_view(
+    project_id: str,
+    character_id: str,
+    identity_version_id: str,
+    payload: CharacterIdentityViewGenerateRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    job = generate_character_identity_view(
+        session,
+        project_id=project_id,
+        character_id=character_id,
+        identity_version_id=identity_version_id,
+        view_type=payload.view_type,
+        expected_version=payload.expected_version,
+        refinement_note=payload.refinement_note,
+        actor=payload.actor,
+        trace_id=get_trace_id(),
+    )
+    return success({"job": job.model_dump(mode="json")})
 
 
 @router.post("/projects/{project_id}/characters/{character_id}/changes")

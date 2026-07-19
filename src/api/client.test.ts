@@ -15,6 +15,7 @@ import {
   fetchDirectorProposals,
   generateShotTake,
   mapWorkspace,
+  recoverPersistedJob,
   reviewPersistedCandidateIdentity,
   rewriteBriefStory,
   saveProviderSettings,
@@ -207,6 +208,35 @@ describe('global jobs client', () => {
 
     expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/jobs')
     expect(jobs[0]).toMatchObject({ id: 'job-global', projectId: 'project-other', status: 'RUNNING' })
+  })
+
+  it('sends a structured recovery action without losing partial progress', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        id: 'job-recovery', project_id: 'project-id', job_type: 'DEMO_RENDER',
+        entity_type: 'shot', entity_id: 'shot-03', label: '恢复镜头',
+        entity: 'shot:shot-03', status: 'RETRY_WAIT', progress: 72,
+        stage: '等待重试失败部分', attempt: 3, max_attempts: 4,
+        available_at: '2026-07-17T00:00:00Z', heartbeat_at: null,
+        created_at: '2026-07-17T00:00:00Z', updated_at: '2026-07-17T00:01:00Z',
+        completed_at: null, estimated_seconds: 120, retryable: true,
+        error_code: null, error_message: null,
+      },
+      trace_id: 'trace-recover-job',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const job = await recoverPersistedJob('job-recovery', {
+      action: 'RETRY_FAILED_PARTS',
+      failedPartIds: ['shot-03'],
+    })
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/jobs/job-recovery/recovery')
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
+      action: 'RETRY_FAILED_PARTS',
+      failed_part_ids: ['shot-03'],
+    })
+    expect(job).toMatchObject({ status: 'RETRY_WAIT', progress: 72 })
   })
 })
 
@@ -570,6 +600,11 @@ describe('project naming client', () => {
       production_format: 'live_action',
       primary_market: 'CN',
       canonical_language: 'zh-CN',
+      target_duration_sec: 60,
+      aspect_ratio: '9:16',
+      target_platform: 'douyin',
+      content_requirements: ['名称体现两姐妹与神药'],
+      content_avoidances: ['不使用泛化逆袭标题'],
     })
 
     expect(result).toEqual({
@@ -584,6 +619,8 @@ describe('project naming client', () => {
     expect(JSON.parse(String(request.body))).toMatchObject({
       current_name: '粗略故事梗概',
       primary_market: 'CN',
+      target_duration_sec: 60,
+      content_requirements: ['名称体现两姐妹与神药'],
     })
   })
 

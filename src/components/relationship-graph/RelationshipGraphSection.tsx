@@ -1,16 +1,20 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react'
 import {
   Check,
+  ChevronDown,
   Clock3,
   GitCompare,
   List,
   LockKeyhole,
+  LoaderCircle,
   Maximize2,
   Minus,
   Plus,
   RefreshCw,
   Save,
   ShieldCheck,
+  Sparkles,
+  Trash2,
   UnlockKeyhole,
   Workflow,
 } from 'lucide-react'
@@ -21,6 +25,7 @@ import {
   createRelationshipGraphRevision,
   fetchRelationshipGraphDiff,
   fetchRelationshipGraphValidation,
+  generateRelationshipUpbringingSuggestion,
   saveRelationshipGraph,
   setRelationshipGraphEdgeLock,
   submitRelationshipGraph,
@@ -35,11 +40,13 @@ import {
   type RelationshipGraphVersionRecord,
   type RelationshipStateRecord,
   type RelationshipType,
+  type RelationshipUpbringingSuggestion,
   type SharedUpbringing,
 } from '../../api/client'
 import { Button, Modal, SelectControl, StatusBadge } from '../ui'
 import {
   createRelationshipDraftState,
+  removeRelationshipBeatFromDraft,
   syncRelationshipDraftState,
   updateRelationshipDraft,
 } from './relationshipGraphState'
@@ -208,6 +215,108 @@ function advanceState(state: RelationshipStateRecord): RelationshipStateRecord {
       ? state.conflictIntensity
       : clamp(state.conflictIntensity - 1, 0, 4),
   }
+}
+
+function groupRelationshipBeats(beats: RelationshipBeatRecord[]) {
+  const grouped = new Map<number, RelationshipBeatRecord[]>()
+  beats
+    .slice()
+    .sort((left, right) => (
+      left.episodeOrdinal - right.episodeOrdinal
+      || left.sequence - right.sequence
+      || left.ordinal - right.ordinal
+    ))
+    .forEach((beat) => {
+      const group = grouped.get(beat.episodeOrdinal) ?? []
+      group.push(beat)
+      grouped.set(beat.episodeOrdinal, group)
+    })
+  return Array.from(grouped, ([episodeOrdinal, episodeBeats]) => ({
+    episodeOrdinal,
+    beats: episodeBeats,
+  }))
+}
+
+const RELATIONSHIP_METRICS = [
+  { key: 'trustLevel', label: '信任', range: '-2 至 2' },
+  { key: 'emotionalTemperature', label: '情感温度', range: '-2 至 2' },
+  { key: 'powerBalance', label: '权力平衡', range: '-2 至 2' },
+  { key: 'conflictIntensity', label: '冲突强度', range: '0 至 4' },
+] as const
+
+function conflictIntensityLabel(value: number): string {
+  return ['无', '轻微', '中等', '强烈', '激烈'][clamp(Math.round(value), 0, 4)]
+}
+
+function formatMetricDelta(value: number): string {
+  return value > 0 ? `+${value}` : String(value)
+}
+
+function metricChangeDescription(label: string, delta: number): string {
+  return `${label}${delta > 0 ? '增加' : '减少'} ${Math.abs(delta)}`
+}
+
+function RelationshipMetricChanges({
+  beforeState,
+  afterState,
+}: {
+  beforeState: RelationshipStateRecord
+  afterState: RelationshipStateRecord
+}) {
+  const changes = RELATIONSHIP_METRICS
+    .map((metric) => ({
+      ...metric,
+      delta: afterState[metric.key] - beforeState[metric.key],
+    }))
+    .filter((metric) => metric.delta !== 0)
+
+  return (
+    <div
+      aria-label={changes.length
+        ? `本次关系变化：${changes.map((metric) => metricChangeDescription(metric.label, metric.delta)).join('，')}`
+        : '本次关系变化：量化指标未变化'}
+      className="relationship-metric-changes"
+    >
+      <span>本次关系变化</span>
+      <div>
+        {changes.length ? changes.map((metric) => (
+          <span data-direction={metric.delta > 0 ? 'increase' : 'decrease'} key={metric.key}>
+            {metric.label} <strong>{formatMetricDelta(metric.delta)}</strong>
+          </span>
+        )) : <small>量化指标未变化</small>}
+      </div>
+    </div>
+  )
+}
+
+function RelationshipTimelineState({ state }: { state: RelationshipStateRecord }) {
+  const intensityLabel = conflictIntensityLabel(state.conflictIntensity)
+  return (
+    <details className="relationship-timeline-state">
+      <summary aria-label={`冲突强度：${intensityLabel}，${state.conflictIntensity}/4。展开查看精确指标`}>
+        <span>冲突强度</span>
+        <strong>{intensityLabel}</strong>
+        <small>{state.conflictIntensity}/4</small>
+        <ChevronDown aria-hidden="true" size={13} />
+      </summary>
+      <div className="relationship-timeline-state__details">
+        <dl aria-label="精确关系状态指标">
+          {RELATIONSHIP_METRICS.map((metric) => (
+            <div key={metric.key}>
+              <dt>{metric.label}</dt>
+              <dd>{state[metric.key]}</dd>
+              <small>{metric.range}</small>
+            </div>
+          ))}
+        </dl>
+        <p>信任、温度与权力使用 −2 至 2；冲突强度使用 0 至 4。</p>
+      </div>
+    </details>
+  )
+}
+
+function relationshipBeatIdentity(beat: RelationshipBeatRecord): string {
+  return `${beat.relationshipKey}:${beat.ordinal}`
 }
 
 function validationTone(severity: RelationshipGraphValidationIssue['severity']): string {
@@ -478,6 +587,12 @@ export function RelationshipGraphSection({
   const [revisionKeys, setRevisionKeys] = useState<string[]>(
     selectedGraph.graph.edges.map((edge) => edge.relationshipKey),
   )
+  const [upbringingSuggestion, setUpbringingSuggestion] = useState<RelationshipUpbringingSuggestion | null>(null)
+  const [upbringingSuggestionBusy, setUpbringingSuggestionBusy] = useState(false)
+  const [upbringingSuggestionError, setUpbringingSuggestionError] = useState<string | null>(null)
+  const [newBeatEpisodeOrdinal, setNewBeatEpisodeOrdinal] = useState(1)
+  const [pendingDeleteBeatOrdinal, setPendingDeleteBeatOrdinal] = useState<number | null>(null)
+  const upbringingSuggestionRequestRef = useRef(0)
 
   useEffect(() => {
     setDraftState((current) => syncRelationshipDraftState(current, selectedGraph))
@@ -517,7 +632,33 @@ export function RelationshipGraphSection({
   const connectedEdges = selectedCharacter
     ? draftState.localDraft.edges.filter((edge) => edge.sourceCharacterKey === selectedCharacter.key || edge.targetCharacterKey === selectedCharacter.key)
     : []
+  const selectedRelationshipBeats = selectedEdge
+    ? draftState.localDraft.beats.filter((beat) => beat.relationshipKey === selectedEdge.relationshipKey)
+    : []
+  const persistedBeatIdentities = useMemo(
+    () => new Set(draftState.serverSnapshot.beats.map(relationshipBeatIdentity)),
+    [draftState.serverSnapshot.beats],
+  )
+  const relationshipBeatGroups = groupRelationshipBeats(selectedRelationshipBeats)
+  const finalRelationshipState = relationshipBeatGroups.at(-1)?.beats.at(-1)?.afterState
+    ?? (selectedEdge ? edgeState(selectedEdge) : null)
   const canEditSelected = Boolean(selectedEdge && selectedGraph.editability.semanticEditable && !selectedEdge.locked && !busy)
+  const upbringingFieldId = selectedEdge
+    ? `relationship-upbringing-${selectedGraph.id}-${selectedEdge.relationshipKey}`
+    : 'relationship-upbringing'
+
+  useEffect(() => {
+    upbringingSuggestionRequestRef.current += 1
+    setUpbringingSuggestion(null)
+    setUpbringingSuggestionBusy(false)
+    setUpbringingSuggestionError(null)
+    const latestEpisode = selectedRelationshipBeats.reduce(
+      (latest, beat) => Math.max(latest, beat.episodeOrdinal),
+      1,
+    )
+    setNewBeatEpisodeOrdinal(latestEpisode)
+    setPendingDeleteBeatOrdinal(null)
+  }, [selectedGraph.id, selectedEdge?.relationshipKey])
 
   function editDraft(updater: (graph: RelationshipGraphPayloadRecord) => RelationshipGraphPayloadRecord) {
     setDraftState((current) => updateRelationshipDraft(current, updater))
@@ -542,6 +683,48 @@ export function RelationshipGraphSection({
       if (beat) updater(beat)
       return graph
     })
+  }
+
+  function clearUpbringingSuggestion() {
+    upbringingSuggestionRequestRef.current += 1
+    setUpbringingSuggestion(null)
+    setUpbringingSuggestionBusy(false)
+    setUpbringingSuggestionError(null)
+  }
+
+  async function generateUpbringingSuggestion() {
+    if (
+      !selectedEdge
+      || !selectedEdge.familyKinship
+      || !canEditSelected
+      || upbringingSuggestionBusy
+    ) return
+    const requestId = upbringingSuggestionRequestRef.current + 1
+    upbringingSuggestionRequestRef.current = requestId
+    setUpbringingSuggestionBusy(true)
+    setUpbringingSuggestionError(null)
+    try {
+      const suggestion = await generateRelationshipUpbringingSuggestion(
+        selectedGraph.id,
+        selectedEdge.relationshipKey,
+        {
+          familyKinship: selectedEdge.familyKinship,
+          surfaceRelationship: selectedEdge.surfaceRelationship,
+          trueRelationship: selectedEdge.trueRelationship,
+        },
+      )
+      if (upbringingSuggestionRequestRef.current !== requestId) return
+      setUpbringingSuggestion(suggestion)
+    } catch (reason) {
+      if (upbringingSuggestionRequestRef.current !== requestId) return
+      setUpbringingSuggestionError(
+        reason instanceof Error ? reason.message : '成长经历说明生成失败，请稍后重试。',
+      )
+    } finally {
+      if (upbringingSuggestionRequestRef.current === requestId) {
+        setUpbringingSuggestionBusy(false)
+      }
+    }
   }
 
   function applyRemoteGraph(graph: RelationshipGraphVersionRecord, notice: string) {
@@ -642,14 +825,46 @@ export function RelationshipGraphSection({
     }
   }
 
+  function isLocallyAddedBeat(beat: RelationshipBeatRecord): boolean {
+    return !persistedBeatIdentities.has(relationshipBeatIdentity(beat))
+  }
+
+  function deleteLocallyAddedBeat(beat: RelationshipBeatRecord) {
+    if (!canEditSelected || !isLocallyAddedBeat(beat)) return
+    setDraftState((current) => removeRelationshipBeatFromDraft(
+      current,
+      beat.relationshipKey,
+      beat.ordinal,
+    ))
+    setPendingDeleteBeatOrdinal(null)
+    setError(null)
+    setMessage(`已从未保存草稿中删除第 ${beat.episodeOrdinal} 集变化 ${beat.sequence}。`)
+  }
+
   function addBeat() {
     if (!selectedEdge || !canEditSelected) return
     editDraft((graph) => {
-      const existing = graph.beats.filter((beat) => beat.relationshipKey === selectedEdge.relationshipKey && beat.episodeOrdinal === 1)
-      const beforeState = existing.at(-1)?.afterState ?? edgeState(selectedEdge)
+      const existing = graph.beats
+        .filter((beat) => (
+          beat.relationshipKey === selectedEdge.relationshipKey
+          && beat.episodeOrdinal === newBeatEpisodeOrdinal
+        ))
+        .sort((left, right) => left.sequence - right.sequence)
+      const previousEpisodeBeat = graph.beats
+        .filter((beat) => (
+          beat.relationshipKey === selectedEdge.relationshipKey
+          && beat.episodeOrdinal < newBeatEpisodeOrdinal
+        ))
+        .sort((left, right) => (
+          right.episodeOrdinal - left.episodeOrdinal
+          || right.sequence - left.sequence
+        ))[0]
+      const beforeState = existing.at(-1)?.afterState
+        ?? previousEpisodeBeat?.afterState
+        ?? edgeState(selectedEdge)
       graph.beats.push({
         relationshipKey: selectedEdge.relationshipKey,
-        episodeOrdinal: 1,
+        episodeOrdinal: newBeatEpisodeOrdinal,
         sequence: existing.length + 1,
         sceneOrdinal: null,
         triggerType: 'STORY_EVENT',
@@ -707,10 +922,10 @@ export function RelationshipGraphSection({
           </> : selectedEdge ? <>
             <header><div><span>关系属性</span><h3>{characterName(characters, selectedEdge.sourceCharacterKey)} {selectedEdge.directionality === 'DIRECTED' ? '→' : '↔'} {characterName(characters, selectedEdge.targetCharacterKey)}</h3></div>{selectedEdge.locked ? <span className="relationship-inspector__lock"><LockKeyhole size={13} />已锁定</span> : null}</header>
             <label>关系方向<SelectControl aria-label="关系方向" disabled={!canEditSelected} onChange={(event) => updateEdge((edge) => { edge.directionality = event.target.value as RelationshipEdgeRecord['directionality'] })} value={selectedEdge.directionality}><option value="BIDIRECTIONAL">双向关系</option><option value="DIRECTED">由前者指向后者</option></SelectControl></label>
-            <fieldset disabled={!canEditSelected}><legend>关系类型</legend><div className="relationship-type-options">{(Object.keys(RELATIONSHIP_TYPE_LABELS) as RelationshipType[]).map((type) => <label key={type}><input checked={selectedEdge.relationshipTypes.includes(type)} onChange={(event) => updateEdge((edge) => { if (!event.target.checked && edge.relationshipTypes.length === 1) return; edge.relationshipTypes = event.target.checked ? [...edge.relationshipTypes, type] : edge.relationshipTypes.filter((item) => item !== type); if (type === 'FAMILY' && event.target.checked && !edge.familyKinship) edge.familyKinship = { relationType: 'UNSPECIFIED', sharedUpbringing: 'UNKNOWN' }; if (type === 'FAMILY' && !event.target.checked) delete edge.familyKinship })} type="checkbox" />{RELATIONSHIP_TYPE_LABELS[type]}</label>)}</div></fieldset>
-            {selectedEdge.relationshipTypes.includes('FAMILY') ? <fieldset className="relationship-kinship-fields" disabled={!canEditSelected}><legend>血缘与成长环境</legend><label>亲属来源<SelectControl aria-label="亲属来源" onChange={(event) => updateEdge((edge) => { edge.familyKinship = { ...(edge.familyKinship ?? { sharedUpbringing: 'UNKNOWN' }), relationType: event.target.value as FamilyRelationType } })} value={selectedEdge.familyKinship?.relationType ?? 'UNSPECIFIED'}>{(Object.keys(FAMILY_RELATION_LABELS) as FamilyRelationType[]).map((type) => <option key={type} value={type}>{FAMILY_RELATION_LABELS[type]}</option>)}</SelectControl></label><label>共同成长环境<SelectControl aria-label="共同成长环境" onChange={(event) => updateEdge((edge) => { edge.familyKinship = { ...(edge.familyKinship ?? { relationType: 'UNSPECIFIED' }), sharedUpbringing: event.target.value as SharedUpbringing } })} value={selectedEdge.familyKinship?.sharedUpbringing ?? 'UNKNOWN'}>{(Object.keys(SHARED_UPBRINGING_LABELS) as SharedUpbringing[]).map((type) => <option key={type} value={type}>{SHARED_UPBRINGING_LABELS[type]}</option>)}</SelectControl></label><label>成长经历说明<textarea onChange={(event) => updateEdge((edge) => { edge.familyKinship = { ...(edge.familyKinship ?? { relationType: 'UNSPECIFIED', sharedUpbringing: 'UNKNOWN' }), upbringingContext: event.target.value } })} placeholder="例如：从小共同生活，但因家庭冲突形成不同的情绪表达方式" rows={3} value={selectedEdge.familyKinship?.upbringingContext ?? ''} /></label><small>只有明确的亲生血缘会生成容貌相似约束；养亲、继亲和姻亲不会自动添加。</small></fieldset> : null}
-            <label>明面关系<textarea className="relationship-inspector__narrative" disabled={!canEditSelected} onChange={(event) => updateEdge((edge) => { edge.surfaceRelationship = event.target.value })} rows={4} value={selectedEdge.surfaceRelationship} /></label>
-            <label>真实关系<textarea className="relationship-inspector__narrative" disabled={!canEditSelected} onChange={(event) => updateEdge((edge) => { edge.trueRelationship = event.target.value })} rows={4} value={selectedEdge.trueRelationship} /></label>
+            <fieldset disabled={!canEditSelected}><legend>关系类型</legend><div className="relationship-type-options">{(Object.keys(RELATIONSHIP_TYPE_LABELS) as RelationshipType[]).map((type) => <label key={type}><input checked={selectedEdge.relationshipTypes.includes(type)} onChange={(event) => { if (type === 'FAMILY') clearUpbringingSuggestion(); updateEdge((edge) => { if (!event.target.checked && edge.relationshipTypes.length === 1) return; edge.relationshipTypes = event.target.checked ? [...edge.relationshipTypes, type] : edge.relationshipTypes.filter((item) => item !== type); if (type === 'FAMILY' && event.target.checked && !edge.familyKinship) edge.familyKinship = { relationType: 'UNSPECIFIED', sharedUpbringing: 'UNKNOWN' }; if (type === 'FAMILY' && !event.target.checked) delete edge.familyKinship }) }} type="checkbox" />{RELATIONSHIP_TYPE_LABELS[type]}</label>)}</div></fieldset>
+            {selectedEdge.relationshipTypes.includes('FAMILY') ? <fieldset className="relationship-kinship-fields" disabled={!canEditSelected}><legend>血缘与成长环境</legend><label>亲属来源<SelectControl aria-label="亲属来源" onChange={(event) => { clearUpbringingSuggestion(); updateEdge((edge) => { edge.familyKinship = { ...(edge.familyKinship ?? { sharedUpbringing: 'UNKNOWN' }), relationType: event.target.value as FamilyRelationType } }) }} value={selectedEdge.familyKinship?.relationType ?? 'UNSPECIFIED'}>{(Object.keys(FAMILY_RELATION_LABELS) as FamilyRelationType[]).map((type) => <option key={type} value={type}>{FAMILY_RELATION_LABELS[type]}</option>)}</SelectControl></label><label>共同成长环境<SelectControl aria-label="共同成长环境" onChange={(event) => { clearUpbringingSuggestion(); updateEdge((edge) => { edge.familyKinship = { ...(edge.familyKinship ?? { relationType: 'UNSPECIFIED' }), sharedUpbringing: event.target.value as SharedUpbringing } }) }} value={selectedEdge.familyKinship?.sharedUpbringing ?? 'UNKNOWN'}>{(Object.keys(SHARED_UPBRINGING_LABELS) as SharedUpbringing[]).map((type) => <option key={type} value={type}>{SHARED_UPBRINGING_LABELS[type]}</option>)}</SelectControl></label><div className="relationship-ai-field"><div className="relationship-ai-field__heading"><label htmlFor={upbringingFieldId}>成长经历说明</label><Button aria-label="AI 生成成长经历说明" disabled={!canEditSelected || upbringingSuggestionBusy} onClick={() => void generateUpbringingSuggestion()} size="sm" variant="ghost">{upbringingSuggestionBusy ? <LoaderCircle className="spin" size={13} /> : <Sparkles size={13} />}{upbringingSuggestionBusy ? '生成中' : upbringingSuggestion ? '重新生成' : selectedEdge.familyKinship?.upbringingContext ? 'AI 改写' : 'AI 生成'}</Button></div><textarea id={upbringingFieldId} onChange={(event) => { clearUpbringingSuggestion(); updateEdge((edge) => { edge.familyKinship = { ...(edge.familyKinship ?? { relationType: 'UNSPECIFIED', sharedUpbringing: 'UNKNOWN' }), upbringingContext: event.target.value } }) }} placeholder="例如：从小共同生活，但因家庭冲突形成不同的情绪表达方式" rows={3} value={selectedEdge.familyKinship?.upbringingContext ?? ''} />{upbringingSuggestionError ? <small className="relationship-ai-field__error" role="alert">{upbringingSuggestionError}</small> : null}{upbringingSuggestion ? <div className="relationship-ai-suggestion" role="status"><div><span><Sparkles size={13} /><strong>生成建议</strong></span><Button onClick={() => { const suggestion = upbringingSuggestion.suggestion; updateEdge((edge) => { edge.familyKinship = { ...(edge.familyKinship ?? { relationType: 'UNSPECIFIED', sharedUpbringing: 'UNKNOWN' }), upbringingContext: suggestion } }); clearUpbringingSuggestion() }} size="sm" variant="secondary"><Check size={13} />采用这版</Button></div><p>{upbringingSuggestion.suggestion}</p>{upbringingSuggestion.warning ? <small>{upbringingSuggestion.warning}</small> : null}</div> : null}</div><small>只有明确的亲生血缘会生成容貌相似约束；养亲、继亲和姻亲不会自动添加。</small></fieldset> : null}
+            <label>明面关系<textarea className="relationship-inspector__narrative" disabled={!canEditSelected} onChange={(event) => { clearUpbringingSuggestion(); updateEdge((edge) => { edge.surfaceRelationship = event.target.value }) }} rows={4} value={selectedEdge.surfaceRelationship} /></label>
+            <label>真实关系<textarea className="relationship-inspector__narrative" disabled={!canEditSelected} onChange={(event) => { clearUpbringingSuggestion(); updateEdge((edge) => { edge.trueRelationship = event.target.value }) }} rows={4} value={selectedEdge.trueRelationship} /></label>
             <details><summary>双方如何理解这段关系</summary><label>{characterName(characters, selectedEdge.sourceCharacterKey)}眼中的关系<textarea disabled={!canEditSelected} onChange={(event) => updateEdge((edge) => { edge.sourceView.perceivedRelationship = event.target.value })} rows={2} value={selectedEdge.sourceView.perceivedRelationship} /></label><label>{characterName(characters, selectedEdge.sourceCharacterKey)}的判断<textarea disabled={!canEditSelected} onChange={(event) => updateEdge((edge) => { edge.sourceView.belief = event.target.value })} rows={2} value={selectedEdge.sourceView.belief} /></label><label>{characterName(characters, selectedEdge.targetCharacterKey)}眼中的关系<textarea disabled={!canEditSelected} onChange={(event) => updateEdge((edge) => { edge.targetView.perceivedRelationship = event.target.value })} rows={2} value={selectedEdge.targetView.perceivedRelationship} /></label><label>{characterName(characters, selectedEdge.targetCharacterKey)}的判断<textarea disabled={!canEditSelected} onChange={(event) => updateEdge((edge) => { edge.targetView.belief = event.target.value })} rows={2} value={selectedEdge.targetView.belief} /></label></details>
             <div className="relationship-inspector__ranges"><RangeField disabled={!canEditSelected} label="信任" maximum={2} minimum={-2} onChange={(value) => updateEdge((edge) => { edge.trustLevel = value })} value={selectedEdge.trustLevel} /><RangeField disabled={!canEditSelected} label="情感温度" maximum={2} minimum={-2} onChange={(value) => updateEdge((edge) => { edge.emotionalTemperature = value })} value={selectedEdge.emotionalTemperature} /><RangeField disabled={!canEditSelected} label="权力平衡" maximum={2} minimum={-2} onChange={(value) => updateEdge((edge) => { edge.powerBalance = value })} value={selectedEdge.powerBalance} /><RangeField disabled={!canEditSelected} label="冲突强度" maximum={4} minimum={0} onChange={(value) => updateEdge((edge) => { edge.conflictIntensity = value })} value={selectedEdge.conflictIntensity} /></div>
             <label>剧情功能<textarea disabled={!canEditSelected} onChange={(event) => updateEdge((edge) => { edge.storyFunction = event.target.value })} rows={3} value={selectedEdge.storyFunction} /></label>
@@ -722,8 +937,109 @@ export function RelationshipGraphSection({
       </div>
 
       <section className="relationship-timeline" aria-labelledby="relationship-timeline-title">
-        <header><div><p className="eyebrow">开场 → 关键变化 → 本集结尾</p><h3 id="relationship-timeline-title">关系变化时间线</h3></div><Button disabled={!canEditSelected} onClick={addBeat} size="sm" variant="secondary"><Plus size={14} />添加变化事件</Button></header>
-        {selectedEdge ? <div className="relationship-timeline__track"><article className="relationship-timeline__endpoint"><Clock3 size={15} /><span>开场状态</span><strong>{selectedEdge.surfaceRelationship}</strong><small>信任 {selectedEdge.trustLevel} · 权力 {selectedEdge.powerBalance} · 冲突 {selectedEdge.conflictIntensity}</small></article>{draftState.localDraft.beats.filter((beat) => beat.relationshipKey === selectedEdge.relationshipKey).sort((a, b) => a.sequence - b.sequence).map((beat) => <article className="relationship-beat" id={`relationship-beat-${selectedGraph.id}-${beat.ordinal}`} key={`${beat.relationshipKey}-${beat.ordinal}`}><header><span>第 {beat.episodeOrdinal} 集 · 变化 {beat.sequence}</span><SelectControl aria-label="触发类型" disabled={!canEditSelected} onChange={(event) => updateBeat(beat.ordinal, (item) => { item.triggerType = event.target.value as RelationshipBeatRecord['triggerType']; if (!['MISJUDGMENT', 'AUTHENTICATION'].includes(item.triggerType)) item.triggerRef = null })} value={beat.triggerType}>{(Object.keys(TRIGGER_LABELS) as RelationshipBeatRecord['triggerType'][]).map((type) => <option key={type} value={type}>{TRIGGER_LABELS[type]}</option>)}</SelectControl></header>{['MISJUDGMENT', 'AUTHENTICATION'].includes(beat.triggerType) ? <label>关联序号<input disabled={!canEditSelected} onChange={(event) => updateBeat(beat.ordinal, (item) => { item.triggerRef = event.target.value })} placeholder="例如认证步骤 2" value={beat.triggerRef ?? ''} /></label> : null}<label>触发证据<textarea disabled={!canEditSelected} onChange={(event) => updateBeat(beat.ordinal, (item) => { item.evidence = event.target.value })} rows={2} value={beat.evidence} /></label><div className="relationship-beat__states"><label>变化后明面关系<input disabled={!canEditSelected} onChange={(event) => updateBeat(beat.ordinal, (item) => { item.afterState.surfaceRelationship = event.target.value })} value={beat.afterState.surfaceRelationship} /></label><label>变化后真实关系<input disabled={!canEditSelected} onChange={(event) => updateBeat(beat.ordinal, (item) => { item.afterState.trueRelationship = event.target.value })} value={beat.afterState.trueRelationship} /></label></div><label>情绪后果<textarea disabled={!canEditSelected} onChange={(event) => updateBeat(beat.ordinal, (item) => { item.emotionalConsequence = event.target.value })} rows={2} value={beat.emotionalConsequence} /></label><label>观众可见范围<SelectControl aria-label="观众可见范围" disabled={!canEditSelected} onChange={(event) => updateBeat(beat.ordinal, (item) => { item.audienceVisibility = event.target.value as RelationshipBeatRecord['audienceVisibility'] })} value={beat.audienceVisibility}>{(Object.keys(VISIBILITY_LABELS) as RelationshipBeatRecord['audienceVisibility'][]).map((visibility) => <option key={visibility} value={visibility}>{VISIBILITY_LABELS[visibility]}</option>)}</SelectControl></label></article>)}<article className="relationship-timeline__endpoint"><Check size={15} /><span>本集结尾</span><strong>{draftState.localDraft.beats.filter((beat) => beat.relationshipKey === selectedEdge.relationshipKey).sort((a, b) => b.sequence - a.sequence)[0]?.afterState.surfaceRelationship ?? selectedEdge.surfaceRelationship}</strong><small>将作为剧本关系重排的目标状态</small></article></div> : <p>请选择一条关系查看变化时间线。</p>}
+        <header className="relationship-timeline__heading">
+          <div>
+            <p className="eyebrow">按集编排 · 纵向演变轨道</p>
+            <h3 id="relationship-timeline-title">关系变化时间线</h3>
+            <p>从故事开场开始，按集查看触发事件如何一步步改变两人的关系。</p>
+          </div>
+          {selectedEdge ? <div className="relationship-timeline__toolbar">
+            <div className="relationship-timeline__summary" aria-label="时间线概览">
+              <span><strong>{relationshipBeatGroups.length}</strong> 个剧情阶段</span>
+              <span><strong>{selectedRelationshipBeats.length}</strong> 次关系变化</span>
+            </div>
+            <div className="relationship-timeline__add">
+              <label>
+                <span>添加至</span>
+                <span>第 <input aria-label="添加变化事件的目标集数" disabled={!canEditSelected} min={1} onChange={(event) => setNewBeatEpisodeOrdinal(Math.max(1, Number(event.target.value) || 1))} type="number" value={newBeatEpisodeOrdinal} /> 集</span>
+              </label>
+              <Button disabled={!canEditSelected} onClick={addBeat} size="sm" variant="secondary"><Plus size={14} />添加变化事件</Button>
+            </div>
+          </div> : null}
+        </header>
+        {selectedEdge && finalRelationshipState ? <div className="relationship-timeline__track">
+          <article className="relationship-timeline__baseline">
+            <div className="relationship-timeline__node"><Clock3 size={16} /></div>
+            <div className="relationship-timeline__baseline-copy">
+              <span>故事开场 · 关系基线</span>
+              <strong>{selectedEdge.surfaceRelationship}</strong>
+              <p>真实关系：{selectedEdge.trueRelationship}</p>
+            </div>
+            <RelationshipTimelineState state={selectedEdge} />
+          </article>
+
+          <div className="relationship-timeline__episodes">
+            {relationshipBeatGroups.length ? relationshipBeatGroups.map((group) => {
+              const openingState = group.beats[0].beforeState
+              const endingState = group.beats.at(-1)?.afterState ?? openingState
+              const episodeTitleId = `relationship-episode-${selectedGraph.id}-${group.episodeOrdinal}`
+              return <section aria-labelledby={episodeTitleId} className="relationship-episode" key={group.episodeOrdinal}>
+                <header className="relationship-episode__heading">
+                  <span className="relationship-episode__marker"><small>EP</small><strong>{String(group.episodeOrdinal).padStart(2, '0')}</strong></span>
+                  <span className="relationship-episode__title">
+                    <strong id={episodeTitleId}>第 {group.episodeOrdinal} 集</strong>
+                    <small>{group.beats.length} 次关系变化</small>
+                  </span>
+                  <span className="relationship-episode__journey">
+                    <span><small>本集起点</small><strong>{openingState.surfaceRelationship}</strong></span>
+                    <i aria-hidden="true">→</i>
+                    <span><small>本集落点</small><strong>{endingState.surfaceRelationship}</strong></span>
+                  </span>
+                </header>
+
+                <div className="relationship-episode__body">
+                  <ol className="relationship-episode__events">
+                    {group.beats.map((beat) => <li data-sequence={beat.sequence} key={`${beat.relationshipKey}-${beat.ordinal}`}>
+                      <article className="relationship-beat" id={`relationship-beat-${selectedGraph.id}-${beat.ordinal}`}>
+                        <header>
+                          <div><span>变化 {beat.sequence}</span><strong>{TRIGGER_LABELS[beat.triggerType]}</strong>{isLocallyAddedBeat(beat) ? <small className="relationship-beat__local-badge">未保存新增</small> : null}</div>
+                          <div className="relationship-beat__controls">
+                            <label><span>触发方式</span><SelectControl aria-label={`第 ${beat.episodeOrdinal} 集变化 ${beat.sequence} 的触发类型`} disabled={!canEditSelected} onChange={(event) => updateBeat(beat.ordinal, (item) => { item.triggerType = event.target.value as RelationshipBeatRecord['triggerType']; if (!['MISJUDGMENT', 'AUTHENTICATION'].includes(item.triggerType)) item.triggerRef = null })} value={beat.triggerType}>{(Object.keys(TRIGGER_LABELS) as RelationshipBeatRecord['triggerType'][]).map((type) => <option key={type} value={type}>{TRIGGER_LABELS[type]}</option>)}</SelectControl></label>
+                            <label><span>观众可见</span><SelectControl aria-label={`第 ${beat.episodeOrdinal} 集变化 ${beat.sequence} 的观众可见范围`} disabled={!canEditSelected} onChange={(event) => updateBeat(beat.ordinal, (item) => { item.audienceVisibility = event.target.value as RelationshipBeatRecord['audienceVisibility'] })} value={beat.audienceVisibility}>{(Object.keys(VISIBILITY_LABELS) as RelationshipBeatRecord['audienceVisibility'][]).map((visibility) => <option key={visibility} value={visibility}>{VISIBILITY_LABELS[visibility]}</option>)}</SelectControl></label>
+                            {isLocallyAddedBeat(beat) ? pendingDeleteBeatOrdinal === beat.ordinal ? <div className="relationship-beat__delete-confirm" role="group" aria-label={`确认删除第 ${beat.episodeOrdinal} 集变化 ${beat.sequence}`}>
+                              <span>删除？</span>
+                              <Button aria-label={`取消删除第 ${beat.episodeOrdinal} 集变化 ${beat.sequence}`} onClick={() => setPendingDeleteBeatOrdinal(null)} size="sm" variant="ghost">取消</Button>
+                              <Button aria-label={`确认删除第 ${beat.episodeOrdinal} 集变化 ${beat.sequence}`} onClick={() => deleteLocallyAddedBeat(beat)} size="sm" variant="danger"><Trash2 size={13} />确认</Button>
+                            </div> : <Button aria-label={`删除第 ${beat.episodeOrdinal} 集变化 ${beat.sequence}`} className="relationship-beat__delete" disabled={!canEditSelected} onClick={() => setPendingDeleteBeatOrdinal(beat.ordinal)} size="sm" variant="ghost"><Trash2 size={13} />删除</Button> : null}
+                          </div>
+                        </header>
+                        <div className="relationship-beat__before"><span>变化前</span><p>{beat.beforeState.surfaceRelationship}</p></div>
+                        <div className="relationship-beat__form">
+                          {['MISJUDGMENT', 'AUTHENTICATION'].includes(beat.triggerType) ? <label><span>关联序号</span><input disabled={!canEditSelected} onChange={(event) => updateBeat(beat.ordinal, (item) => { item.triggerRef = event.target.value })} placeholder="例如认证步骤 2" value={beat.triggerRef ?? ''} /></label> : null}
+                          <label className="is-wide"><span>触发证据</span><textarea disabled={!canEditSelected} onChange={(event) => updateBeat(beat.ordinal, (item) => { item.evidence = event.target.value })} rows={2} value={beat.evidence} /></label>
+                          <div className="relationship-beat__states">
+                            <label><span>变化后明面关系</span><input disabled={!canEditSelected} onChange={(event) => updateBeat(beat.ordinal, (item) => { item.afterState.surfaceRelationship = event.target.value })} value={beat.afterState.surfaceRelationship} /></label>
+                            <label><span>变化后真实关系</span><input disabled={!canEditSelected} onChange={(event) => updateBeat(beat.ordinal, (item) => { item.afterState.trueRelationship = event.target.value })} value={beat.afterState.trueRelationship} /></label>
+                          </div>
+                          <label className="is-wide"><span>情绪后果</span><textarea disabled={!canEditSelected} onChange={(event) => updateBeat(beat.ordinal, (item) => { item.emotionalConsequence = event.target.value })} rows={2} value={beat.emotionalConsequence} /></label>
+                        </div>
+                        <RelationshipMetricChanges beforeState={beat.beforeState} afterState={beat.afterState} />
+                      </article>
+                    </li>)}
+                  </ol>
+                  <footer className="relationship-episode__outcome">
+                    <span className="relationship-episode__outcome-icon"><Check size={15} /></span>
+                    <div><span>本集关系落点</span><strong>{endingState.surfaceRelationship}</strong><small>真实关系：{endingState.trueRelationship}</small></div>
+                    <RelationshipTimelineState state={endingState} />
+                  </footer>
+                </div>
+              </section>
+            }) : <div className="relationship-timeline__empty">
+              <strong>还没有设置关系变化</strong>
+              <p>选择目标集数并添加第一个事件，系统会从开场关系自动承接变化前状态。</p>
+            </div>}
+          </div>
+
+          <article className="relationship-timeline__final">
+            <div className="relationship-timeline__node"><Check size={16} /></div>
+            <div>
+              <span>{relationshipBeatGroups.length ? '当前最终状态' : '关系基线即当前状态'}</span>
+              <strong>{finalRelationshipState.surfaceRelationship}</strong>
+              <small>{relationshipBeatGroups.length ? `承接至第 ${relationshipBeatGroups.at(-1)?.episodeOrdinal} 集结尾，并作为后续剧本的关系起点。` : '添加变化事件后，这里会同步显示最新的关系落点。'}</small>
+            </div>
+            <RelationshipTimelineState state={finalRelationshipState} />
+          </article>
+        </div> : <p className="relationship-timeline__unselected">请选择一条关系查看变化时间线。</p>}
       </section>
 
       <section className="relationship-validation" aria-labelledby="relationship-validation-title"><header><div><h3 id="relationship-validation-title">关系网检查</h3><p>阻断问题必须修正后才能确认关系并生成剧本。</p></div><span>{validationIssues.filter((issue) => issue.severity === 'BLOCKER').length} 个阻断 · {validationIssues.filter((issue) => issue.severity === 'WARNING').length} 个提醒</span></header>{validationIssues.length ? <ul>{validationIssues.map((issue) => <li data-severity={issue.severity.toLowerCase()} key={`${issue.code}-${issue.relationshipKey ?? issue.characterKey ?? ''}`}><button onClick={() => selectIssue(issue)} type="button"><strong>{validationTone(issue.severity)}</strong><span>{issue.message}</span><small title={issue.code}>{VALIDATION_CODE_LABELS[issue.code] ?? '关系规则'}</small></button></li>)}</ul> : <div className="relationship-validation__empty"><Check size={16} />当前检查未发现问题</div>}</section>

@@ -218,6 +218,23 @@ class PersistentJobWorker:
                 "任务输入必须是 JSON Object",
                 retryable=False,
             )
+        recovery = payload.get("_recovery")
+        if isinstance(recovery, dict):
+            action = recovery.get("action")
+            payload["recovery_action"] = action
+            payload["resume_from"] = recovery.get("resume_from")
+            if action == "RETRY_FAILED_PARTS":
+                payload["target_part_ids"] = recovery.get("failed_part_ids", [])
+            elif action == "SWITCH_MODEL":
+                if recovery.get("model"):
+                    payload["model"] = recovery["model"]
+                payload["execution_strategy"] = recovery.get("strategy", "auto-alternate")
+            elif action == "FALLBACK_EXECUTION":
+                payload["execution_mode"] = "DEGRADED"
+                payload["allow_degraded"] = True
+                payload["execution_strategy"] = recovery.get("strategy", "stability-first")
+            elif action == "PROVIDE_INPUT":
+                payload["additional_context"] = recovery.get("additional_input")
         context = JobExecutionContext(
             settings=self.settings,
             worker_id=self.worker_id,

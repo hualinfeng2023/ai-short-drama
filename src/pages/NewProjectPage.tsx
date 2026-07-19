@@ -7,7 +7,6 @@ import {
   Paperclip,
   Save,
   Send,
-  Sparkles,
   UploadCloud,
   X,
 } from 'lucide-react'
@@ -107,7 +106,7 @@ export function NewProjectPage() {
       <section className="creation-panel">
         <header className="creation-panel__header">
           <div>
-            <p className="eyebrow">AI 新建项目</p>
+            <p className="eyebrow">新建项目</p>
             <h1>先讲一个你想看到的故事</h1>
             <p>不需要写镜头或模型参数。系统会先生成一份可修改的导演方案。</p>
           </div>
@@ -139,7 +138,7 @@ export function NewProjectPage() {
         ) : (
           <div className="conversation">
             <div className="assistant-message">
-              <span className="assistant-avatar"><Sparkles size={17} /></span>
+              <span className="assistant-avatar"><FileText size={17} /></span>
               <div>
                 <strong>我会先替你整理故事方向</strong>
                 <p>告诉我：谁遇到了什么变化？你希望观众在最后一秒感受到什么？</p>

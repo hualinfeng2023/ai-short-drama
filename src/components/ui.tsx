@@ -15,7 +15,7 @@ import {
   type ReactNode,
 } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertCircle, AlertTriangle, Check, CheckCircle2, ChevronDown, CircleDot, Info, LoaderCircle, Search, X } from 'lucide-react'
+import { AlertCircle, AlertTriangle, Check, CheckCircle2, ChevronDown, CircleDot, Info, LoaderCircle, LockKeyhole, Search, X } from 'lucide-react'
 
 export function Button({
   variant = 'primary',
@@ -108,6 +108,7 @@ export function SelectControl({
   const triggerRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
+  const focusSearchOnOpenRef = useRef(false)
   const typeaheadRef = useRef('')
   const typeaheadTimerRef = useRef<number | null>(null)
   const rawId = useId()
@@ -214,6 +215,8 @@ export function SelectControl({
 
   useEffect(() => {
     if (!open || !searchEnabled) return
+    if (!focusSearchOnOpenRef.current) return
+    focusSearchOnOpenRef.current = false
     const frame = window.requestAnimationFrame(() => searchRef.current?.focus())
     return () => window.cancelAnimationFrame(frame)
   }, [open, searchEnabled])
@@ -223,8 +226,9 @@ export function SelectControl({
     document.getElementById(activeOptionId)?.scrollIntoView({ block: 'nearest' })
   }, [activeOptionId, open])
 
-  const openMenu = (preferredValue = selectedValue) => {
+  const openMenu = (preferredValue = selectedValue, focusSearch = false) => {
     if (disabled) return
+    focusSearchOnOpenRef.current = focusSearch
     setQuery('')
     setActiveValue(options.find((option) => option.value === preferredValue && !option.disabled)?.value ?? firstEnabledValue)
     setOpen(true)
@@ -281,7 +285,7 @@ export function SelectControl({
     if (disabled) return
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault()
-      if (!open) openMenu()
+      if (!open) openMenu(selectedValue, searchEnabled)
       else moveActive(event.key === 'ArrowDown' ? 1 : -1)
       return
     }
@@ -298,7 +302,7 @@ export function SelectControl({
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault()
       if (open && activeValue) commitValue(activeValue)
-      else openMenu()
+      else openMenu(selectedValue, searchEnabled)
       return
     }
     if (event.key === 'Escape' && open) {
@@ -467,9 +471,11 @@ export function SelectControl({
 
 const statusMeta: Record<string, { label: string; tone: string; icon: ReactNode }> = {
   DRAFT: { label: '草稿', tone: 'neutral', icon: <CircleDot size={12} /> },
+  BRIEF_LOCKED: { label: '简报已锁定', tone: 'neutral', icon: <LockKeyhole size={12} /> },
   READY: { label: '待开始', tone: 'neutral', icon: <CircleDot size={12} /> },
   QUEUED: { label: '排队中', tone: 'info', icon: <LoaderCircle size={12} /> },
   GENERATING: { label: '生成中', tone: 'info', icon: <LoaderCircle size={12} className="spin" /> },
+  GENERATING_DOSSIER: { label: '身份档案生成中', tone: 'info', icon: <LoaderCircle size={12} className="spin" /> },
   GENERATED: { label: '已生成', tone: 'info', icon: <Check size={12} /> },
   PENDING_REVIEW: { label: '待审核', tone: 'warning', icon: <AlertTriangle size={12} /> },
   APPROVED: { label: '已批准', tone: 'success', icon: <Check size={12} /> },
@@ -516,6 +522,7 @@ const statusMeta: Record<string, { label: string; tone: string; icon: ReactNode 
   READY_FOR_REVIEW: { label: '待审核', tone: 'warning', icon: <AlertTriangle size={12} /> },
   RESTRICTED_DEMO: { label: '仅限演示', tone: 'warning', icon: <AlertTriangle size={12} /> },
   SELECTED: { label: '已选择', tone: 'info', icon: <Check size={12} /> },
+  SUPERSEDED: { label: '历史版本', tone: 'neutral', icon: <CircleDot size={12} /> },
   STORYBOARDING: { label: '分镜生成中', tone: 'info', icon: <LoaderCircle size={12} className="spin" /> },
   SYNTHETIC_ALLOWED: { label: '允许合成', tone: 'success', icon: <Check size={12} /> },
   SYNTHETIC_OWNED: { label: '自有合成素材', tone: 'success', icon: <Check size={12} /> },
@@ -532,11 +539,25 @@ export function getStatusLabel(status: string): string {
   return statusMeta[status]?.label ?? status
 }
 
-export function StatusBadge({ status, label }: { status: string; label?: string }) {
+export function StatusBadge({
+  status,
+  label,
+  description,
+}: {
+  status: string
+  label?: string
+  description?: string
+}) {
   const meta = statusMeta[status] ?? statusMeta.DRAFT
   const displayLabel = label ?? meta.label
   return (
-    <span className={`status-badge status-badge--${meta.tone}`} data-tone={meta.tone} title={displayLabel}>
+    <span
+      aria-label={description}
+      className={`status-badge status-badge--${meta.tone}`}
+      data-tone={meta.tone}
+      role={description ? 'status' : undefined}
+      title={description ?? displayLabel}
+    >
       {meta.icon}
       {displayLabel}
     </span>

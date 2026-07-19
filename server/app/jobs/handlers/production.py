@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import suppress
 from datetime import UTC, datetime
 from functools import partial
 
@@ -8,6 +9,8 @@ from app.db.models import Job
 from app.jobs.contracts import JobExecutionContext, JobExecutionError
 from app.jobs.registry import register_job_handler
 from app.services.character_visuals import (
+    CHARACTER_CLEAN_FRAME_CONSTRAINT,
+    IDENTITY_DOSSIER_MAX_WAIT_SECONDS,
     materialize_identity_asset,
     materialize_visual_candidate,
 )
@@ -48,12 +51,28 @@ async def _generate_character_image(
     payload: dict[str, object],
     *,
     reference_asset_ids: list[str],
+    max_wait_seconds: int | None = None,
 ):
-    references = reference_data_urls(session, context.settings, reference_asset_ids)
+    references = reference_data_urls(
+        session,
+        context.settings,
+        reference_asset_ids,
+        mask_character_watermark=True,
+    )
+    prompt = (
+        f"{payload['prompt']}\n"
+        "参考图只用于人物身份一致性，不得把参考图中的非人物元素带入结果图。\n"
+        f"{CHARACTER_CLEAN_FRAME_CONSTRAINT}。"
+    )
+    deadline = (
+        asyncio.get_running_loop().time() + max_wait_seconds
+        if max_wait_seconds is not None
+        else None
+    )
     generation = asyncio.create_task(
         context.generate_image(
             context.settings,
-            str(payload["prompt"]),
+            prompt,
             model=context.settings.ark_image_model,
             size="2K",
             reference_images=references,
@@ -62,7 +81,18 @@ async def _generate_character_image(
     )
     try:
         while not generation.done():
-            done, _pending = await asyncio.wait({generation}, timeout=4)
+            remaining = deadline - asyncio.get_running_loop().time() if deadline else None
+            if remaining is not None and remaining <= 0:
+                raise JobExecutionError(
+                    "CHARACTER_IMAGE_TIMEOUT",
+                    f"角色身份图片生成超过 {max_wait_seconds} 秒",
+                    retryable=False,
+                    details={"max_wait_seconds": max_wait_seconds},
+                )
+            done, _pending = await asyncio.wait(
+                {generation},
+                timeout=min(4, remaining) if remaining is not None else 4,
+            )
             if done:
                 break
             await context.checkpoint(session, job, 58, "正在生成角色视觉资产")
@@ -74,6 +104,8 @@ async def _generate_character_image(
     finally:
         if not generation.done():
             generation.cancel()
+            with suppress(asyncio.CancelledError):
+                await generation
 
 
 @register_job_handler("GENERATE_CHARACTER_CANDIDATES")
@@ -206,6 +238,7 @@ async def generate_character_identity_dossier(
         job,
         payload,
         reference_asset_ids=[str(payload["reference_asset_id"])],
+        max_wait_seconds=IDENTITY_DOSSIER_MAX_WAIT_SECONDS,
     )
     await context.checkpoint(session, job, 82, "登记角色身份档案视图")
     asset, record = materialize_identity_asset(

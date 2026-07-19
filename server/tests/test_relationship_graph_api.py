@@ -2,16 +2,15 @@ import json
 from datetime import UTC, datetime
 
 import pytest
-from httpx import AsyncClient
-from sqlalchemy import select
-from sqlalchemy.orm import sessionmaker
-
 from app.config import get_settings
 from app.db.models import (
+    Asset,
     ChangeSet,
     Character,
     CharacterCandidateBatch,
     CharacterFamilyResemblanceConstraint,
+    CharacterIdentityAsset,
+    CharacterIdentityVersion,
     EpisodeOutlineVersion,
     Job,
     Project,
@@ -23,8 +22,12 @@ from app.db.models import (
     StoryVersion,
 )
 from app.db.session import get_engine
+from app.jobs.worker import PersistentJobWorker
 from app.seed import PROJECT_ID
 from app.services.character_visuals import (
+    CANDIDATE_VARIANTS,
+    _extract_age,
+    _profile_audit,
     is_biological_kinship,
     kinship_similarity_level,
     materialize_identity_asset,
@@ -32,9 +35,42 @@ from app.services.character_visuals import (
 )
 from app.services.image_provider import GeneratedImage
 from app.services.projects import canonical_json, content_hash
+from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.orm import sessionmaker
 
 STORY_ID = "91000000-0000-4000-8000-000000000001"
 STORY_BIBLE_ID = "91000000-0000-4000-8000-000000000002"
+
+
+@pytest.mark.parametrize(
+    ("explicit_age", "visual_notes", "expected"),
+    [
+        ("31岁", "26岁，留齐肩碎发", "31岁"),
+        (None, "26岁，留齐肩碎发", "26岁"),
+        (None, "六十岁左右，身材发福", "六十岁左右"),
+        (None, "留齐肩碎发，穿通勤休闲装", "年龄待明确"),
+    ],
+)
+def test_character_age_extraction_prefers_typed_data_then_visual_notes(
+    explicit_age: str | None,
+    visual_notes: str,
+    expected: str,
+) -> None:
+    assert _extract_age(explicit_age, visual_notes) == expected
+
+
+def test_character_profile_audit_blocks_conflicting_ages() -> None:
+    issues = _profile_audit(
+        {
+            "identity_fields": {"age": "31岁", "occupation": "调查记者", "era": "当代"},
+            "appearance_fields": {"identifying_features": "26岁，留齐肩碎发"},
+            "styling_fields": {"wardrobe": "通勤休闲装", "forbidden_elements": []},
+            "project_style": {"region_era": "当代中国城市"},
+        }
+    )
+
+    assert any(issue["code"] == "AGE_CONFLICT" for issue in issues)
 
 
 def relationship_state(
@@ -140,7 +176,12 @@ def prepare_relationship_project() -> None:
     now = datetime.now(UTC)
     bible_payload = {
         "characters": [
-            {"key": "protagonist", "name": "林岚", "role": "PROTAGONIST"},
+            {
+                "key": "protagonist",
+                "name": "林岚",
+                "role": "PROTAGONIST",
+                "visual_notes": "26岁，留齐肩碎发，背着洗得发白的帆布包",
+            },
             {"key": "witness", "name": "周启", "role": "SUPPORTING"},
         ],
         "relationships": ["林岚与周启共享一段被删除的过去"],
@@ -271,6 +312,7 @@ async def lock_character_for_test(
         )
         assert len(jobs) == 3
         for index, job in enumerate(jobs):
+            assert 0 <= json.loads(job.input_json)["seed"] < 2**31
             materialize_visual_candidate(
                 session,
                 get_settings(),
@@ -312,6 +354,7 @@ async def lock_character_for_test(
         )
         assert len(jobs) == 5
         for index, job in enumerate(jobs):
+            assert 0 <= json.loads(job.input_json)["seed"] < 2**31
             materialize_identity_asset(
                 session,
                 get_settings(),
@@ -463,6 +506,12 @@ async def test_character_visual_flow_requires_manual_generation_and_lock(
     workspace = workspace_response.json()["data"]
     assert workspace["project_status"] == "CHARACTER_VISUAL_READY"
     assert all(not item["candidates"] for item in workspace["characters"])
+    protagonist = next(item for item in workspace["characters"] if item["name"] == "林岚")
+    assert protagonist["profile"]["identity_fields"]["age"] == "26岁"
+    assert protagonist["profile"]["summary"].startswith(
+        "26岁 · 待明确职业 · 留齐肩碎发"
+    )
+    assert "30岁左右" not in protagonist["profile"]["summary"]
 
     factory = sessionmaker(bind=get_engine(get_settings().database_url), expire_on_commit=False)
     script_job = None
@@ -554,6 +603,54 @@ async def test_character_visual_flow_requires_manual_generation_and_lock(
                 ).all()
             )
             assert len(jobs) == 5
+            failed_job_id = jobs[0].id
+            jobs[0].status = "FAILED"
+            jobs[0].completed_at = datetime.now(UTC)
+            jobs[0].error_code = "TEST_IMAGE_FAILURE"
+            character = session.get(Character, character_id)
+            assert character is not None
+            character.status = "GENERATION_FAILED"
+            session.commit()
+
+        failed_workspace = (
+            await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")
+        ).json()["data"]
+        failed_character = next(
+            item for item in failed_workspace["characters"] if item["id"] == character_id
+        )
+        failed_identity = next(
+            item for item in failed_character["identities"] if item["id"] == identity_id
+        )
+        assert len(failed_identity["view_jobs"]) == 5
+        failed_view_job = next(
+            item for item in failed_identity["view_jobs"] if item["id"] == failed_job_id
+        )
+        assert failed_view_job["status"] == "FAILED"
+        assert failed_view_job["retryable"] is True
+        assert failed_view_job["max_wait_seconds"] == 120
+
+        retried = await client.post(
+            f"/api/v1/jobs/{failed_job_id}/retry",
+            headers={"Idempotency-Key": f"retry-dossier-{character_id}"},
+        )
+        assert retried.status_code == 200, retried.text
+        assert retried.json()["data"]["status"] == "RETRY_WAIT"
+
+        with factory() as session:
+            character = session.get(Character, character_id)
+            identity = session.get(CharacterIdentityVersion, identity_id)
+            assert character is not None and character.status == "PENDING_REVIEW"
+            assert identity is not None and identity.status == "GENERATING_DOSSIER"
+            jobs = list(
+                session.scalars(
+                    select(Job)
+                    .where(
+                        Job.job_type == "GENERATE_CHARACTER_IDENTITY_DOSSIER",
+                        Job.entity_id == identity_id,
+                    )
+                    .order_by(Job.created_at)
+                ).all()
+            )
             for index, job in enumerate(jobs):
                 materialize_identity_asset(
                     session,
@@ -568,10 +665,80 @@ async def test_character_visual_flow_requires_manual_generation_and_lock(
                         request_id=None,
                     ),
                 )
+                job.status = "SUCCEEDED"
+                job.completed_at = datetime.now(UTC)
+                job.updated_at = datetime.now(UTC)
             session.commit()
             character = session.get(Character, character_id)
             assert character is not None and character.status == "REVIEW_REQUIRED"
             expected_version = character.lock_version
+
+        if character_data["name"] == "林岚":
+            current_workspace = (
+                await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")
+            ).json()["data"]
+            current_character = next(
+                item for item in current_workspace["characters"] if item["id"] == character_id
+            )
+            current_identity = next(
+                item for item in current_character["identities"] if item["id"] == identity_id
+            )
+            current_view = next(
+                item for item in current_identity["assets"]
+                if item["view_type"] == "THREE_QUARTER"
+            )
+            adjustment = await client.post(
+                (
+                    f"/api/v1/projects/{PROJECT_ID}/characters/{character_id}"
+                    f"/identity/{identity_id}/views"
+                ),
+                json={
+                    "expected_version": expected_version,
+                    "view_type": "THREE_QUARTER",
+                    "refinement_note": "保留五官，让视线更坚定",
+                    "actor": "tester",
+                },
+            )
+            assert adjustment.status_code == 202, adjustment.text
+            adjustment_job_id = adjustment.json()["data"]["job"]["id"]
+
+            with factory() as session:
+                adjustment_job = session.get(Job, adjustment_job_id)
+                assert adjustment_job is not None
+                adjustment_payload = json.loads(adjustment_job.input_json)
+                assert adjustment_payload["generation_mode"] == "REFINE"
+                assert adjustment_payload["reference_asset_id"] == current_view["asset_id"]
+                assert "保留五官，让视线更坚定" in adjustment_payload["prompt"]
+                replacement = materialize_identity_asset(
+                    session,
+                    get_settings(),
+                    adjustment_job,
+                    GeneratedImage(
+                        content=b"identity-adjusted-three-quarter",
+                        mime="image/png",
+                        width=480,
+                        height=640,
+                        model="mock-image-v1",
+                        request_id=None,
+                    ),
+                )
+                adjustment_job.status = "SUCCEEDED"
+                adjustment_job.completed_at = datetime.now(UTC)
+                adjustment_job.updated_at = datetime.now(UTC)
+                session.commit()
+                replacement_record = session.get(
+                    CharacterIdentityAsset,
+                    current_view["id"],
+                )
+                assert replacement_record is not None
+                assert replacement_record.id == current_view["id"]
+                assert replacement_record.asset_id == replacement[0].id
+                assert replacement_record.asset_id != current_view["asset_id"]
+                assert session.get(Asset, current_view["asset_id"]) is not None
+                character = session.get(Character, character_id)
+                assert character is not None and character.status == "REVIEW_REQUIRED"
+                expected_version = character.lock_version
+
         locked = await client.post(
             f"/api/v1/projects/{PROJECT_ID}/characters/{character_id}/identity/lock",
             json={
@@ -646,6 +813,183 @@ async def test_character_visual_flow_requires_manual_generation_and_lock(
     )
     assert look_changed.status_code == 200
     assert look_changed.json()["data"]["action"] == "LOOK_VERSION_CREATED"
+
+
+@pytest.mark.anyio
+async def test_character_generation_auto_confirms_summary_and_creates_distinct_refinements(
+    client: AsyncClient,
+) -> None:
+    prepare_relationship_project()
+    graph = await create_graph(client)
+    approved = await client.post(
+        f"/api/v1/relationship-graphs/{graph['id']}/approve",
+        json={"expected_project_version": 2, "expected_graph_version": 1, "actor": "reviewer"},
+    )
+    assert approved.status_code == 200, approved.text
+    workspace = (await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")).json()[
+        "data"
+    ]
+    character = workspace["characters"][0]
+    assert character["profile"]["status"] == "READY_FOR_REVIEW"
+    assert character["profile"]["summary"]
+
+    generated = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/characters/{character['id']}/visual-candidates",
+        json={
+            "expected_version": character["lock_version"],
+            "profile_version_id": character["profile"]["id"],
+            "count": 3,
+            "actor": "tester",
+        },
+    )
+    assert generated.status_code == 202, generated.text
+    factory = sessionmaker(bind=get_engine(get_settings().database_url), expire_on_commit=False)
+    with factory() as session:
+        jobs = list(
+            session.scalars(
+                select(Job)
+                .where(
+                    Job.job_type == "GENERATE_CHARACTER_VISUAL_CANDIDATE",
+                    Job.entity_id == character["id"],
+                )
+                .order_by(Job.created_at)
+            ).all()
+        )
+        payloads = [json.loads(job.input_json) for job in jobs]
+        batch = session.get(CharacterCandidateBatch, payloads[0]["batch_id"])
+        assert batch is not None
+        batch_prompt = json.loads(batch.prompt_json)
+    variant_keys = {item["variant_key"] for item in payloads}
+    variant_labels = {
+        variant["key"]: variant["label"]
+        for variant in CANDIDATE_VARIANTS
+    }
+    assert len(variant_keys) == 3
+    assert variant_keys <= set(variant_labels)
+    assert {
+        item["key"]
+        for item in batch_prompt["candidate_variants"]
+    } == variant_keys
+    assert len({item["prompt"] for item in payloads}) == 3
+
+    worker = PersistentJobWorker(get_settings())
+    for _ in range(3):
+        assert await worker.run_once() is True
+    workspace = (await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")).json()[
+        "data"
+    ]
+    character = next(item for item in workspace["characters"] if item["id"] == character["id"])
+    assert character["profile"]["status"] == "CONFIRMED"
+    assert {item["variant_label"] for item in character["candidates"]} == {
+        variant_labels[key] for key in variant_keys
+    }
+
+    source = character["candidates"][0]
+    refined = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/characters/{character['id']}/visual-candidates",
+        json={
+            "expected_version": character["lock_version"],
+            "profile_version_id": character["profile"]["id"],
+            "count": 3,
+            "source_candidate_id": source["id"],
+            "refinement_note": "保留五官，只让眼神更警觉，发型更利落",
+            "actor": "tester",
+        },
+    )
+    assert refined.status_code == 202, refined.text
+    with factory() as session:
+        refined_jobs = list(
+            session.scalars(
+                select(Job)
+                .where(
+                    Job.job_type == "GENERATE_CHARACTER_VISUAL_CANDIDATE",
+                    Job.entity_id == character["id"],
+                )
+                .order_by(Job.created_at.desc())
+                .limit(3)
+            ).all()
+        )
+        refined_payloads = [json.loads(job.input_json) for job in refined_jobs]
+    refined_variant_keys = {item["variant_key"] for item in refined_payloads}
+    assert len(refined_variant_keys) == 3
+    assert refined_variant_keys.isdisjoint(variant_keys)
+    assert all(item["source_candidate_id"] == source["id"] for item in refined_payloads)
+    assert all(source["asset_id"] in item["reference_asset_ids"] for item in refined_payloads)
+    assert all("眼神更警觉" in item["prompt"] for item in refined_payloads)
+
+
+@pytest.mark.anyio
+async def test_character_identity_can_restore_a_previous_locked_baseline(
+    client: AsyncClient,
+) -> None:
+    prepare_relationship_project()
+    graph = await create_graph(client)
+    approved = await client.post(
+        f"/api/v1/relationship-graphs/{graph['id']}/approve",
+        json={"expected_project_version": 2, "expected_graph_version": 1, "actor": "reviewer"},
+    )
+    assert approved.status_code == 200, approved.text
+    workspace = (await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")).json()[
+        "data"
+    ]
+    _, character = await lock_character_for_test(client, workspace["characters"][0])
+    first_identity_id = character["locked_identity_version_id"]
+
+    second_identity_id = "88000000-0000-4000-8000-000000000002"
+    factory = sessionmaker(bind=get_engine(get_settings().database_url), expire_on_commit=False)
+    with factory() as session:
+        first_identity = session.get(CharacterIdentityVersion, first_identity_id)
+        stored_character = session.get(Character, character["id"])
+        assert first_identity is not None and stored_character is not None
+        session.add(
+            CharacterIdentityVersion(
+                id=second_identity_id,
+                project_id=PROJECT_ID,
+                character_id=stored_character.id,
+                version=first_identity.version + 1,
+                source_candidate_id=first_identity.source_candidate_id,
+                profile_version_id=first_identity.profile_version_id,
+                stable_traits_json=first_identity.stable_traits_json,
+                prompt_snapshot_json=first_identity.prompt_snapshot_json,
+                content_hash=content_hash({"identity": second_identity_id}),
+                status="READY_FOR_REVIEW",
+                locked_at=None,
+                locked_by=None,
+                created_at=datetime.now(UTC),
+            )
+        )
+        session.commit()
+
+    second_lock = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/characters/{character['id']}/identity/lock",
+        json={
+            "expected_version": character["lock_version"],
+            "identity_version_id": second_identity_id,
+            "actor": "tester",
+        },
+    )
+    assert second_lock.status_code == 200, second_lock.text
+    current = (await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")).json()["data"]
+    character = next(item for item in current["characters"] if item["id"] == character["id"])
+    assert character["locked_identity_version_id"] == second_identity_id
+
+    restored = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/characters/{character['id']}/identity/restore",
+        json={
+            "expected_version": character["lock_version"],
+            "identity_version_id": first_identity_id,
+            "actor": "tester",
+        },
+    )
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["data"]["existing_shots_preserved"] is True
+    current = (await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")).json()["data"]
+    character = next(item for item in current["characters"] if item["id"] == character["id"])
+    assert character["locked_identity_version_id"] == first_identity_id
+    statuses = {item["id"]: item["status"] for item in character["identities"]}
+    assert statuses[first_identity_id] == "LOCKED"
+    assert statuses[second_identity_id] == "SUPERSEDED"
+    assert len(character["looks"]) == 3
 
 
 @pytest.mark.parametrize(

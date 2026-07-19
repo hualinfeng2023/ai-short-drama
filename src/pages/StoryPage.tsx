@@ -1,12 +1,44 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, ArrowLeft, BookOpenCheck, Check, ChevronDown, ChevronUp, Clock3, Coins, FileStack, GitMerge, Globe2, Layers3, LoaderCircle, LockKeyhole, Pencil, Play, RefreshCw, Sparkles, UsersRound, WandSparkles, Workflow } from 'lucide-react'
+import { type MouseEvent as ReactMouseEvent, useCallback, useEffect, useMemo, useState } from 'react'
+import {
+  AlertTriangle,
+  ArrowLeft,
+  BookOpenCheck,
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Clock3,
+  Coins,
+  FileStack,
+  Flame,
+  GitMerge,
+  Globe2,
+  History,
+  Layers3,
+  LoaderCircle,
+  LockKeyhole,
+  MessageCircle,
+  Pencil,
+  Play,
+  RefreshCw,
+  RotateCcw,
+  Scissors,
+  Sparkles,
+  UsersRound,
+  WandSparkles,
+  Workflow,
+  X,
+} from 'lucide-react'
+import { createPortal } from 'react-dom'
 import { Link, useNavigate, useParams } from 'react-router'
 import {
   ApiError,
+  applyScriptExcerptRewrite,
   approveScriptVersion,
   confirmCharacterRevision,
+  createScriptExcerptRewrite,
   fetchBriefVersions,
   fetchProject,
+  fetchScriptExcerptRewrites,
   fetchStoryPackageEstimate,
   fetchStoryWorkspace,
   generateStoryDirections,
@@ -18,6 +50,8 @@ import {
   type StoryWorkspace,
   type StoryPackageEstimate,
   type RelationshipGraphVersionRecord,
+  type ScriptExcerptRewrite,
+  type ScriptExcerptRewriteAction,
 } from '../api/client'
 import { RelationshipGraphSection, type RelationshipCharacter } from '../components/relationship-graph/RelationshipGraphSection'
 import { Button, Modal, PageHeader, StatusBadge } from '../components/ui'
@@ -26,6 +60,7 @@ import { useStudio } from '../store/StudioContext'
 import type { BriefVersionRecord, DirectorProposal, NarrativeTargeting, ProjectRecord } from '../types'
 import { directionKeyLabel, directionKeyTurns, isQuestionStyleHook } from '../utils/storyDirection'
 import { localizeDisplayText } from '../utils/localizeDisplayText'
+import { diffText } from '../utils/textDiff'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -90,6 +125,27 @@ interface CharacterEditDraft {
   fear: string
   secret: string
   visualNotes: string
+}
+
+interface ScriptTextSelection {
+  scriptId: string
+  lineId: string
+  lineText: string
+  selectionStart: number
+  selectionEnd: number
+  selectedText: string
+  left: number
+  top: number
+}
+
+type ScriptRewriteMenuMode = 'ACTIONS' | 'TONE' | 'CUSTOM'
+
+const SCRIPT_REWRITE_ACTION_LABELS: Record<ScriptExcerptRewriteAction, string> = {
+  REWRITE: '改写',
+  SHORTEN: '缩短',
+  INTENSIFY_CONFLICT: '增强冲突',
+  ADJUST_TONE: '调整语气',
+  CUSTOM: '自定义',
 }
 
 function characterCategory(character: Record<string, unknown>): Exclude<CharacterFilter, 'all'> {
@@ -269,6 +325,15 @@ export function StoryPage() {
   const [acting, setActing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const [scriptSelection, setScriptSelection] = useState<ScriptTextSelection | null>(null)
+  const [scriptRewriteMenuOpen, setScriptRewriteMenuOpen] = useState(false)
+  const [scriptRewriteMenuMode, setScriptRewriteMenuMode] = useState<ScriptRewriteMenuMode>('ACTIONS')
+  const [scriptRewriteCustomInstruction, setScriptRewriteCustomInstruction] = useState('')
+  const [scriptRewriteBusy, setScriptRewriteBusy] = useState(false)
+  const [scriptRewriteError, setScriptRewriteError] = useState<string | null>(null)
+  const [activeScriptRewrite, setActiveScriptRewrite] = useState<ScriptExcerptRewrite | null>(null)
+  const [scriptRewriteVersions, setScriptRewriteVersions] = useState<ScriptExcerptRewrite[]>([])
+  const [scriptRewriteVersionsOpen, setScriptRewriteVersionsOpen] = useState(false)
   const [relationshipFocus, setRelationshipFocus] = useState<{
     graphId: string
     relationshipKey: string
@@ -377,6 +442,155 @@ export function StoryPage() {
       }
     } finally {
       setActing(false)
+    }
+  }
+
+  function captureScriptSelection(
+    event: ReactMouseEvent<HTMLParagraphElement>,
+    line: { id: string; text: string },
+  ) {
+    if (!latestScript || !project || latestScript.status !== 'READY_FOR_REVIEW' || project.status !== 'SCRIPT_READY') return
+    const selection = window.getSelection()
+    const paragraph = event.currentTarget
+    if (
+      !selection
+      || selection.isCollapsed
+      || !selection.rangeCount
+      || !selection.anchorNode
+      || !selection.focusNode
+      || !paragraph.contains(selection.anchorNode)
+      || !paragraph.contains(selection.focusNode)
+    ) return
+    const range = selection.getRangeAt(0)
+    const before = document.createRange()
+    before.selectNodeContents(paragraph)
+    before.setEnd(range.startContainer, range.startOffset)
+    const selectedText = range.toString()
+    if (!selectedText.trim()) return
+    const selectionStart = Array.from(before.toString()).length
+    const selectionEnd = selectionStart + Array.from(selectedText).length
+    const rect = range.getBoundingClientRect()
+    const menuHeight = 286
+    const menuTop = rect.bottom + 8 + menuHeight > window.innerHeight
+      ? Math.max(12, rect.top - menuHeight - 8)
+      : rect.bottom + 8
+    setScriptSelection({
+      scriptId: latestScript.id,
+      lineId: line.id,
+      lineText: line.text,
+      selectionStart,
+      selectionEnd,
+      selectedText,
+      left: Math.max(12, Math.min(window.innerWidth - 238, rect.left + rect.width / 2 - 108)),
+      top: menuTop,
+    })
+    setScriptRewriteMenuMode('ACTIONS')
+    setScriptRewriteCustomInstruction('')
+    setScriptRewriteError(null)
+    setScriptRewriteMenuOpen(true)
+    setActiveScriptRewrite(null)
+    setScriptRewriteVersionsOpen(false)
+  }
+
+  async function generateScriptRewrite(
+    action: ScriptExcerptRewriteAction,
+    options: {
+      tone?: string
+      customInstruction?: string
+      parentRevisionId?: string
+    } = {},
+  ) {
+    if (!scriptSelection || !project) return
+    setScriptRewriteBusy(true)
+    setScriptRewriteError(null)
+    try {
+      const revision = await createScriptExcerptRewrite(
+        scriptSelection.scriptId,
+        scriptSelection.lineId,
+        {
+          expectedVersion: project.lockVersion,
+          selectionStart: scriptSelection.selectionStart,
+          selectionEnd: scriptSelection.selectionEnd,
+          action,
+          tone: options.tone,
+          customInstruction: options.customInstruction,
+          parentRevisionId: options.parentRevisionId,
+        },
+      )
+      setActiveScriptRewrite(revision)
+      setScriptRewriteVersions((current) => [
+        revision,
+        ...current.filter((item) => item.id !== revision.id),
+      ])
+      setScriptRewriteMenuOpen(false)
+      setScriptRewriteMenuMode('ACTIONS')
+      setScriptRewriteVersionsOpen(false)
+      window.getSelection()?.removeAllRanges()
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.code === 'VERSION_CONFLICT') {
+        setScriptRewriteError('剧本版本已经变化，请刷新后重新选择。')
+      } else {
+        setScriptRewriteError(reason instanceof Error ? reason.message : '改写生成失败')
+      }
+    } finally {
+      setScriptRewriteBusy(false)
+    }
+  }
+
+  function keepOriginalScriptText() {
+    setActiveScriptRewrite(null)
+    setScriptSelection(null)
+    setScriptRewriteError(null)
+    setScriptRewriteVersionsOpen(false)
+  }
+
+  async function useActiveScriptRewrite() {
+    if (!activeScriptRewrite || !scriptSelection || !project || !latestScript) return
+    setScriptRewriteBusy(true)
+    setScriptRewriteError(null)
+    try {
+      const result = await applyScriptExcerptRewrite(activeScriptRewrite.id, {
+        expectedVersion: project.lockVersion,
+        scriptId: latestScript.id,
+        lineId: scriptSelection.lineId,
+      })
+      await load()
+      await refreshProjects()
+      setActiveScriptRewrite(null)
+      setScriptSelection(null)
+      setScriptRewriteVersions([])
+      setScriptRewriteVersionsOpen(false)
+      setNotice(`已创建第 ${result.scriptVersion} 版剧本，原版本仍可随时查看。`)
+    } catch (reason) {
+      if (reason instanceof ApiError && ['VERSION_CONFLICT', 'SCRIPT_REWRITE_SOURCE_CHANGED'].includes(reason.code)) {
+        setScriptRewriteError('原文或剧本版本已经变化，请刷新后重新选择。')
+      } else {
+        setScriptRewriteError(reason instanceof Error ? reason.message : '未能使用这个改写版本')
+      }
+    } finally {
+      setScriptRewriteBusy(false)
+    }
+  }
+
+  async function toggleScriptRewriteVersions() {
+    if (!scriptSelection) return
+    if (scriptRewriteVersionsOpen) {
+      setScriptRewriteVersionsOpen(false)
+      return
+    }
+    setScriptRewriteBusy(true)
+    setScriptRewriteError(null)
+    try {
+      const versions = await fetchScriptExcerptRewrites(
+        scriptSelection.scriptId,
+        scriptSelection.lineId,
+      )
+      setScriptRewriteVersions(versions)
+      setScriptRewriteVersionsOpen(true)
+    } catch (reason) {
+      setScriptRewriteError(reason instanceof Error ? reason.message : '改写版本读取失败')
+    } finally {
+      setScriptRewriteBusy(false)
     }
   }
 
@@ -527,6 +741,84 @@ export function StoryPage() {
     )
   }
 
+  function renderScriptRewriteDiff(sceneOrdinal: number, lineOrdinal: number) {
+    if (
+      !activeScriptRewrite
+      || activeScriptRewrite.sceneOrdinal !== sceneOrdinal
+      || activeScriptRewrite.lineOrdinal !== lineOrdinal
+    ) return null
+    const canUseVersion = activeScriptRewrite.status === 'GENERATED'
+      && activeScriptRewrite.baseScriptVersionId === latestScript?.id
+      && activeScriptRewrite.baseLineId === scriptSelection?.lineId
+    const parts = diffText(
+      activeScriptRewrite.originalText,
+      activeScriptRewrite.proposedText,
+    )
+    return (
+      <section className="script-rewrite-diff" aria-live="polite">
+        <header>
+          <div>
+            <span>改写版本 {activeScriptRewrite.version}</span>
+            <strong>{SCRIPT_REWRITE_ACTION_LABELS[activeScriptRewrite.action]}</strong>
+          </div>
+          <small>{activeScriptRewrite.provider}/{activeScriptRewrite.model}</small>
+        </header>
+        <div className="script-rewrite-diff__text">
+          {parts.map((part, index) => part.type === 'delete'
+            ? <del key={`${part.type}-${index}`}>{part.text}</del>
+            : part.type === 'insert'
+              ? <ins key={`${part.type}-${index}`}>{part.text}</ins>
+              : <span key={`${part.type}-${index}`}>{part.text}</span>)}
+        </div>
+        <p>{activeScriptRewrite.rationale}</p>
+        {scriptRewriteError ? <div className="script-rewrite-error" role="alert"><AlertTriangle size={14} />{scriptRewriteError}</div> : null}
+        {scriptRewriteVersionsOpen ? (
+          <div className="script-rewrite-versions">
+            <span>其他版本</span>
+            <div>
+              {scriptRewriteVersions.map((revision) => (
+                <button
+                  className={revision.id === activeScriptRewrite.id ? 'is-active' : ''}
+                  key={revision.id}
+                  onClick={() => setActiveScriptRewrite(revision)}
+                  type="button"
+                >
+                  <strong>版本 {revision.version}</strong>
+                  <span>{SCRIPT_REWRITE_ACTION_LABELS[revision.action]}</span>
+                  {revision.status === 'APPLIED' ? <small>已使用</small> : null}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
+        <footer>
+          <Button disabled={scriptRewriteBusy} onClick={keepOriginalScriptText} size="sm" variant="ghost">
+            保留原文
+          </Button>
+          <Button disabled={scriptRewriteBusy || !canUseVersion} onClick={() => void useActiveScriptRewrite()} size="sm">
+            <Check size={14} />使用新版本
+          </Button>
+          <Button
+            disabled={scriptRewriteBusy}
+            onClick={() => void generateScriptRewrite(activeScriptRewrite.action, {
+              tone: activeScriptRewrite.tone ?? undefined,
+              customInstruction: activeScriptRewrite.customInstruction ?? undefined,
+              parentRevisionId: activeScriptRewrite.id,
+            })}
+            size="sm"
+            variant="secondary"
+          >
+            {scriptRewriteBusy ? <LoaderCircle className="spin" size={14} /> : <RotateCcw size={14} />}
+            再试一次
+          </Button>
+          <Button disabled={scriptRewriteBusy} onClick={() => void toggleScriptRewriteVersions()} size="sm" variant="ghost">
+            <History size={14} />查看其他版本
+          </Button>
+        </footer>
+      </section>
+    )
+  }
+
   return (
     <div className="page page--story">
       <PageHeader
@@ -554,13 +846,13 @@ export function StoryPage() {
       </section> : null}
 
       <section className="story-section">
-        <div className="section-heading"><div><p className="eyebrow">{directionSelectionOpen ? '方向审核' : '方向基线'}</p><h2>{directionSelectionOpen ? mergeMode ? '选择要合并的故事方向' : '选择一个故事方向' : '已确认的故事方向'}</h2><p>{directionSelectionOpen ? mergeMode ? '至少选择两个方向，系统会保留各自优势并生成一个新的融合版本。' : '先比较最影响决策的差异，需要时再展开完整方案。确认后先生成可审核的故事结构与角色关系。' : '该方向已作为故事设定与角色关系的创作基线，当前阶段不再重复展示其他候选方向。'}</p></div>{directions.length === 0 ? <Button disabled={acting || project.status !== 'DRAFT'} onClick={() => void runAction(async () => { const job = await generateStoryDirections(project.id, project.lockVersion, crypto.randomUUID()); setNotice(`任务已入队：${job.stage}`); navigate(`/tasks?project=${project.id}`) })}><Sparkles size={16} />生成 3 个方向</Button> : null}</div>
+        <div className="section-heading"><div><p className="eyebrow">{directionSelectionOpen ? '方向审核' : '方向基线'}</p><h2>{directionSelectionOpen ? mergeMode ? '选择要合并的故事方向' : '选择一个故事方向' : '已确认的故事方向'}</h2><p>{directionSelectionOpen ? mergeMode ? '至少选择两个方向，系统会保留各自优势并生成一个新的融合版本。' : '先比较最影响决策的差异，需要时再展开完整方案。确认后先生成可审核的故事结构与角色关系。' : '该方向已作为故事设定与角色关系的创作基线，当前阶段不再重复展示其他候选方向。'}</p></div>{directions.length === 0 ? <Button disabled={acting || project.status !== 'DRAFT'} onClick={() => void runAction(async () => { const job = await generateStoryDirections(project.id, project.lockVersion, crypto.randomUUID()); setNotice(`任务已入队：${job.stage}`); navigate(`/tasks?project=${project.id}`) })}><BookOpenCheck size={16} />生成 3 个方向</Button> : null}</div>
         {directionSelectionOpen && mergeMode ? <section className="story-merge-explanation" aria-label="合并方向规则">
           <article><Check size={16} /><div><strong>保留什么</strong><p>保留选中方向的核心冲突、情绪承诺、有效转折和续作动作，不是简单拼接文案。</p></div></article>
           <article><AlertTriangle size={16} /><div><strong>如何处理冲突</strong><p>以 Brief 必须满足与必须避免为最高优先级，再统一人物动机、时间线和因果链；无法兼容的内容会明确取舍。</p></div></article>
           <article><GitMerge size={16} /><div><strong>合并后的结果</strong><p>生成一个新的独立方向，保留来源关系；原方向不会被覆盖，新方向需重新审核后才能生成剧本。</p></div></article>
         </section> : null}
-        {directionSelectionOpen && !mergeMode && recommendedDirection ? <section className="story-ai-recommendation" aria-label="AI 建议方向"><Sparkles size={18} /><div><span>AI 只建议一个方向</span><strong>{recommendedDirection.title}</strong><p>{recommendedDirection.aiRecommendation?.reason ?? '该方向在不增加无根据设定的前提下，更直接对齐平台钩子、核心观众和目标时长。'}</p><ul>{recommendationMatches(recommendedDirection, brief).map((item) => <li key={item}>{item}</li>)}</ul></div></section> : null}
+        {directionSelectionOpen && !mergeMode && recommendedDirection ? <section className="story-ai-recommendation" aria-label="建议方向"><BookOpenCheck size={18} /><div><span>建议优先比较</span><strong>{recommendedDirection.title}</strong><p>{recommendedDirection.aiRecommendation?.reason ?? '该方向在不增加无根据设定的前提下，更直接对齐平台钩子、核心观众和目标时长。'}</p><ul>{recommendationMatches(recommendedDirection, brief).map((item) => <li key={item}>{item}</li>)}</ul></div></section> : null}
         <div aria-label={directionSelectionOpen ? mergeMode ? '选择要合并的故事方向' : '选择一个故事方向' : '已确认的故事方向'} className={`story-direction-comparison ${directionSelectionOpen ? '' : 'story-direction-comparison--confirmed'}`} role={directionSelectionOpen ? mergeMode ? 'group' : 'radiogroup' : undefined}>
           {visibleDirections.map((direction) => {
             const checked = directionSelectionOpen ? selected.includes(direction.id) : direction.id === approvedDirection?.id
@@ -586,7 +878,7 @@ export function StoryPage() {
               role={directionSelectionOpen ? mergeMode ? 'checkbox' : 'radio' : undefined}
               tabIndex={directionSelectionOpen ? 0 : undefined}
             >
-              <header><span>{directionKeyLabel(direction.directionKey)}</span><div>{directionSelectionOpen && recommended ? <span className="story-direction-recommendation-badge">AI 建议</span> : null}<StatusBadge label={directionSelectionOpen ? checked ? '已选择' : mergeMode ? '待合并' : '待选择' : '已确认'} status={directionSelectionOpen ? checked ? 'SELECTED' : direction.status : 'APPROVED'} /></div></header>
+              <header><span>{directionKeyLabel(direction.directionKey)}</span><div>{directionSelectionOpen && recommended ? <span className="story-direction-recommendation-badge">建议优先</span> : null}<StatusBadge label={directionSelectionOpen ? checked ? '已选择' : mergeMode ? '待合并' : '待选择' : '已确认'} status={directionSelectionOpen ? checked ? 'SELECTED' : direction.status : 'APPROVED'} /></div></header>
               <h3>{direction.title}</h3>
               <p className="story-direction-summary__logline">{direction.logline}</p>
               <dl className="story-direction-summary__key-facts">
@@ -594,7 +886,19 @@ export function StoryPage() {
                 <div><dt>情绪承诺</dt><dd>{direction.storyDna?.emotional_promise ?? direction.directorStatement}</dd></div>
                 <div><dt>制作规模</dt><dd>{production.characterCount} 个角色 · {production.sceneCount} 个场景 · {production.exteriorSceneCount} 个外景</dd></div>
               </dl>
-              <div className={`story-direction-summary__compliance story-direction-summary__compliance--${compliance.status.toLowerCase()}`}><span>Brief 合规</span><strong>{complianceLabel(compliance.status)}</strong>{exceptions.length ? <small>{exceptions.length} 条需关注</small> : null}</div>
+              <div
+                aria-label={`Brief 合规：${complianceLabel(compliance.status)}${exceptions.length ? `，${exceptions.length} 条需关注` : ''}`}
+                className={`story-direction-summary__compliance story-direction-summary__compliance--${compliance.status.toLowerCase()}`}
+              >
+                <span aria-hidden="true" className="story-direction-summary__compliance-icon">
+                  {compliance.status === 'ALL_MET' ? <Check size={14} /> : <AlertTriangle size={14} />}
+                </span>
+                <span className="story-direction-summary__compliance-copy">
+                  <small>Brief 合规</small>
+                  <strong>{complianceLabel(compliance.status)}</strong>
+                </span>
+                {exceptions.length ? <em>{exceptions.length} 条需关注</em> : <em>无待处理项</em>}
+              </div>
               <footer>
                 <button aria-expanded={expanded} className="story-direction-detail-trigger" onClick={(event) => { event.stopPropagation(); setExpandedDirectionId((current) => current === direction.id ? null : direction.id) }} type="button">
                   {expanded ? <ChevronUp size={15} /> : <ChevronDown size={15} />}{expanded ? '收起完整方案' : '查看完整方案'}
@@ -701,7 +1005,7 @@ export function StoryPage() {
         </section>
       </section> : null}
 
-      <Modal className="modal--character-revision" description="修改不会覆盖当前版本。系统先审核故事逻辑与人物关系，确认影响后再创建同步修改版。" footer={<><Button disabled={characterRevisionBusy} onClick={() => { setEditingCharacter(null); setCharacterEditDraft(null); setCharacterRevisionReview(null); setCharacterRevisionError(null) }} variant="secondary">取消</Button>{characterRevisionReview ? <><Button disabled={characterRevisionBusy} onClick={() => { setCharacterRevisionReview(null); setCharacterRevisionError(null) }} variant="secondary">返回编辑</Button><Button disabled={characterRevisionBusy} onClick={() => void confirmCharacterEdit()}>{characterRevisionBusy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}确认修改并同步</Button></> : <Button disabled={characterRevisionBusy || !characterEditDraft?.name || !characterEditDraft.role || !characterEditDraft.age || !characterEditDraft.occupation || !characterEditDraft.personality} onClick={() => void runCharacterReview()}>{characterRevisionBusy ? <LoaderCircle className="spin" size={16} /> : <WandSparkles size={16} />}AI 审核修改</Button>}</>} onClose={() => { setEditingCharacter(null); setCharacterEditDraft(null); setCharacterRevisionReview(null); setCharacterRevisionError(null) }} open={Boolean(editingCharacter && characterEditDraft)} title={editingCharacter ? `编辑角色 · ${stringValue(editingCharacter.name)}` : '编辑角色'}>
+      <Modal className="modal--character-revision" description="修改不会覆盖当前版本。系统先审核故事逻辑与人物关系，确认影响后再创建同步修改版。" footer={<><Button disabled={characterRevisionBusy} onClick={() => { setEditingCharacter(null); setCharacterEditDraft(null); setCharacterRevisionReview(null); setCharacterRevisionError(null) }} variant="secondary">取消</Button>{characterRevisionReview ? <><Button disabled={characterRevisionBusy} onClick={() => { setCharacterRevisionReview(null); setCharacterRevisionError(null) }} variant="secondary">返回编辑</Button><Button disabled={characterRevisionBusy} onClick={() => void confirmCharacterEdit()}>{characterRevisionBusy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}确认修改并同步</Button></> : <Button disabled={characterRevisionBusy || !characterEditDraft?.name || !characterEditDraft.role || !characterEditDraft.age || !characterEditDraft.occupation || !characterEditDraft.personality} onClick={() => void runCharacterReview()}>{characterRevisionBusy ? <LoaderCircle className="spin" size={16} /> : <GitMerge size={16} />}检查修改影响</Button>}</>} onClose={() => { setEditingCharacter(null); setCharacterEditDraft(null); setCharacterRevisionReview(null); setCharacterRevisionError(null) }} open={Boolean(editingCharacter && characterEditDraft)} title={editingCharacter ? `编辑角色 · ${stringValue(editingCharacter.name)}` : '编辑角色'}>
         {characterRevisionError ? <div className="character-revision-error" role="alert"><AlertTriangle size={17} /><div><strong>未能完成本次操作</strong><p>{characterRevisionError}</p></div></div> : null}
         {characterEditDraft ? <div className="character-revision-form"><div className="character-revision-form__grid"><label>姓名<input disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, name: event.target.value } : current)} value={characterEditDraft.name} /></label><label>角色定位<input disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, role: event.target.value } : current)} value={characterEditDraft.role} /></label><label>年龄<input disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, age: event.target.value } : current)} value={characterEditDraft.age} /></label><label>职业<input disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, occupation: event.target.value } : current)} value={characterEditDraft.occupation} /></label><label className="character-revision-form__wide">性格关键词（用顿号分隔）<input disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, personality: event.target.value } : current)} value={characterEditDraft.personality} /></label><label className="character-revision-form__wide">剧情功能<textarea disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, dramaticFunction: event.target.value } : current)} rows={2} value={characterEditDraft.dramaticFunction} /></label><label>欲望<textarea disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, desire: event.target.value } : current)} rows={3} value={characterEditDraft.desire} /></label><label>恐惧<textarea disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, fear: event.target.value } : current)} rows={3} value={characterEditDraft.fear} /></label><label className="character-revision-form__wide">秘密<textarea disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, secret: event.target.value } : current)} rows={2} value={characterEditDraft.secret} /></label><label className="character-revision-form__wide">视觉特征<textarea disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, visualNotes: event.target.value } : current)} rows={3} value={characterEditDraft.visualNotes} /></label></div>{characterRevisionReview ? <section className={`character-revision-review is-${characterRevisionReview.review.verdict.toLowerCase()}`}><header><div><span>{characterRevisionReview.review.verdict === 'CONFLICT' ? '发现逻辑冲突' : '审核通过'}</span><h3>{characterRevisionReview.review.summary}</h3></div><small>{characterRevisionReview.provider}/{characterRevisionReview.model}</small></header>{characterRevisionReview.review.issues.length ? <ul>{characterRevisionReview.review.issues.map((issue) => <li data-severity={issue.severity.toLowerCase()} key={issue.code}><strong>{issue.severity === 'BLOCKER' ? '冲突' : issue.severity === 'WARNING' ? '提醒' : '信息'}</strong><div><p>{issue.message}</p><small>{issue.suggestion}</small></div></li>)}</ul> : <p>未发现需要阻止修改的故事逻辑问题。</p>}<div className="character-revision-impact"><div><span>人物关系</span><strong>{characterRevisionReview.affected.relationshipCount} 条</strong></div><div><span>分集大纲</span><strong>{characterRevisionReview.affected.outlineCount} 版</strong></div><div><span>剧本</span><strong>{characterRevisionReview.affected.scriptCount} 版</strong></div></div><p>确认后将创建新的故事设定和关系草稿；旧版本继续保留。重新确认关系后，系统才会生成同步后的故事线与剧本。</p></section> : null}</div> : null}
       </Modal>
@@ -754,10 +1058,123 @@ export function StoryPage() {
 
         <section className="story-section">
           <div className="section-heading"><div><p className="eyebrow">剧本 · 第 {latestScript.episodeOrdinal} 集 · 第 {latestScript.version} 版</p><h2>结构化首集剧本</h2><p>{Math.round(latestScript.estimatedDurationMs / 1000)} 秒 · 内容评审：{criticStatus} · {latestScript.provider}/{latestScript.model}</p></div><StatusBadge status={latestScript.status} /></div>
-          <div className="script-scene-list">{latestScript.scenes.map((scene) => { const relationshipBeat = relationshipBeatForScene(scene.ordinal); return <article key={scene.id}><header><span>{scene.ordinal.toString().padStart(2, '0')}</span><div><h3>{localizeDisplayText(scene.heading)}</h3><p>{scene.location} · {localizeDisplayText(scene.timeOfDay)} · {localizeDisplayText(scene.emotion)}</p></div><small>{(scene.durationMs / 1000).toFixed(1)} 秒</small></header><p className="script-purpose">{scene.purpose}</p><div className="script-lines">{scene.lines.map((line) => <div key={line.id}><strong>{stringValue(characters.find((character) => stringValue(character.key) === line.speakerKey)?.name, line.speakerKey)}</strong><p>{line.text}</p><small>{localizeDisplayText(line.lineType)} · {localizeDisplayText(line.emotion)} · {(line.estimatedDurationMs / 1000).toFixed(1)} 秒</small></div>)}</div><footer><span>背景音乐：{scene.bgmIntent}</span><span>音效：{scene.sfxIntents.join(' / ') || '—'}</span>{relationshipBeat && scriptRelationshipGraph ? <button className="script-relationship-link" onClick={() => setRelationshipFocus({ graphId: scriptRelationshipGraph.id, relationshipKey: relationshipBeat.relationshipKey, beatOrdinal: relationshipBeat.ordinal, requestId: Date.now() })} type="button"><Workflow size={13} />查看对应关系变化</button> : null}</footer></article> })}</div>
+          <div className="script-scene-list">
+            {latestScript.scenes.map((scene) => {
+              const relationshipBeat = relationshipBeatForScene(scene.ordinal)
+              return (
+                <article key={scene.id}>
+                  <header>
+                    <span>{scene.ordinal.toString().padStart(2, '0')}</span>
+                    <div>
+                      <h3>{localizeDisplayText(scene.heading)}</h3>
+                      <p>{scene.location} · {localizeDisplayText(scene.timeOfDay)} · {localizeDisplayText(scene.emotion)}</p>
+                    </div>
+                    <small>{(scene.durationMs / 1000).toFixed(1)} 秒</small>
+                  </header>
+                  <p className="script-purpose">{scene.purpose}</p>
+                  <div className="script-lines">
+                    {scene.lines.map((line) => (
+                      <div className="script-line" key={line.id}>
+                        <strong>{stringValue(characters.find((character) => stringValue(character.key) === line.speakerKey)?.name, line.speakerKey)}</strong>
+                        <p
+                          data-script-line-text
+                          onMouseUp={(event) => captureScriptSelection(event, line)}
+                        >
+                          {line.text}
+                        </p>
+                        <small>{localizeDisplayText(line.lineType)} · {localizeDisplayText(line.emotion)} · {(line.estimatedDurationMs / 1000).toFixed(1)} 秒</small>
+                        {renderScriptRewriteDiff(scene.ordinal, line.ordinal)}
+                      </div>
+                    ))}
+                  </div>
+                  <footer>
+                    <span>背景音乐：{scene.bgmIntent}</span>
+                    <span>音效：{scene.sfxIntents.join(' / ') || '—'}</span>
+                    {relationshipBeat && scriptRelationshipGraph ? (
+                      <button
+                        className="script-relationship-link"
+                        onClick={() => setRelationshipFocus({
+                          graphId: scriptRelationshipGraph.id,
+                          relationshipKey: relationshipBeat.relationshipKey,
+                          beatOrdinal: relationshipBeat.ordinal,
+                          requestId: Date.now(),
+                        })}
+                        type="button"
+                      >
+                        <Workflow size={13} />查看对应关系变化
+                      </button>
+                    ) : null}
+                  </footer>
+                </article>
+              )
+            })}
+          </div>
           <div className="story-direction-actions"><span>{workspace.relationshipGraphStale ? '关系修改版尚未批准，当前剧本已过期。' : '批准后锁定第 2 阶段，并让全部剧本角色进入前期制作。'}</span><Button disabled={acting || workspace.relationshipGraphStale || latestScript.status !== 'READY_FOR_REVIEW' || project.status !== 'SCRIPT_READY'} onClick={() => void runAction(async () => { const job = await approveScriptVersion(latestScript.id, project.lockVersion); await refreshProjects(); setNotice(`剧本已批准，角色任务已入队：${job.stage}`); navigate(`/tasks?project=${project.id}`) })}><Check size={16} />{workspace.relationshipGraphStale ? '关系更新后才能批准' : '批准首集剧本'}</Button></div>
         </section>
       </> : null}
+
+      {scriptRewriteMenuOpen && scriptSelection ? createPortal((
+        <div
+          aria-label="剧本改写"
+          className="script-selection-menu"
+          onMouseDown={(event) => event.preventDefault()}
+          role="toolbar"
+          style={{ left: scriptSelection.left, top: scriptSelection.top }}
+        >
+          <header>
+            <span>{scriptRewriteMenuMode === 'ACTIONS' ? '处理选中文字' : scriptRewriteMenuMode === 'TONE' ? '调整语气' : '自定义改写'}</span>
+            <button
+              aria-label="关闭"
+              disabled={scriptRewriteBusy}
+              onClick={() => setScriptRewriteMenuOpen(false)}
+              type="button"
+            >
+              <X size={13} />
+            </button>
+          </header>
+          {scriptRewriteMenuMode === 'ACTIONS' ? (
+            <div className="script-selection-menu__actions">
+              <button disabled={scriptRewriteBusy} onClick={() => void generateScriptRewrite('REWRITE')} type="button"><WandSparkles size={14} />改写</button>
+              <button disabled={scriptRewriteBusy} onClick={() => void generateScriptRewrite('SHORTEN')} type="button"><Scissors size={14} />缩短</button>
+              <button disabled={scriptRewriteBusy} onClick={() => void generateScriptRewrite('INTENSIFY_CONFLICT')} type="button"><Flame size={14} />增强冲突</button>
+              <button disabled={scriptRewriteBusy} onClick={() => setScriptRewriteMenuMode('TONE')} type="button"><MessageCircle size={14} />调整语气</button>
+              <button disabled={scriptRewriteBusy} onClick={() => setScriptRewriteMenuMode('CUSTOM')} type="button"><Sparkles size={14} />自定义……</button>
+            </div>
+          ) : scriptRewriteMenuMode === 'TONE' ? (
+            <div className="script-selection-menu__choices">
+              {['克制', '强硬', '温柔', '讽刺'].map((tone) => (
+                <button disabled={scriptRewriteBusy} key={tone} onClick={() => void generateScriptRewrite('ADJUST_TONE', { tone })} type="button">{tone}</button>
+              ))}
+              <button className="script-selection-menu__back" onClick={() => setScriptRewriteMenuMode('ACTIONS')} type="button">返回</button>
+            </div>
+          ) : (
+            <div className="script-selection-menu__custom">
+              <textarea
+                autoFocus
+                onChange={(event) => setScriptRewriteCustomInstruction(event.target.value)}
+                placeholder="例如：更口语、更有停顿感"
+                rows={3}
+                value={scriptRewriteCustomInstruction}
+              />
+              <div>
+                <button onClick={() => setScriptRewriteMenuMode('ACTIONS')} type="button">返回</button>
+                <button
+                  disabled={scriptRewriteBusy || !scriptRewriteCustomInstruction.trim()}
+                  onClick={() => void generateScriptRewrite('CUSTOM', {
+                    customInstruction: scriptRewriteCustomInstruction.trim(),
+                  })}
+                  type="button"
+                >
+                  {scriptRewriteBusy ? <LoaderCircle className="spin" size={13} /> : null}
+                  生成
+                </button>
+              </div>
+            </div>
+          )}
+          {scriptRewriteBusy && scriptRewriteMenuMode !== 'CUSTOM' ? <div className="script-selection-menu__loading"><LoaderCircle className="spin" size={14} />正在生成…</div> : null}
+          {scriptRewriteError ? <p className="script-selection-menu__error">{scriptRewriteError}</p> : null}
+        </div>
+      ), document.body) : null}
     </div>
   )
 }

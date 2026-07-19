@@ -1,5 +1,21 @@
-import { useEffect, useMemo, useState } from 'react'
-import { ArrowLeft, ArrowRight, Check, Clapperboard, Database, ListChecks, LoaderCircle, Play, RefreshCw, RotateCcw, Save, Sparkles } from 'lucide-react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import {
+  ArrowLeft,
+  ArrowRight,
+  Check,
+  ChevronDown,
+  Clapperboard,
+  Database,
+  FilePenLine,
+  ListChecks,
+  ListPlus,
+  LoaderCircle,
+  Play,
+  RefreshCw,
+  RotateCcw,
+  Save,
+  ShieldCheck,
+} from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router'
 import {
   ApiError,
@@ -106,6 +122,7 @@ const IDEA_GENERATION_STAGES = [
   { title: '正在组织可拍摄叙事', detail: '把创意收束成清晰、连续的故事表达。' },
 ] as const
 type IdeaGenerationPhase = 'idle' | 'thinking' | 'writing'
+type BriefSectionKey = 'audience' | 'delivery' | 'guardrails'
 
 interface BriefForm {
   name: string
@@ -128,6 +145,43 @@ interface BriefForm {
   contentRequirements: string
   contentAvoidances: string
   blockingQuestions: string
+}
+
+function BriefDisclosure({
+  children,
+  description,
+  meta,
+  onToggle,
+  open,
+  title,
+}: {
+  children: ReactNode
+  description: string
+  meta: string
+  onToggle: () => void
+  open: boolean
+  title: string
+}) {
+  return (
+    <section className={`brief-disclosure${open ? ' is-open' : ''}`}>
+      <button
+        aria-expanded={open}
+        className="brief-disclosure__trigger"
+        onClick={onToggle}
+        type="button"
+      >
+        <span>
+          <strong>{title}</strong>
+          <small>{description}</small>
+        </span>
+        <span className="brief-disclosure__meta">
+          {meta}
+          <ChevronDown aria-hidden="true" size={16} />
+        </span>
+      </button>
+      {open ? <div className="brief-disclosure__content brief-form-grid">{children}</div> : null}
+    </section>
+  )
 }
 
 function toForm(project: ProjectRecord, brief?: BriefVersionRecord): BriefForm {
@@ -161,6 +215,17 @@ function splitLines(value: string): string[] {
   return value.split('\n').map((item) => item.trim()).filter(Boolean)
 }
 
+function fitStoryIdeaTextarea(textarea: HTMLTextAreaElement): void {
+  const styles = window.getComputedStyle(textarea)
+  const minHeight = Number.parseFloat(styles.minHeight) || 200
+  const maxAutoHeight = 280
+
+  textarea.style.height = 'auto'
+  const contentHeight = textarea.scrollHeight
+  textarea.style.height = `${Math.min(Math.max(contentHeight, minHeight), maxAutoHeight)}px`
+  textarea.style.overflowY = contentHeight > maxAutoHeight ? 'auto' : 'hidden'
+}
+
 export function ProjectBriefPage() {
   const { projectId } = useParams()
   const { apiStatus, project: activeProject, activateProject, refreshProjects } = useStudio()
@@ -192,6 +257,12 @@ export function ProjectBriefPage() {
   const [proposal, setProposal] = useState<DirectorProposal | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [openBriefSection, setOpenBriefSection] = useState<BriefSectionKey | null>(null)
+  const storyIdeaRef = useRef<HTMLTextAreaElement>(null)
+
+  useLayoutEffect(() => {
+    if (storyIdeaRef.current) fitStoryIdeaTextarea(storyIdeaRef.current)
+  }, [form?.idea])
 
   useEffect(() => {
     if (!projectId) return
@@ -254,6 +325,17 @@ export function ProjectBriefPage() {
         setBaselineForm(persistedForm)
         setBriefVersion(briefs[0]?.version ?? null)
         setProposal(proposals[0] ?? null)
+        const missingTargeting = narrativeTargetingMissing(
+          persistedForm.narrativeProtagonist,
+          persistedForm.emotionalRewards,
+        )
+        setOpenBriefSection(
+          missingTargeting.length
+            ? 'audience'
+            : splitLines(persistedForm.blockingQuestions).length
+              ? 'guardrails'
+              : null,
+        )
       })
       .catch((reason: unknown) => {
         if (reason instanceof DOMException && reason.name === 'AbortError') return
@@ -325,6 +407,10 @@ export function ProjectBriefPage() {
     })
     setNotice(null)
     setError(null)
+  }
+
+  function toggleBriefSection(section: BriefSectionKey) {
+    setOpenBriefSection((current) => current === section ? null : section)
   }
 
   async function save() {
@@ -418,13 +504,16 @@ export function ProjectBriefPage() {
         production_format: form.productionFormat,
         primary_market: form.primaryMarket,
         canonical_language: form.canonicalLanguage,
+        target_duration_sec: form.targetDurationSec,
+        aspect_ratio: form.aspectRatio,
+        target_platform: form.targetPlatform,
+        content_requirements: splitLines(form.contentRequirements),
+        content_avoidances: splitLines(form.contentAvoidances),
       })
       setNameBeforeSuggestion(form.name)
       setForm((current) => current ? { ...current, name: result.suggested } : current)
       setNameSuggestionNote(
-        result.warning
-          ? `已生成候选名称（本地智能回退：${result.warning}）。确认后请保存新版本。`
-          : `已根据当前项目简报生成候选名称。确认后请保存新版本。`,
+        `已根据当前故事想法生成新的候选名称。确认后请保存新版本。`,
       )
       setNotice(null)
     } catch (reason) {
@@ -438,7 +527,7 @@ export function ProjectBriefPage() {
     if (nameBeforeSuggestion === null) return
     setForm((current) => current ? { ...current, name: nameBeforeSuggestion } : current)
     setNameBeforeSuggestion(null)
-    setNameSuggestionNote('已撤销 AI 候选名称。')
+    setNameSuggestionNote('已撤销候选名称。')
     setNotice(null)
     setError(null)
   }
@@ -574,7 +663,7 @@ export function ProjectBriefPage() {
     if (requirementsBeforeDraft === null) return
     setForm((current) => current ? { ...current, contentRequirements: requirementsBeforeDraft } : current)
     setRequirementsBeforeDraft(null)
-    setRequirementsDraftNote('已撤销 AI 代写内容。')
+    setRequirementsDraftNote('已撤销补充内容。')
     setNotice(null)
     setError(null)
   }
@@ -626,7 +715,7 @@ export function ProjectBriefPage() {
     if (avoidancesBeforeDraft === null) return
     setForm((current) => current ? { ...current, contentAvoidances: avoidancesBeforeDraft } : current)
     setAvoidancesBeforeDraft(null)
-    setAvoidancesDraftNote('已撤销 AI 智能建议。')
+    setAvoidancesDraftNote('已撤销规避项建议。')
     setNotice(null)
     setError(null)
   }
@@ -733,6 +822,10 @@ export function ProjectBriefPage() {
           <div className="section-heading">
             <div><h2>项目设定</h2></div>
             <div className="brief-version-badges">
+              {!editable ? <StatusBadge
+                description="项目简报已锁定。项目已进入后续流程，当前简报仅供查看。"
+                status="BRIEF_LOCKED"
+              /> : null}
               {runningJobType ? (
                 <Link
                   aria-label="查看当前生成任务"
@@ -755,7 +848,17 @@ export function ProjectBriefPage() {
               ) : <StatusBadge status={project.status} />}
             </div>
           </div>
-          {!editable ? <div className="brief-lock-note">该项目已进入后续流程，不能直接覆盖项目简报。后续修改需通过变更集提交。</div> : null}
+          <div className="brief-progressive-guide">
+            <span><ListChecks size={17} /></span>
+            <div>
+              <strong>{targetingMissing.length
+                ? `下一步：确认${targetingMissing.join('、')}`
+                : splitLines(form.blockingQuestions).length
+                  ? '下一步：处理生成前问题'
+                  : '核心设定已经完整'}</strong>
+              <p>先确认故事与核心规格；受众细节、发行设置和生成边界按当前任务展开。</p>
+            </div>
+          </div>
           <div className="brief-form-grid">
             <div className="brief-field brief-field--wide brief-name-field">
               <div className="brief-field__heading">
@@ -766,11 +869,11 @@ export function ProjectBriefPage() {
                     onClick={() => void intelligentlyRenameProject()}
                     type="button"
                   >
-                    {suggestingName ? <LoaderCircle className="spin" size={12} /> : <Sparkles size={12} />}
-                    {suggestingName ? '智能命名中' : 'AI 一键智能修改'}
+                    {suggestingName ? <LoaderCircle className="spin" size={12} /> : <FilePenLine size={12} />}
+                    {suggestingName ? '正在生成新名称' : '生成新名称'}
                   </button>
                   {nameBeforeSuggestion !== null ? (
-                    <button onClick={undoProjectNameSuggestion} type="button">
+                    <button className="brief-field__action--undo" onClick={undoProjectNameSuggestion} type="button">
                       <RotateCcw size={12} />撤销
                     </button>
                   ) : null}
@@ -798,13 +901,15 @@ export function ProjectBriefPage() {
                     onClick={() => void intelligentlyRewriteIdea()}
                     type="button"
                   >
-                    <Sparkles className={rewritingIdea ? 'brief-ai-button-icon' : undefined} size={12} />
+                    {rewritingIdea
+                      ? <LoaderCircle className="spin" size={12} />
+                      : <FilePenLine size={12} />}
                     {rewritingIdea
                       ? ideaGenerationPhase === 'writing' ? '正在写入' : '正在构思'
-                      : 'AI 重构叙事'}
+                      : '重写故事'}
                   </button>
                   {ideaBeforeRewrite !== null ? (
-                    <button onClick={undoIdeaRewrite} type="button">
+                    <button className="brief-field__action--undo" onClick={undoIdeaRewrite} type="button">
                       <RotateCcw size={12} />撤销
                     </button>
                   ) : null}
@@ -820,16 +925,18 @@ export function ProjectBriefPage() {
                   id="brief-story-idea"
                   maxLength={4000}
                   onChange={(event) => {
+                    fitStoryIdeaTextarea(event.currentTarget)
                     updateField('idea', event.target.value)
                     setIdeaBeforeRewrite(null)
                     setIdeaRewriteNote(null)
                   }}
+                  ref={storyIdeaRef}
                   value={form.idea}
                 />
                 {rewritingIdea ? (
                   <div aria-live="polite" className="brief-generation-status" role="status">
                     <span className="brief-generation-status__icon" aria-hidden="true">
-                      <Sparkles size={15} />
+                      <LoaderCircle className="spin" size={15} />
                     </span>
                     <span className="brief-generation-status__copy">
                       <strong>{ideaGenerationPhase === 'writing'
@@ -889,81 +996,108 @@ export function ProjectBriefPage() {
             <label className="brief-field"><span>叙事主角</span><SelectControl aria-label="叙事主角" disabled={!editable} onChange={(event) => updateField('narrativeProtagonist', event.target.value as NarrativeProtagonist)} value={form.narrativeProtagonist}>{NARRATIVE_PROTAGONIST_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
             <label className="brief-field"><span>目标受众</span><SelectControl aria-label="目标受众" disabled={!editable} onChange={(event) => updateField('targetAudience', event.target.value as TargetAudience)} value={form.targetAudience}>{TARGET_AUDIENCE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
             <label className="brief-field"><span>主市场</span><SelectControl aria-label="主市场" disabled={!editable} onChange={(event) => setForm((current) => current ? { ...current, primaryMarket: event.target.value, secondaryMarkets: current.secondaryMarkets.filter((item) => item !== event.target.value) } : current)} value={form.primaryMarket}>{MARKET_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
-            <label className="brief-field brief-field--wide"><span>补充受众画像（可选）</span><input disabled={!editable} maxLength={240} onChange={(event) => updateField('audienceProfile', event.target.value)} placeholder="例如：25—40岁女性；仅用于本项目表达校准" value={form.audienceProfile} /><small>年龄、性别、兴趣或媒介习惯只作为项目画像，不决定主角、题材或情绪回报。</small></label>
-            <fieldset className="brief-choice-field brief-field--wide" disabled={!editable}><legend>情绪回报（可多选，至少一项）</legend><div className="brief-choice-grid">{EMOTIONAL_REWARD_OPTIONS.map(([value, label]) => <label key={value}><input checked={form.emotionalRewards.includes(value)} onChange={() => toggleEmotionalReward(value)} type="checkbox" /><span>{label}</span></label>)}</div></fieldset>
-            <div className="brief-field brief-field--wide brief-field--compact"><span>首批选题池配比</span><small>当前内容形态：女频 {slateMix.female_frequency}% · 泛人群 {slateMix.general}% · 男频 {slateMix.male_frequency}%。该配比只用于多项目选题组合，不会改写本项目设置。</small></div>
-            <fieldset className="brief-choice-field brief-field--wide" disabled={!editable}><legend>次要市场（可多选）</legend><div className="brief-choice-grid">{MARKET_OPTIONS.filter(([value]) => value !== form.primaryMarket).map(([value, label]) => <label key={value}><input checked={form.secondaryMarkets.includes(value)} onChange={() => toggleSelection('secondaryMarkets', value)} type="checkbox" /><span>{label}</span></label>)}</div></fieldset>
-            <label className="brief-field"><span>规范语言</span><SelectControl aria-label="规范语言" disabled={!editable} onChange={(event) => setForm((current) => current ? { ...current, canonicalLanguage: event.target.value, localizationTargets: current.localizationTargets.filter((item) => item !== event.target.value) } : current)} value={form.canonicalLanguage}>{LANGUAGE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
-            <fieldset className="brief-choice-field" disabled={!editable}><legend>本地化语言（可多选）</legend><div className="brief-choice-grid">{LANGUAGE_OPTIONS.filter(([value]) => value !== form.canonicalLanguage).map(([value, label]) => <label key={value}><input checked={form.localizationTargets.includes(value)} onChange={() => toggleSelection('localizationTargets', value)} type="checkbox" /><span>{label}</span></label>)}</div></fieldset>
-            <label className="brief-field"><span>主平台</span><SelectControl aria-label="主平台" disabled={!editable} onChange={(event) => setForm((current) => current ? { ...current, targetPlatform: event.target.value, secondaryPlatforms: current.secondaryPlatforms.filter((item) => item !== event.target.value) } : current)} value={form.targetPlatform}>{PLATFORM_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
-            <fieldset className="brief-choice-field" disabled={!editable}><legend>同步平台（可多选）</legend><div className="brief-choice-grid">{PLATFORM_OPTIONS.filter(([value]) => value !== form.targetPlatform).map(([value, label]) => <label key={value}><input checked={form.secondaryPlatforms.includes(value)} onChange={() => toggleSelection('secondaryPlatforms', value)} type="checkbox" /><span>{label}</span></label>)}</div></fieldset>
-            <div className="brief-field brief-field--wide brief-field--compact">
-              <div className="brief-field__heading">
-                <label htmlFor="brief-content-requirements">必须满足（每行一条）</label>
-                <span className="brief-field__actions">
-                  <button
-                    disabled={!editable || apiStatus !== 'connected' || draftingRequirements || form.idea.trim().length < 10}
-                    onClick={() => void intelligentlyDraftRequirements()}
-                    type="button"
-                  >
-                    {draftingRequirements ? <LoaderCircle className="spin" size={12} /> : <Sparkles size={12} />}
-                    {draftingRequirements ? '智能代写中' : 'AI 智能代写'}
-                  </button>
-                  {requirementsBeforeDraft !== null ? (
-                    <button onClick={undoRequirementsDraft} type="button">
-                      <RotateCcw size={12} />撤销
+
+            <BriefDisclosure
+              description="补充项目画像和希望观众获得的情绪结果。"
+              meta={targetingMissing.length ? `待确认 ${targetingMissing.length} 项` : `${form.emotionalRewards.length} 项情绪回报`}
+              onToggle={() => toggleBriefSection('audience')}
+              open={openBriefSection === 'audience'}
+              title="受众与情绪"
+            >
+              <label className="brief-field brief-field--wide"><span>补充受众画像（可选）</span><input disabled={!editable} maxLength={240} onChange={(event) => updateField('audienceProfile', event.target.value)} placeholder="例如：25—40岁女性；仅用于本项目表达校准" value={form.audienceProfile} /><small>年龄、性别、兴趣或媒介习惯只作为项目画像，不决定主角、题材或情绪回报。</small></label>
+              <fieldset className="brief-choice-field brief-field--wide" disabled={!editable}><legend>情绪回报（可多选，至少一项）</legend><div className="brief-choice-grid">{EMOTIONAL_REWARD_OPTIONS.map(([value, label]) => <label key={value}><input checked={form.emotionalRewards.includes(value)} onChange={() => toggleEmotionalReward(value)} type="checkbox" /><span>{label}</span></label>)}</div></fieldset>
+              <div className="brief-field brief-field--wide brief-field--compact"><span>首批选题池配比</span><small>当前内容形态：女频 {slateMix.female_frequency}% · 泛人群 {slateMix.general}% · 男频 {slateMix.male_frequency}%。该配比只用于多项目选题组合，不会改写本项目设置。</small></div>
+            </BriefDisclosure>
+
+            <BriefDisclosure
+              description="需要跨市场、跨语言或多平台发行时再调整。"
+              meta={`${1 + form.secondaryMarkets.length} 个市场 · ${1 + form.secondaryPlatforms.length} 个平台`}
+              onToggle={() => toggleBriefSection('delivery')}
+              open={openBriefSection === 'delivery'}
+              title="发行与本地化"
+            >
+              <fieldset className="brief-choice-field brief-field--wide" disabled={!editable}><legend>次要市场（可多选）</legend><div className="brief-choice-grid">{MARKET_OPTIONS.filter(([value]) => value !== form.primaryMarket).map(([value, label]) => <label key={value}><input checked={form.secondaryMarkets.includes(value)} onChange={() => toggleSelection('secondaryMarkets', value)} type="checkbox" /><span>{label}</span></label>)}</div></fieldset>
+              <label className="brief-field"><span>规范语言</span><SelectControl aria-label="规范语言" disabled={!editable} onChange={(event) => setForm((current) => current ? { ...current, canonicalLanguage: event.target.value, localizationTargets: current.localizationTargets.filter((item) => item !== event.target.value) } : current)} value={form.canonicalLanguage}>{LANGUAGE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
+              <fieldset className="brief-choice-field" disabled={!editable}><legend>本地化语言（可多选）</legend><div className="brief-choice-grid">{LANGUAGE_OPTIONS.filter(([value]) => value !== form.canonicalLanguage).map(([value, label]) => <label key={value}><input checked={form.localizationTargets.includes(value)} onChange={() => toggleSelection('localizationTargets', value)} type="checkbox" /><span>{label}</span></label>)}</div></fieldset>
+              <label className="brief-field"><span>主平台</span><SelectControl aria-label="主平台" disabled={!editable} onChange={(event) => setForm((current) => current ? { ...current, targetPlatform: event.target.value, secondaryPlatforms: current.secondaryPlatforms.filter((item) => item !== event.target.value) } : current)} value={form.targetPlatform}>{PLATFORM_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
+              <fieldset className="brief-choice-field" disabled={!editable}><legend>同步平台（可多选）</legend><div className="brief-choice-grid">{PLATFORM_OPTIONS.filter(([value]) => value !== form.targetPlatform).map(([value, label]) => <label key={value}><input checked={form.secondaryPlatforms.includes(value)} onChange={() => toggleSelection('secondaryPlatforms', value)} type="checkbox" /><span>{label}</span></label>)}</div></fieldset>
+            </BriefDisclosure>
+
+            <BriefDisclosure
+              description="把必须满足、必须避免和阻断问题集中在一起。"
+              meta={`${splitLines(form.contentRequirements).length} 条要求 · ${splitLines(form.contentAvoidances).length} 条规避`}
+              onToggle={() => toggleBriefSection('guardrails')}
+              open={openBriefSection === 'guardrails'}
+              title="生成边界"
+            >
+              <div className="brief-field brief-field--wide brief-field--compact">
+                <div className="brief-field__heading">
+                  <label htmlFor="brief-content-requirements">必须满足（每行一条）</label>
+                  <span className="brief-field__actions">
+                    <button
+                      disabled={!editable || apiStatus !== 'connected' || draftingRequirements || form.idea.trim().length < 10}
+                      onClick={() => void intelligentlyDraftRequirements()}
+                      type="button"
+                    >
+                      {draftingRequirements ? <LoaderCircle className="spin" size={12} /> : <ListPlus size={12} />}
+                      {draftingRequirements ? '正在补充' : '补充要求'}
                     </button>
-                  ) : null}
-                </span>
+                    {requirementsBeforeDraft !== null ? (
+                      <button className="brief-field__action--undo" onClick={undoRequirementsDraft} type="button">
+                        <RotateCcw size={12} />撤销
+                      </button>
+                    ) : null}
+                  </span>
+                </div>
+                <textarea
+                  disabled={!editable || draftingRequirements}
+                  id="brief-content-requirements"
+                  maxLength={3000}
+                  onChange={(event) => {
+                    updateField('contentRequirements', event.target.value)
+                    setRequirementsBeforeDraft(null)
+                    setRequirementsDraftNote(null)
+                  }}
+                  placeholder="例如：前三秒出现危机"
+                  value={form.contentRequirements}
+                />
+                {requirementsDraftNote ? <small aria-live="polite" className="brief-field__note">{requirementsDraftNote}</small> : null}
               </div>
-              <textarea
-                disabled={!editable || draftingRequirements}
-                id="brief-content-requirements"
-                maxLength={3000}
-                onChange={(event) => {
-                  updateField('contentRequirements', event.target.value)
-                  setRequirementsBeforeDraft(null)
-                  setRequirementsDraftNote(null)
-                }}
-                placeholder="例如：前三秒出现危机"
-                value={form.contentRequirements}
-              />
-              {requirementsDraftNote ? <small aria-live="polite" className="brief-field__note">{requirementsDraftNote}</small> : null}
-            </div>
-            <div className="brief-field brief-field--wide brief-field--compact">
-              <div className="brief-field__heading">
-                <label htmlFor="brief-content-avoidances">必须避免（每行一条）</label>
-                <span className="brief-field__actions">
-                  <button
-                    disabled={!editable || apiStatus !== 'connected' || draftingAvoidances || form.idea.trim().length < 10}
-                    onClick={() => void intelligentlyDraftAvoidances()}
-                    type="button"
-                  >
-                    {draftingAvoidances ? <LoaderCircle className="spin" size={12} /> : <Sparkles size={12} />}
-                    {draftingAvoidances ? '智能建议中' : 'AI 智能建议'}
-                  </button>
-                  {avoidancesBeforeDraft !== null ? (
-                    <button onClick={undoAvoidancesDraft} type="button">
-                      <RotateCcw size={12} />撤销
+              <div className="brief-field brief-field--wide brief-field--compact">
+                <div className="brief-field__heading">
+                  <label htmlFor="brief-content-avoidances">必须避免（每行一条）</label>
+                  <span className="brief-field__actions">
+                    <button
+                      disabled={!editable || apiStatus !== 'connected' || draftingAvoidances || form.idea.trim().length < 10}
+                      onClick={() => void intelligentlyDraftAvoidances()}
+                      type="button"
+                    >
+                      {draftingAvoidances ? <LoaderCircle className="spin" size={12} /> : <ShieldCheck size={12} />}
+                      {draftingAvoidances ? '正在检查' : '检查规避项'}
                     </button>
-                  ) : null}
-                </span>
+                    {avoidancesBeforeDraft !== null ? (
+                      <button className="brief-field__action--undo" onClick={undoAvoidancesDraft} type="button">
+                        <RotateCcw size={12} />撤销
+                      </button>
+                    ) : null}
+                  </span>
+                </div>
+                <textarea
+                  disabled={!editable || draftingAvoidances}
+                  id="brief-content-avoidances"
+                  maxLength={3000}
+                  onChange={(event) => {
+                    updateField('contentAvoidances', event.target.value)
+                    setAvoidancesBeforeDraft(null)
+                    setAvoidancesDraftNote(null)
+                  }}
+                  placeholder="例如：未授权品牌露出"
+                  value={form.contentAvoidances}
+                />
+                {avoidancesDraftNote ? <small aria-live="polite" className="brief-field__note">{avoidancesDraftNote}</small> : null}
               </div>
-              <textarea
-                disabled={!editable || draftingAvoidances}
-                id="brief-content-avoidances"
-                maxLength={3000}
-                onChange={(event) => {
-                  updateField('contentAvoidances', event.target.value)
-                  setAvoidancesBeforeDraft(null)
-                  setAvoidancesDraftNote(null)
-                }}
-                placeholder="例如：未授权品牌露出"
-                value={form.contentAvoidances}
-              />
-              {avoidancesDraftNote ? <small aria-live="polite" className="brief-field__note">{avoidancesDraftNote}</small> : null}
-            </div>
-            <label className="brief-field brief-field--wide brief-field--compact"><span>生成前必须回答的问题（每行一条）</span><textarea disabled={!editable} maxLength={2000} onChange={(event) => updateField('blockingQuestions', event.target.value)} placeholder="留空即可生成；有内容时系统会阻止方案生成" value={form.blockingQuestions} /></label>
+              <label className="brief-field brief-field--wide brief-field--compact"><span>生成前必须回答的问题（每行一条）</span><textarea disabled={!editable} maxLength={2000} onChange={(event) => updateField('blockingQuestions', event.target.value)} placeholder="留空即可生成；有内容时系统会阻止方案生成" value={form.blockingQuestions} /></label>
+            </BriefDisclosure>
           </div>
           {error ? <div className="brief-save-message brief-save-message--error" role="alert">{error}<Button onClick={() => window.location.reload()} size="sm" variant="ghost"><RefreshCw size={14} />重新载入</Button></div> : null}
           {notice ? <div className="brief-save-message brief-save-message--success">{notice}</div> : null}
@@ -1011,7 +1145,6 @@ export function ProjectBriefPage() {
         <aside className="brief-fact-card">
           <div className="section-heading"><div><h2>版本信息</h2></div><Database size={19} /></div>
           <dl><div><dt>项目编号</dt><dd>{project.id}</dd></div><div><dt>简报结构版本</dt><dd>brief-v3</dd></div><div><dt>简报版本</dt><dd>{briefVersion ?? '—'}</dd></div><div><dt>锁定版本</dt><dd>{project.lockVersion}</dd></div><div><dt>创建时间</dt><dd>{new Date(project.createdAt).toLocaleString('zh-CN')}</dd></div><div><dt>最后更新</dt><dd>{new Date(project.updatedAt).toLocaleString('zh-CN')}</dd></div></dl>
-          <div className="brief-next-step"><strong>任务执行策略</strong><p>默认使用确定性模拟服务。任务先写入数据库，再由单个后台任务进程执行；刷新页面不会丢失进度，也不会调用外部付费服务。</p></div>
         </aside>
       </div>
 
@@ -1022,7 +1155,7 @@ export function ProjectBriefPage() {
           <p className="proposal-synopsis">{proposal.directorStatement}</p>
           <div className="proposal-specs"><span><small>场景</small><strong>{proposal.scenes.length}</strong></span><span><small>镜头</small><strong>{shotCount}</strong></span><span><small>时长</small><strong>{proposal.totalDurationSec} 秒</strong></span><span><small>生成服务</small><strong>{proposal.provider}</strong></span></div>
           <section className="proposal-scenes"><div className="section-heading"><div><p className="eyebrow">故事节拍</p><h2>三段式场景</h2></div></div>{proposal.scenes.map((scene) => <div key={scene.code}><span>{scene.code}</span><div><strong>{scene.title}</strong><p>{scene.purpose}</p></div><small>{scene.durationSec} 秒<br />{scene.shots.length} 个镜头</small></div>)}</section>
-          <div className="assumption-box"><div><Sparkles size={15} /><strong>AI 补充假设</strong></div><ul>{proposal.assumptions.map((item) => <li key={item}>{item}</li>)}</ul>{project.status === 'PROPOSAL_READY' ? <label><input checked={assumptionsConfirmed} onChange={(event) => setAssumptionsConfirmed(event.target.checked)} type="checkbox" /><span><Check size={12} /></span>我已查看并确认以上假设</label> : null}</div>
+          <div className="assumption-box"><div><ListChecks size={15} /><strong>待确认假设</strong></div><ul>{proposal.assumptions.map((item) => <li key={item}>{item}</li>)}</ul>{project.status === 'PROPOSAL_READY' ? <label><input checked={assumptionsConfirmed} onChange={(event) => setAssumptionsConfirmed(event.target.checked)} type="checkbox" /><span><Check size={12} /></span>我已查看并确认以上假设</label> : null}</div>
           <div className="proposal-actions">
             {project.status === 'PROPOSAL_READY' ? <Button disabled={!assumptionsConfirmed || approving} onClick={approveProposal}>{approving ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}{approving ? '正在批准' : '批准故事并生成角色'}</Button> : null}
             {project.status === 'CHARACTER_VISUAL_READY' ? <Link className="button button--primary button--md" to={`/projects/${project.id}/characters`}>生成并锁定角色形象</Link> : null}

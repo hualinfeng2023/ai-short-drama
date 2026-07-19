@@ -594,9 +594,7 @@ def normalize_story_structure_payload(
             canonical_key = str(canonical.get("relationship_key", ""))
             if relationship_key and canonical_key:
                 relationship_key_aliases[relationship_key] = canonical_key
-            canonical_types = [
-                str(item) for item in canonical.get("relationship_types", [])
-            ]
+            canonical_types = [str(item) for item in canonical.get("relationship_types", [])]
             duplicate_types = [str(item) for item in edge.get("relationship_types", [])]
             canonical["relationship_types"] = list(
                 dict.fromkeys([*canonical_types, *duplicate_types])
@@ -765,6 +763,11 @@ class NarrativeReview(BaseModel):
     short_drama_engine: ShortDramaEngine
     breakout_engine: BreakoutNarrativeEngine
     critic: dict[str, Any]
+
+
+class ScriptExcerptRewriteOutput(BaseModel):
+    rewritten_text: str = Field(min_length=1, max_length=2000)
+    rationale: str = Field(min_length=1, max_length=500)
 
 
 @dataclass(frozen=True)
@@ -2010,6 +2013,170 @@ async def _ark_json(
             "attempts": attempt_diagnostics,
             "last_request_id": request_id,
         },
+    )
+
+
+def _deterministic_excerpt_rewrite(
+    selected_text: str,
+    *,
+    action: str,
+    tone: str | None,
+    custom_instruction: str | None,
+) -> ScriptExcerptRewriteOutput:
+    source = selected_text.strip()
+    ending = source[-1] if source and source[-1] in "。！？!?…" else ""
+    body = source[:-1] if ending else source
+
+    if action == "SHORTEN":
+        shortened = body
+        for filler in ("我觉得", "其实", "真的", "可能", "也许", "就是说", "你知道"):
+            shortened = shortened.replace(filler, "")
+        clauses = [
+            item.strip() for item in shortened.replace("；", "，").split("，") if item.strip()
+        ]
+        if len(clauses) > 1:
+            shortened = "，".join(clauses[: max(1, (len(clauses) + 1) // 2)])
+        elif len(shortened) > 8:
+            shortened = shortened[: max(4, round(len(shortened) * 0.65))].rstrip("，、")
+        rewritten = shortened + (ending or "。")
+        rationale = "去掉铺垫和重复信息，保留这段话的核心动作。"
+    elif action == "INTENSIFY_CONFLICT":
+        rewritten = body.replace("请", "必须").replace("可以", "休想")
+        if rewritten == body:
+            rewritten = f"{body}——别再回避"
+        rewritten = rewritten.rstrip("。！？!?") + "！"
+        rationale = "提高措辞压力和对抗节奏，不改变人物与既有事实。"
+    elif action == "ADJUST_TONE":
+        target = tone or "克制"
+        if target == "克制":
+            rewritten = body.replace("必须", "需要").replace("绝对", "").rstrip("。！？!?") + "。"
+        elif target == "强硬":
+            rewritten = body.replace("请", "必须").rstrip("。！？!?") + "！"
+        elif target == "温柔":
+            rewritten = body.replace("必须", "希望").rstrip("。！？!?") + "，好吗？"
+        elif target == "讽刺":
+            rewritten = f"原来，{body.rstrip('。！？!?')}。"
+        else:
+            rewritten = body.rstrip("。！？!?") + "。"
+        if rewritten == source:
+            rewritten = f"{body}……"
+        rationale = f"把表达调整为更{target}的语气，保留原意。"
+    else:
+        rewritten = body
+        replacements = (
+            ("但是", "可"),
+            ("因为", "既然"),
+            ("现在", "此刻"),
+            ("不能", "不许"),
+            ("不要", "别"),
+        )
+        for old, new in replacements:
+            if old in rewritten:
+                rewritten = rewritten.replace(old, new, 1)
+                break
+        if rewritten == body:
+            rewritten = body.rstrip("。！？!?") + "……"
+        else:
+            rewritten += ending or "。"
+        rationale = (
+            f"按“{custom_instruction}”重写选中内容，并保留原有事实。"
+            if action == "CUSTOM" and custom_instruction
+            else "换一种更紧凑、自然的说法，保留原意。"
+        )
+
+    if rewritten == source:
+        rewritten = source.rstrip("。！？!?…") + "……"
+    return ScriptExcerptRewriteOutput(rewritten_text=rewritten, rationale=rationale)
+
+
+async def generate_script_excerpt_rewrite(
+    settings: Settings,
+    *,
+    selected_text: str,
+    full_line: str,
+    scene_context: str,
+    action: str,
+    tone: str | None = None,
+    custom_instruction: str | None = None,
+) -> TextGenerationResult:
+    if not settings.ark_api_key:
+        output = _deterministic_excerpt_rewrite(
+            selected_text,
+            action=action,
+            tone=tone,
+            custom_instruction=custom_instruction,
+        )
+        return TextGenerationResult(
+            payload=output.model_dump(mode="json"),
+            provider="mock",
+            model="deterministic-script-rewriter-v1",
+            request_id=None,
+            repair_attempts=0,
+        )
+
+    action_labels = {
+        "REWRITE": "改写，使表达更自然、具体、适合表演",
+        "SHORTEN": "缩短，删除冗余但保留核心信息",
+        "INTENSIFY_CONFLICT": "增强冲突，提高人物之间的压力与对抗",
+        "ADJUST_TONE": f"把语气调整为“{tone}”",
+        "CUSTOM": f"按用户要求改写：{custom_instruction}",
+    }
+    prompt = (
+        "你是短剧台词编辑。只改写用户选中的片段，严格返回 JSON，不要 Markdown。"
+        "不得改变人物身份、既有事实、人物关系、行动结果或叙事视角；"
+        "不得凭空加入战神、赘婿、后宫、大女主等套路设定；"
+        "不要把未选中的上下文重复到结果里。"
+        f"\n任务：{action_labels[action]}"
+        f"\n场景上下文：{scene_context}"
+        f"\n完整台词：{full_line}"
+        f"\n选中片段：{selected_text}"
+        "\nrewritten_text 只能包含替换选中片段的新文字；"
+        "rationale 用一句简短中文说明改动。"
+        "\n输出必须符合 JSON Schema：\n"
+        f"{json.dumps(ScriptExcerptRewriteOutput.model_json_schema(), ensure_ascii=False)}"
+    )
+
+    def validate_changed(candidate: BaseModel) -> None:
+        rewritten = str(getattr(candidate, "rewritten_text", "")).strip()
+        if rewritten == selected_text.strip():
+            raise ModelOutputSemanticError(
+                "SCRIPT_REWRITE_UNCHANGED",
+                "模型没有改写选中内容",
+                repair_message="rewritten_text 必须与原文不同，同时保持原意。",
+                details={"selected_text": selected_text},
+            )
+        source_length = len(selected_text.strip())
+        maximum_length = round(source_length * (2 if action == "CUSTOM" else 1.55)) + 4
+        if len(rewritten) > maximum_length:
+            raise ModelOutputSemanticError(
+                "SCRIPT_REWRITE_OVEREXPANDED",
+                "改写加入了过多新内容",
+                repair_message=(
+                    f"rewritten_text 不得超过 {maximum_length} 个字符。"
+                    "删除新加入的背景、物品和事实，只保留选中片段原有信息。"
+                ),
+                details={
+                    "selected_length": source_length,
+                    "rewritten_length": len(rewritten),
+                    "maximum_length": maximum_length,
+                },
+            )
+        if action == "SHORTEN" and len(rewritten) >= source_length:
+            raise ModelOutputSemanticError(
+                "SCRIPT_REWRITE_NOT_SHORTER",
+                "缩短结果没有比原文更短",
+                repair_message="rewritten_text 必须更短，只保留核心信息。",
+                details={
+                    "selected_length": source_length,
+                    "rewritten_length": len(rewritten),
+                },
+            )
+
+    return await _ark_json(
+        settings,
+        prompt=prompt,
+        validator=ScriptExcerptRewriteOutput,
+        semantic_validator=validate_changed,
     )
 
 

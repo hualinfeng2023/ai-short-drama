@@ -64,7 +64,7 @@ interface Crumb {
 }
 
 function breadcrumb(pathname: string, projectName: string, projectHref: string): Crumb[] {
-  if (pathname === '/projects/new') return [{ label: '项目', to: '/projects' }, { label: 'AI 新建项目' }]
+  if (pathname === '/projects/new') return [{ label: '项目', to: '/projects' }, { label: '新建项目' }]
   if (pathname.includes('/scenes/')) return [{ label: projectName, to: projectHref }, { label: '第 1 集', to: projectHref }, { label: '场景工作台' }]
   if (pathname.endsWith('/preview')) return [{ label: projectName, to: projectHref }, { label: '第 1 集', to: projectHref }, { label: '完整小样' }]
   if (pathname.endsWith('/story')) return [{ label: projectName, to: projectHref }, { label: '故事与剧本' }]
@@ -342,6 +342,7 @@ export function AppShell() {
                 return (
                   <NavLink
                     className={({ isActive }) => `sidebar__subnav-item ${isActive ? 'sidebar__subnav-item--active' : ''}`}
+                    end={label === '样片工作台'}
                     key={to}
                     title={locked ? `${label} · 连接服务端后可用` : label}
                     to={to}

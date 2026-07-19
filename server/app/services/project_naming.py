@@ -20,6 +20,19 @@ class ProjectNamingError(Exception):
     pass
 
 
+_GENERIC_NAMES = {
+    "爱与成长",
+    "命运转折",
+    "逆袭人生",
+    "秘密人生",
+    "新的开始",
+    "真相大白",
+    "重启人生",
+    "未命名故事",
+}
+_ANCHOR_STOP_CHARS = set("的一了在是与和及又也把被让从到为之这那一个位名对场次后前中上下来去而但")
+
+
 def _extract_output_text(payload: Any) -> str | None:
     if not isinstance(payload, dict):
         return None
@@ -44,6 +57,19 @@ def _clean_name(value: str) -> str | None:
     cleaned = cleaned.strip(" \t\"'“”‘’《》【】[]。！!？?，,")
     cleaned = re.sub(r"\s+", "", cleaned)
     return cleaned[:24] if 2 <= len(cleaned) <= 40 else None
+
+
+def _validate_generated_name(name: str, brief: dict[str, Any]) -> None:
+    current_name = _clean_name(str(brief.get("current_name") or ""))
+    if current_name and name.casefold() == current_name.casefold():
+        raise ProjectNamingError("智能命名返回了当前名称，未生成新的候选名称")
+    if name in _GENERIC_NAMES:
+        raise ProjectNamingError("智能命名返回了过于泛化的名称")
+
+    idea_chars = set(re.sub(r"\s+", "", str(brief["idea"]))) - _ANCHOR_STOP_CHARS
+    name_chars = set(name) - _ANCHOR_STOP_CHARS
+    if len(idea_chars & name_chars) < 2:
+        raise ProjectNamingError("智能命名未能抓住故事想法中的核心人物、冲突或意象")
 
 
 def _local_name(idea: str) -> str:
@@ -75,14 +101,19 @@ def _local_name(idea: str) -> str:
 
 
 def _provider_prompt(brief: dict[str, Any]) -> str:
-    return f"""你是中文短剧平台的资深策划，请为下面的创作 Brief 生成一个项目名称。
+    return f"""你是中文短剧平台的资深策划和片名总监。
+请基于用户当前提供的完整创作 Brief，生成一个新的短剧名称。
 
 要求：
-1. 准确抓住核心人物关系、关键意象或戏剧冲突，不虚构 Brief 之外的事实。
-2. 中文名称优先控制在 4 至 12 个汉字，简洁、易记、有短剧传播力，但不要标题党。
-3. 避免“粗略故事梗概”“未命名项目”“我的短剧”等占位表达。
-4. 不要使用书名号、引号、标点、编号、副标题或解释，只输出一个最终名称。
-5. 不得根据主角性别或目标受众套用类型化标题。
+1. 先在内部生成至少 5 个候选，并比较故事贴合度、独特性、记忆点和传播力，只输出得分最高的一个。
+2. 最终名称必须直接锚定故事想法中的核心人物关系、独特能力、关键意象、
+核心悬念或戏剧冲突；不得只写“成长”“逆袭”“命运”“真相”等泛化概念。
+3. 当前名称只用于去重。必须生成一条新的候选，禁止原样返回当前名称，也禁止只做机械缩写或同义词替换。
+4. 不虚构 Brief 之外的人物、关系、能力、道具、地点、事件或结局。
+5. 中文名称优先控制在 4 至 12 个汉字，简洁、易记、有短剧传播力，但不要标题党。
+6. 避免“粗略故事梗概”“未命名项目”“我的短剧”等占位表达。
+7. 不得根据主角性别或目标受众套用类型化标题。
+8. 不要使用书名号、引号、标点、编号、副标题、评分、候选列表或解释，只输出一个最终名称。
 
 {targeting_prompt_guardrails(brief)}
 
@@ -90,10 +121,15 @@ def _provider_prompt(brief: dict[str, Any]) -> str:
 故事想法：{brief["idea"]}
 题材：{brief.get("genre", "未指定")}
 视觉风格：{brief.get("style", "未指定")}
+目标时长：{brief.get("target_duration_sec", "未指定")} 秒
+画幅：{brief.get("aspect_ratio", "未指定")}
+主平台：{brief.get("target_platform", "未指定")}
 目标受众：{brief.get("target_audience", "general")}
 补充受众画像：{brief.get("audience_profile") or "未指定"}
 主要市场：{brief.get("primary_market", "CN")}
 规范语言：{brief.get("canonical_language", "zh-CN")}
+必须满足：{brief.get("content_requirements") or []}
+必须避免：{brief.get("content_avoidances") or []}
 """
 
 
@@ -129,6 +165,7 @@ async def _call_ark(
     cleaned = _clean_name(output or "")
     if cleaned is None:
         raise ProjectNamingError("火山方舟未返回可用的项目名称")
+    _validate_generated_name(cleaned, brief)
     return GeneratedProjectName(
         text=cleaned,
         provider="volcengine-ark",
@@ -140,12 +177,15 @@ async def suggest_project_name(
     brief: dict[str, Any],
     *,
     settings: Settings | None = None,
+    allow_fallback: bool = True,
 ) -> ProjectNameSuggestionRead:
     resolved_settings = settings or get_settings()
     try:
         result = await _call_ark(resolved_settings, brief)
         warning = None
     except ProjectNamingError as exc:
+        if not allow_fallback:
+            raise
         result = GeneratedProjectName(
             text=_local_name(str(brief["idea"])),
             provider="local-fallback",
