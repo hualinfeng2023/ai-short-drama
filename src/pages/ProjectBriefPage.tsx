@@ -32,7 +32,7 @@ import {
   suggestProjectName,
   updateProjectDraft,
 } from '../api/client'
-import { Button, PageHeader, SelectControl, StatusBadge } from '../components/ui'
+import { Button, getStatusLabel, PageHeader, SelectControl, StatusBadge } from '../components/ui'
 import { PageLoadingSkeleton } from '../components/PageLoadingSkeleton'
 import { ServiceRequiredState } from '../components/ServiceRequiredState'
 import { useStudio } from '../store/StudioContext'
@@ -162,14 +162,16 @@ function BriefSection({
 }: {
   children: ReactNode
   description?: string
-  title: string
+  title?: string
 }) {
   return (
-    <section className="brief-section">
-      <div className="brief-section__heading">
-        <strong>{title}</strong>
-        {description ? <small>{description}</small> : null}
-      </div>
+    <section className={`brief-section${title ? '' : ' brief-section--headless'}`}>
+      {title ? (
+        <div className="brief-section__heading">
+          <strong>{title}</strong>
+          {description ? <small>{description}</small> : null}
+        </div>
+      ) : null}
       <div className="brief-section__content">{children}</div>
     </section>
   )
@@ -860,16 +862,16 @@ export function ProjectBriefPage() {
     <>
       {runningJobType ? (
         <Link
-          aria-label="查看当前生成任务"
-          className="brief-task-entry"
+          aria-label={`查看当前任务：${getStatusLabel(project.status)}`}
+          className="button button--secondary button--md"
           to={`/tasks?project=${project.id}&jobType=${runningJobType}`}
         >
-          <StatusBadge status={project.status} />
-          <span><ListChecks size={13} />查看任务<ArrowRight size={13} /></span>
+          <LoaderCircle className="spin" size={16} />
+          {getStatusLabel(project.status)}
+          <ArrowRight size={16} />
         </Link>
       ) : (
         <>
-          <StatusBadge status={project.status} />
           {project.status === 'RELATIONSHIP_READY' ? (
             <Link
               className="button button--primary button--md"
@@ -902,6 +904,7 @@ export function ProjectBriefPage() {
     <div className="page page--brief">
       <PageHeader
         title="故事设定"
+        titleMeta={runningJobType ? null : <StatusBadge status={project.status} />}
         description={editable
           ? `定义故事方向、制作规格与生成边界；保存后可生成故事方向。项目第 ${project.lockVersion} 版 · 简报第 ${briefVersion ?? '—'} 版。`
           : `查看已锁定的故事方向、制作规格与生成边界。项目第 ${project.lockVersion} 版 · 简报第 ${briefVersion ?? '—'} 版。`}
@@ -1081,13 +1084,9 @@ export function ProjectBriefPage() {
             <label className="brief-field"><span>目标受众</span><SelectControl aria-label="目标受众" disabled={!editable} onChange={(event) => updateField('targetAudience', event.target.value as TargetAudience)} value={form.targetAudience}>{TARGET_AUDIENCE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
             <label className="brief-field"><span>主市场</span><SelectControl aria-label="主市场" disabled={!editable} onChange={(event) => setForm((current) => current ? { ...current, primaryMarket: event.target.value, secondaryMarkets: current.secondaryMarkets.filter((item) => item !== event.target.value) } : current)} value={form.primaryMarket}>{MARKET_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
 
-            <BriefSection
-              description="补充项目画像和希望观众获得的情绪结果。"
-              title="受众与情绪"
-            >
+            <BriefSection>
               <label className="brief-field brief-field--wide"><span>补充受众画像（可选）</span><input disabled={!editable} maxLength={240} onChange={(event) => updateField('audienceProfile', event.target.value)} placeholder="例如：25—40岁女性；仅用于本项目表达校准" value={form.audienceProfile} /><small>年龄、性别、兴趣或媒介习惯只作为项目画像，不决定主角、题材或情绪回报。</small></label>
-              <fieldset className="brief-choice-field brief-field--wide" disabled={!editable}><legend>情绪回报（可多选，至少一项）</legend><div className="brief-choice-grid">{EMOTIONAL_REWARD_OPTIONS.map(([value, label]) => <label key={value}><input checked={form.emotionalRewards.includes(value)} onChange={() => toggleEmotionalReward(value)} type="checkbox" /><span>{label}</span></label>)}</div></fieldset>
-              <div className="brief-field brief-field--wide brief-field--compact"><span>首批选题池配比</span><small>当前内容形态：女频 {slateMix.female_frequency}% · 泛人群 {slateMix.general}% · 男频 {slateMix.male_frequency}%。该配比只用于多项目选题组合，不会改写本项目设置。</small></div>
+              <fieldset className="brief-choice-field brief-field--wide" disabled={!editable}><legend>情绪回报（可多选，至少一项）</legend><div className="brief-choice-grid">{EMOTIONAL_REWARD_OPTIONS.map(([value, label]) => <label key={value}><input checked={form.emotionalRewards.includes(value)} onChange={() => toggleEmotionalReward(value)} type="checkbox" /><span>{label}</span></label>)}</div><p className="brief-field__note">首批选题池参考：女频 {slateMix.female_frequency}% · 泛人群 {slateMix.general}% · 男频 {slateMix.male_frequency}%（仅多项目组合，不改本项目）。</p></fieldset>
             </BriefSection>
 
             <BriefSection

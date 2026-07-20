@@ -225,12 +225,22 @@ summary:focus-visible,
   background: color-mix(in srgb, var(--color-action-primary) 14%, var(--color-material-control-hover));
 }
 .nav-item em {
+  display: inline-flex;
   width: 19px;
   height: 19px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  margin-left: auto;
   color: var(--color-white);
   background: var(--color-state-danger);
   border: 2px solid var(--color-sidebar-surface);
-  font-size: var(--font-size-caption);
+  border-radius: var(--radius-round);
+  font-size: 0.6875rem;
+  font-style: normal;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
 
 .sidebar__project {
@@ -754,7 +764,7 @@ summary:focus-visible,
 .project-table { overflow: hidden; background: var(--color-surface); }
 .project-table__head { min-height: 48px; background: var(--color-surface-subtle); color: var(--color-text-tertiary); }
 .project-table__row {
-  min-height: 78px;
+  min-height: 84px;
   transition: background var(--motion-duration-fast) var(--motion-ease-standard);
 }
 .project-table__row:hover { background: color-mix(in srgb, var(--color-action-primary) 3%, var(--color-surface)); }
@@ -876,7 +886,6 @@ summary:focus-visible,
 }
 .task-list article:hover { background: color-mix(in srgb, var(--color-action-primary) 2.5%, var(--color-surface)); }
 .task-list article[data-active="true"] { background: color-mix(in srgb, var(--color-action-primary-soft) 58%, var(--color-surface)); }
-.task-list article[data-active="true"]::before { inset-block: 14px; width: 4px; border-radius: 0 var(--radius-control-sm) var(--radius-control-sm) 0; }
 .task-list__lead strong { font-size: var(--font-size-control); }
 .task-list small { color: var(--color-text-tertiary); font-size: var(--font-size-caption); line-height: 1.5; }
 .task-list__timing { font-size: var(--font-size-caption); }
@@ -1424,11 +1433,17 @@ summary:focus-visible,
     position: absolute;
     top: 5px;
     right: max(10px, calc(50% - 24px));
+    display: inline-flex;
     width: 17px;
     height: 17px;
+    align-items: center;
+    justify-content: center;
     margin: 0;
     border-color: var(--color-surface);
-    font-size: var(--font-size-caption);
+    font-size: 0.6875rem;
+    font-style: normal;
+    font-weight: 700;
+    line-height: 1;
   }
 
   .content-area { padding-bottom: calc(var(--layout-mobile-navigation-clearance) + env(safe-area-inset-bottom)); }
@@ -1797,9 +1812,10 @@ summary:focus-visible,
   .task-project-scope__controls { width: 100%; }
   .task-project-scope__controls select { flex: 1; min-width: 0; }
   .task-scope-banner { align-items: flex-start; flex-direction: column; }
-  .task-list { overflow: visible; background: transparent; border: 0; box-shadow: none; }
+  .task-list { display: block; overflow: visible; background: transparent; border: 0; box-shadow: none; }
   .task-list article {
     display: grid;
+    grid-column: auto;
     min-height: 0;
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-rows: repeat(7, auto);
@@ -3768,7 +3784,6 @@ a.project-workflow__stage:focus-visible {
 :root input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):disabled,
 :root select:disabled,
 :root textarea:disabled,
-.brief-choice-field:disabled,
 .relationship-inspector input:disabled,
 .relationship-inspector select:disabled,
 .relationship-inspector textarea:disabled,
@@ -4025,10 +4040,17 @@ a.project-workflow__stage:focus-visible {
   .brief-choice-grid label,
   .brief-save-message,
   .brief-editor-actions > span,
-  .brief-task-entry > span:last-child,
   .brief-fact-card dt,
   .brief-fact-card dd {
     font-size: var(--font-size-control);
+  }
+
+  .brief-choice-field > .brief-field__note {
+    font-size: 0.6875rem;
+  }
+
+  .brief-field > small {
+    font-size: 0.6875rem;
   }
 
   .brief-version-badges > .status-badge {

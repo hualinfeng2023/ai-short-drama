@@ -36,7 +36,7 @@ import { useToast } from '../store/ToastContext'
 import { GlossaryTip } from '../components/GlossaryTip'
 import type { CharacterRecord, IdentityReviewDecision, IdentityReviewIssue } from '../types'
 import { resolveCharacterReferencePreview } from '../utils/characterReferencePreview'
-import { localizeDisplayText } from '../utils/localizeDisplayText'
+import { localizeCharacterRole, localizeDisplayText } from '../utils/localizeDisplayText'
 
 const DEFAULT_IMAGE_MODELS = [
   { id: 'doubao-seedream-5-0-260128', label: 'Seedream 5.0 Pro' },
@@ -586,10 +586,10 @@ export function ShotWorkspacePage() {
           {inspectorTab === 'continuity' ? <>
             <section className="continuity-box identity-lock-box">
               <div><ShieldCheck size={16} /><strong>角色参考与造型</strong><StatusBadge status={currentShot.candidateIdentityStatus ?? (boundCharacterCount > 0 ? 'LOCKED' : 'NOT_APPLICABLE')} label={currentShot.candidateIdentityStatus ? undefined : boundCharacterCount > 0 ? `已绑定 ${boundCharacterCount} 位角色` : '未绑定角色'} /></div>
-              {(currentShot.characterBindings ?? []).length > 0 ? <div className="identity-reference-list">{currentShot.characterBindings?.map((binding) => <div className="identity-reference" key={binding.id}><img alt={`${binding.name} 项目角色参考`} src={referencePreviewUrls.get(binding.id) ?? binding.referenceAssetUrl} /><span><strong>{binding.name} · {localizeDisplayText(binding.role)}</strong><small>{displayLookVersion(binding.lookVersion)} · 项目角色参考帧</small></span></div>)}</div> : <p className="identity-empty">当前分镜未绑定锁定角色；无人物镜头可保持为空。</p>}
+              {(currentShot.characterBindings ?? []).length > 0 ? <div className="identity-reference-list">{currentShot.characterBindings?.map((binding) => <div className="identity-reference" key={binding.id}><img alt={`${binding.name} 项目角色参考`} src={referencePreviewUrls.get(binding.id) ?? binding.referenceAssetUrl} /><span><strong>{binding.name} · {localizeCharacterRole(binding.role)}</strong><small>{displayLookVersion(binding.lookVersion)} · 项目角色参考帧</small></span></div>)}</div> : <p className="identity-empty">当前分镜未绑定锁定角色；无人物镜头可保持为空。</p>}
               <div className="identity-binding-heading"><strong>本镜头出场角色</strong><small>勾选画面内可见的所有角色</small></div>
               <div className="identity-binding-list">
-                {lockedCharacters.map((character) => <label key={character.id}><input checked={boundCharacterIds.includes(character.id)} onChange={(event) => setBoundCharacterIds((current) => event.target.checked ? [...current, character.id] : current.filter((id) => id !== character.id))} type="checkbox" /><UserRound size={14} /><span>{character.name}<small>{localizeDisplayText(character.role)} · 已锁定参考图</small></span></label>)}
+                {lockedCharacters.map((character) => <label key={character.id}><input checked={boundCharacterIds.includes(character.id)} onChange={(event) => setBoundCharacterIds((current) => event.target.checked ? [...current, character.id] : current.filter((id) => id !== character.id))} type="checkbox" /><UserRound size={14} /><span>{character.name}<small>{localizeCharacterRole(character.role)} · 已锁定参考图</small></span></label>)}
               </div>
               <FormField className="field" label={<GlossaryTip label="本镜头使用的造型版本" tip="同一角色可登记多套服装与造型；生成画面时以所选版本为参考，避免角色形象在镜头之间漂移。" />}><input onChange={(event) => setLookVersion(event.target.value)} value={lookVersion} /></FormField>
               <Button disabled={!bindingsDirty || bindingSaving || currentShot.status === 'GENERATING'} onClick={() => void saveCharacterBindings()} size="sm" variant="secondary">{bindingSaving ? <LoaderCircle className="spin" size={14} /> : <Save size={14} />}保存角色与造型</Button>

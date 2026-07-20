@@ -1406,7 +1406,7 @@ async def test_locked_biological_relative_creates_versioned_family_constraint_an
             "mouth_corner": "静止时左侧嘴角略高",
             "face_shape": "偏长的鹅蛋形脸部轮廓",
             "skin_tone": "自然偏暖肤色",
-            "hair_texture": "偏硬的自然直发",
+            "hair_color": "深棕偏黑的自然发色",
         },
     )
     refreshed = (await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")).json()[

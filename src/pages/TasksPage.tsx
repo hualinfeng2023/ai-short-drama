@@ -23,6 +23,15 @@ const ACTIVE_JOB_STATUSES = new Set<JobStatus>([
   'CANCEL_REQUESTED',
 ])
 
+/** 将后端 stage 拆成主说明与次要元信息，便于分行展示 */
+function splitJobStage(stage: string): { message: string; meta: string[] } {
+  const localized = localizeDisplayText(stage).trim()
+  if (!localized) return { message: '', meta: [] }
+  const parts = localized.split(' · ').map((part) => part.trim()).filter(Boolean)
+  if (parts.length <= 1) return { message: localized, meta: [] }
+  return { message: parts[0], meta: parts.slice(1) }
+}
+
 const eventTypes = [
   'job.created',
   'job.running',
@@ -267,8 +276,8 @@ export function TasksPage() {
     {loading ? <div className="brief-page-state"><LoaderCircle className="spin" size={20} />正在读取持久化任务…</div> : null}
     <section className={`task-list${projectId ? ' task-list--project-scoped' : ''}`}>
       <div className="task-list__header" aria-hidden="true">
-        <span>任务</span>{projectId ? null : <span>项目</span>}<span>创建时间</span>
-        <span>任务状态</span><span>用时</span><span>操作</span>
+        <span className="task-list__col-lead">任务</span>{projectId ? null : <span className="task-list__col-project">项目</span>}<span className="task-list__col-created">创建时间</span>
+        <span className="task-list__col-state">任务状态</span><span className="task-list__col-timing">用时</span><span className="task-list__col-actions">操作</span>
       </div>
       {filtered.map((job, index) => {
       const active = ACTIVE_JOB_STATUSES.has(job.status)
@@ -286,18 +295,42 @@ export function TasksPage() {
         {projectId ? null : <Link className="task-list__project" title={`打开项目：${job.projectName}`} to={`/projects/${job.projectId}`}>{job.projectName}</Link>}
         <span className="task-list__created">{createdLabel(job.createdAt)}</span>
         <div className="task-list__state">
-          <div className="task-list__state-summary">
+          {job.status === 'FAILED' ? (
+            <>
+              <StatusBadge status={job.status} />
+              <p className="task-list__state-message task-list__state-message--error">{taskDetail}{visibleErrorCode}</p>
+            </>
+          ) : active ? (
+            <>
+              <div className="task-list__state-track">
+                <StatusBadge status={job.status} />
+                <ProgressBar value={job.progress} />
+                <span className="task-list__stage-progress">{Math.round(job.progress)}%</span>
+              </div>
+              {(() => {
+                const { message, meta } = splitJobStage(job.stage)
+                return (
+                  <>
+                    {message ? (
+                      <p className="task-list__state-message" title={message}>{message}</p>
+                    ) : null}
+                    {meta.length ? (
+                      <div className="task-list__state-meta">
+                        {meta.map((item, index) => (
+                          <span key={`${item}-${index}`}>{item}</span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </>
+                )
+              })()}
+            </>
+          ) : (
             <StatusBadge status={job.status} />
-            {active ? <span className="task-list__stage-progress">{Math.round(job.progress)}%</span> : null}
-          </div>
-          {job.status === 'FAILED' ? <small>{taskDetail}{visibleErrorCode}</small> : null}
-          {active ? <>
-            <small title={localizeDisplayText(job.stage)}>{localizeDisplayText(job.stage)}</small>
-            <ProgressBar value={job.progress} />
-          </> : null}
+          )}
         </div>
-        <span className="task-list__timing"><span><Clock3 size={14} />{formatElapsedTime(elapsedSeconds)}</span></span>
-        <div className="task-list__actions">{active ? <Button disabled={actingJobId === job.id} onClick={() => void cancel(job.id)} size="sm" variant="ghost">{actingJobId === job.id ? <LoaderCircle className="spin" size={15} /> : <Ban size={15} />}取消</Button> : null}{failedGuidance?.secondaryCta ? <Link className="button button--secondary button--sm task-list__cta" to={failedGuidance.secondaryCta.href}>{failedGuidance.secondaryCta.label}<ArrowRight size={14} /></Link> : null}{completedCta ? <Link className="button button--secondary button--sm task-list__cta" to={completedCta.href}>{completedCta.label}<ArrowRight size={14} /></Link> : null}</div>
+        <span className="task-list__timing"><span>{formatElapsedTime(elapsedSeconds)}</span></span>
+        <div className="task-list__actions">{active ? <Button className="task-list__cancel" disabled={actingJobId === job.id} onClick={() => void cancel(job.id)} size="sm" variant="ghost">{actingJobId === job.id ? <LoaderCircle className="spin" size={15} /> : <Ban size={15} />}取消</Button> : null}{failedGuidance?.secondaryCta ? <Link className="button button--secondary button--sm task-list__cta" to={failedGuidance.secondaryCta.href}>{failedGuidance.secondaryCta.label}<ArrowRight size={14} /></Link> : null}{completedCta ? <Link className="button button--secondary button--sm task-list__cta" to={completedCta.href}>{completedCta.label}<ArrowRight size={14} /></Link> : null}</div>
         <JobRecoveryPanel
           busy={actingJobId === job.id}
           job={job}

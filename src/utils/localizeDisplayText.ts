@@ -93,6 +93,50 @@ const EXACT_LABELS: Record<string, string> = {
   'Douyin Vertical': '抖音竖屏',
 }
 
+const CHARACTER_ROLE_EXACT: Record<string, string> = {
+  'Dual Protagonist One': '双主角之一',
+  'Dual Protagonist Two': '双主角之二',
+  'Dual Protagonist': '双主角',
+  'Co-Protagonist': '共同主角',
+  'Co Protagonist': '共同主角',
+  'Female Protagonist': '女主角',
+  'Male Protagonist': '男主角',
+  'Supporting Character': '配角',
+  'Supporting Role': '配角',
+  Protagonist: '主角',
+  Antagonist: '反派',
+}
+
+const CHARACTER_ROLE_PATTERNS: Array<[RegExp, string]> = [
+  [/^dual protagonist\s+(one|1)$/i, '双主角之一'],
+  [/^dual protagonist\s+(two|2)$/i, '双主角之二'],
+  [/^dual protagonist\s+\d+$/i, '双主角'],
+  [/^dual protagonist$/i, '双主角'],
+  [/^co-?protagonist$/i, '共同主角'],
+  [/^female protagonist$/i, '女主角'],
+  [/^male protagonist$/i, '男主角'],
+  [/^protagonist\s+(one|1)$/i, '主角之一'],
+  [/^protagonist\s+(two|2)$/i, '主角之二'],
+  [/^protagonist$/i, '主角'],
+  [/^supporting(?: character| role)?$/i, '配角'],
+  [/^antagonist$/i, '反派'],
+  [/^deuteragonist$/i, '第二主角'],
+  [/^ensemble(?: cast| character)?$/i, '群像角色'],
+]
+
+export function localizeCharacterRole(value: string): string {
+  const trimmed = value.trim()
+  if (!trimmed) return value
+  if (CHARACTER_ROLE_EXACT[trimmed]) return CHARACTER_ROLE_EXACT[trimmed]
+  const matchedExact = Object.entries(CHARACTER_ROLE_EXACT).find(
+    ([key]) => key.toLowerCase() === trimmed.toLowerCase(),
+  )
+  if (matchedExact) return matchedExact[1]
+  const matchedPattern = CHARACTER_ROLE_PATTERNS.find(([pattern]) => pattern.test(trimmed))
+  if (matchedPattern) return matchedPattern[1]
+  return localizeDisplayText(trimmed)
+}
+
 export function localizeDisplayText(value: string): string {
   if (EXACT_LABELS[value]) return EXACT_LABELS[value]
   return REPLACEMENTS.reduce(

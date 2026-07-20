@@ -22,6 +22,8 @@ from app.services.text_provider import (
     StoryDirection,
     TextGenerationResult,
     TextProviderError,
+    apply_relationship_context_to_script_package,
+    assemble_script_package,
     assemble_story_package,
 )
 
@@ -376,11 +378,11 @@ async def generate_script_package(
     )
     provider = RoutedTextProvider()
     try:
-        result = await _await_with_progress(
+        outlines = await _await_with_progress(
             context,
             session,
             job,
-            provider.generate_script_package(
+            provider.generate_script_outlines(
                 context.settings,
                 brief,
                 direction,
@@ -388,12 +390,71 @@ async def generate_script_package(
                 relationship_graph,
             ),
             initial_progress=15,
-            ceiling=70,
-            stage="正在生成关系驱动的分集大纲与首集剧本",
+            ceiling=35,
+            stage="正在生成关系驱动的分集大纲",
+        )
+        foundation_context = {
+            "story_bible": story_bible,
+            "outlines": outlines.payload.get("outlines", []),
+        }
+        script_draft = await _await_with_progress(
+            context,
+            session,
+            job,
+            provider.generate_episode_script(
+                context.settings,
+                brief,
+                direction,
+                foundation_context,
+            ),
+            initial_progress=35,
+            ceiling=55,
+            stage="正在生成首集结构化剧本",
+        )
+        review = await _await_with_progress(
+            context,
+            session,
+            job,
+            provider.generate_narrative_review(
+                context.settings,
+                brief,
+                direction,
+                script_draft.payload,
+                relationship_graph=relationship_graph,
+            ),
+            initial_progress=55,
+            ceiling=72,
+            stage="正在生成叙事引擎与结构质检",
+        )
+        assembled = assemble_script_package(outlines, script_draft, review)
+        package = apply_relationship_context_to_script_package(
+            assembled.payload,
+            relationship_graph,
+        )
+        result = TextGenerationResult(
+            payload=package.model_dump(mode="json"),
+            provider=assembled.provider,
+            model=assembled.model,
+            request_id=assembled.request_id,
+            repair_attempts=assembled.repair_attempts,
         )
     except TextProviderError as exc:
         raise JobExecutionError(
             exc.code, str(exc), retryable=exc.retryable, details=exc.details
+        ) from exc
+    except ValidationError as exc:
+        raise JobExecutionError(
+            "SCRIPT_PACKAGE_ASSEMBLY_INVALID",
+            "分阶段结果合并后仍未通过创作合同校验",
+            retryable=False,
+            details={"validation_error": str(exc)[:8000]},
+        ) from exc
+    except ValueError as exc:
+        raise JobExecutionError(
+            "RELATIONSHIP_SCRIPT_CONTRACT_INVALID",
+            str(exc),
+            retryable=False,
+            details={},
         ) from exc
     await context.checkpoint(session, job, 78, "校验关系重排与认证变化强引用")
     await context.checkpoint(session, job, 90, "写入分集大纲与剧本版本事实")

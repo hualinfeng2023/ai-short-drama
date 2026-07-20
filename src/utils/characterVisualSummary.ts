@@ -9,6 +9,8 @@ interface CharacterVisualSummaryInput {
   identifyingFeatures: string
   gaze: string
   wardrobe: string
+  hairstyle?: string
+  hairColor?: string
   fallbackSummary?: string
 }
 
@@ -33,15 +35,22 @@ export function buildCharacterVisualSummary({
   identifyingFeatures,
   gaze,
   wardrobe,
+  hairstyle = '',
+  hairColor = '',
   fallbackSummary = '',
 }: CharacterVisualSummaryInput): string {
   const normalizedFeatures = identifyingFeatures.trim()
+  const featureText = stripRepeatedLeadingAge(normalizedFeatures, age)
+  const hairDetail = [hairColor.trim(), hairstyle.trim()].filter(Boolean).join('，')
   const parts = [
     age.trim(),
     occupation.trim(),
-    stripRepeatedLeadingAge(normalizedFeatures, age),
-    gaze.trim(),
+    featureText,
   ]
+  if (hairDetail && !featureText.includes(hairDetail) && !featureText.includes(hairstyle.trim())) {
+    parts.push(hairDetail)
+  }
+  parts.push(gaze.trim())
   if (wardrobe.trim() !== normalizedFeatures) {
     parts.push(wardrobe.trim())
   }
@@ -50,6 +59,120 @@ export function buildCharacterVisualSummary({
     (part, index) => part && parts.indexOf(part) === index,
   )
   return uniqueParts.join(' · ') || fallbackSummary.trim()
+}
+
+interface CharacterCardDescriptionInput {
+  age: string
+  genderExpression?: string
+  height?: string
+  occupation: string
+  identifyingFeatures: string
+  wardrobe?: string
+  hairColor?: string
+  hairstyle?: string
+  fallbackSummary?: string
+}
+
+function truncateCardPart(value: string, maxLength: number): string {
+  const text = value.trim()
+  if (!text) return ''
+  if (text.length <= maxLength) return text
+  return `${text.slice(0, maxLength).replace(/[\s,，、·;；]+$/, '')}…`
+}
+
+function compactCardAge(age: string): string {
+  const text = age.trim()
+  if (!text) return ''
+  const rangeMatch = text.match(/(\d{1,3})\s*[-~～]\s*(\d{1,3})/)
+  if (rangeMatch) return `${rangeMatch[1]}-${rangeMatch[2]}岁`
+  const numberMatch = text.match(/(\d{1,3})\s*岁?/)
+  if (numberMatch) return `${numberMatch[1]}岁`
+  const segment = text.split(/[,，]/)[0]?.trim() ?? ''
+  return truncateCardPart(segment, 10)
+}
+
+function compactCardGender(genderExpression: string): string {
+  const normalized = genderExpression.trim().replace(/^(男性|女性|非二元性别)表达$/, '$1')
+  if (!normalized || /待明确|待补充|未明确|未指定|暂无|不适用|未知|按角色设定自然表达/.test(normalized)) {
+    return ''
+  }
+  return normalized
+}
+
+function compactCardHeight(height: string): string {
+  const normalized = height.trim()
+  if (!normalized || /待明确|待补充|未明确|未指定|暂无|不适用|未知/.test(normalized)) {
+    return ''
+  }
+  return normalized
+}
+
+function pickCardVisualHook(
+  identifyingFeatures: string,
+  wardrobe: string,
+  hairColor: string,
+  hairstyle: string,
+  age: string,
+  occupation: string,
+): string {
+  const ageNumber = age.match(/\d{1,3}/)?.[0] ?? ''
+  const context = `${age} ${occupation}`.toLowerCase()
+  const sources = [
+    identifyingFeatures,
+    wardrobe,
+    [hairColor.trim(), hairstyle.trim()].filter(Boolean).join('，'),
+  ]
+
+  for (const source of sources) {
+    const text = source.trim()
+    if (!text || /待明确|待补充|未明确|未指定|暂无/.test(text)) continue
+    const clauses = text.split(/[,，;；]/).map((clause) => clause.trim()).filter(Boolean)
+    for (const clause of clauses) {
+      if (ageNumber && new RegExp(`\\b${ageNumber}\\b`).test(clause) && clauses.length > 1) continue
+      if (context.includes(clause.toLowerCase())) continue
+      return truncateCardPart(clause, 28)
+    }
+  }
+  return ''
+}
+
+export function buildCharacterCardDescription({
+  age,
+  genderExpression = '',
+  height = '',
+  occupation,
+  identifyingFeatures,
+  wardrobe = '',
+  hairColor = '',
+  hairstyle = '',
+  fallbackSummary = '',
+}: CharacterCardDescriptionInput): string {
+  const parts: string[] = []
+  const compactAge = compactCardAge(age)
+  const compactGender = compactCardGender(genderExpression)
+  const compactHeight = compactCardHeight(height)
+  const compactOccupation = truncateCardPart(occupation, 28)
+  if (compactAge) parts.push(compactAge)
+  if (compactGender) parts.push(compactGender)
+  if (compactHeight) parts.push(compactHeight)
+  if (compactOccupation && !/待明确|待补充|未明确|未指定|暂无/.test(compactOccupation)) {
+    parts.push(compactOccupation)
+  }
+
+  const hook = pickCardVisualHook(
+    identifyingFeatures,
+    wardrobe,
+    hairColor,
+    hairstyle,
+    age,
+    occupation,
+  )
+  if (hook && !parts.some((part) => part.includes(hook) || hook.includes(part))) {
+    parts.push(hook)
+  }
+
+  if (parts.length > 0) return parts.join(' · ')
+  return truncateCardPart(fallbackSummary, 72) || '暂无角色描述'
 }
 
 function needsCompletion(value: string): boolean {

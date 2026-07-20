@@ -14,7 +14,7 @@ import { PageLoadingSkeleton } from '../components/PageLoadingSkeleton'
 import { ServiceRequiredState } from '../components/ServiceRequiredState'
 import { useStudio } from '../store/StudioContext'
 import { useToast } from '../store/ToastContext'
-import { localizeDisplayText } from '../utils/localizeDisplayText'
+import { localizeCharacterRole, localizeDisplayText } from '../utils/localizeDisplayText'
 import type { ProjectRecord } from '../types'
 
 export function PreproductionPage() {
@@ -118,7 +118,6 @@ export function PreproductionPage() {
 
   return <div className="page page--preproduction">
     <PageHeader
-      eyebrow="第 3 阶段 · 视觉与声音设定"
       title="前期资产锁定"
       description="为全部角色选择形象候选，并确认造型、声音、场景与道具的稳定版本引用。"
       actions={<><Link className="button button--secondary button--md" to={`/projects/${projectId}/story`}><ArrowLeft size={16} />返回剧本</Link><Button onClick={() => void refresh()} variant="secondary"><RefreshCw size={16} />刷新</Button></>}
@@ -141,7 +140,7 @@ export function PreproductionPage() {
           ))?.currentImageUrl ?? activeProject.shots.find((shot) => shot.currentImageUrl)?.currentImageUrl
           : undefined
         return <article key={character.id}>
-        <header><div><p className="eyebrow">{localizeDisplayText(character.role)}</p><h3>{character.name}</h3><p>{character.visualBrief}</p></div><StatusBadge status={character.status} /></header>
+        <header><div><p className="eyebrow">{localizeCharacterRole(character.role)}</p><h3>{character.name}</h3><p>{character.visualBrief}</p></div><StatusBadge status={character.status} /></header>
         <div className="character-candidate-grid">{character.candidates.map((candidate) => {
           const active = selected[character.id] === candidate.id
           const usesProjectFrame = candidate.id === character.lockedCandidateId && Boolean(lockedReferenceUrl)

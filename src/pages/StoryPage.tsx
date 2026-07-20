@@ -991,7 +991,6 @@ export function StoryPage() {
   return (
     <div className="page page--story">
       <PageHeader
-        eyebrow="第 2 阶段 · 故事剧本"
         title="故事方向与剧本"
         description="比较故事方向，先审核故事设定与角色关系，再生成分集大纲和结构化首集剧本。"
         actions={<><Link className="button button--secondary button--md" to={`/projects/${project.id}`}><ArrowLeft size={16} />返回项目简报</Link><Button onClick={() => void runAction(async () => { await load(); setNotice('已载入最新版本。') })} variant="secondary"><RefreshCw size={16} />刷新</Button></>}

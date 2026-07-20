@@ -178,7 +178,6 @@ export function ProjectsPage() {
               title={`打开${item.name}`}
             >
               <span className="project-table__name">
-                <span className="project-monogram">{item.name.slice(0, 1)}</span>
                 <span><strong>{item.name}</strong><small>{localizeDisplayText(item.genre)}</small></span>
               </span>
               <span><StatusBadge status={item.status} /></span>

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildCharacterVisualFacts,
   buildCharacterVisualSummary,
+  buildCharacterCardDescription,
 } from './characterVisualSummary'
 
 describe('buildCharacterVisualSummary', () => {
@@ -28,6 +29,28 @@ describe('buildCharacterVisualSummary', () => {
       gaze: '目光温和',
       wardrobe: '藏蓝色食堂工作服',
     })).toBe('52岁 · 食堂员工 · 齐耳短发，有几根白发 · 目光温和 · 藏蓝色食堂工作服')
+  })
+
+  it('builds a concise card description without stacking every profile field', () => {
+    expect(buildCharacterCardDescription({
+      age: 'Appearance 32, Actual >320',
+      genderExpression: '女性表达',
+      height: '168 cm',
+      occupation: 'Historical Archives Curator',
+      identifyingFeatures: 'Youthful face at 32, medium hair, simple tailored dark gray clothing, hidden fatigue in eyes, only trembling fingers expose inner emotions',
+      wardrobe: 'Youthful face at 32, medium hair, simple tailored dark gray clothing, hidden fatigue in eyes, only trembling fingers expose inner emotions',
+      hairColor: '浅棕色',
+      hairstyle: '短发',
+    })).toBe('32岁 · 女性 · 168 cm · Historical Archives Curator · medium hair')
+  })
+
+  it('falls back to a trimmed visual brief when profile fields are empty', () => {
+    expect(buildCharacterCardDescription({
+      age: '',
+      occupation: '',
+      identifyingFeatures: '',
+      fallbackSummary: 'Youthful face at 32, short light brown hair, simple tailored dark gray clothing, hidden fatigue in eyes, only trembling fingers expose inner emotions',
+    })).toBe('Youthful face at 32, short light brown hair, simple tailored dark gray c…')
   })
 
   it('builds scannable facts and marks incomplete identity fields', () => {

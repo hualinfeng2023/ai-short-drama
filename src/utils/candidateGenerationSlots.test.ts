@@ -1,5 +1,22 @@
 import { describe, expect, it } from 'vitest'
-import { buildCandidateGenerationSlots } from './candidateGenerationSlots'
+import {
+  buildCandidateGenerationSlots,
+  resolveBatchFirstOrdinal,
+} from './candidateGenerationSlots'
+
+describe('resolveBatchFirstOrdinal', () => {
+  it('starts from 1 when the character has no previous candidates', () => {
+    expect(resolveBatchFirstOrdinal([], 'batch-2')).toBe(1)
+  })
+
+  it('continues from the previous batch ordinals', () => {
+    expect(resolveBatchFirstOrdinal([
+      { ordinal: 1, batchId: 'batch-1' },
+      { ordinal: 2, batchId: 'batch-1' },
+      { ordinal: 3, batchId: 'batch-1' },
+    ], 'batch-2')).toBe(4)
+  })
+})
 
 describe('buildCandidateGenerationSlots', () => {
   it('keeps every placeholder before the first image finishes', () => {
@@ -20,6 +37,16 @@ describe('buildCandidateGenerationSlots', () => {
     const secondCandidate = { id: 'candidate-2', ordinal: 2 }
 
     expect(buildCandidateGenerationSlots([secondCandidate], 3, true)).toEqual([
+      null,
+      secondCandidate,
+      null,
+    ])
+  })
+
+  it('maps batch ordinals to fixed slots for later generations', () => {
+    const secondCandidate = { id: 'candidate-5', ordinal: 5 }
+
+    expect(buildCandidateGenerationSlots([secondCandidate], 3, true, 4)).toEqual([
       null,
       secondCandidate,
       null,

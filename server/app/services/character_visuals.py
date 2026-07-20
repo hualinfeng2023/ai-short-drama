@@ -87,7 +87,7 @@ FAMILY_TRAIT_FIELDS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("face_shape", "脸部轮廓", ()),
     ("mouth_corner", "嘴角", ("facial_features",)),
     ("skin_tone", "肤色", ()),
-    ("hair_texture", "发质", ("hairstyle",)),
+    ("hair_color", "发色", ("hairstyle",)),
 )
 FAMILY_INDEPENDENCE_CONSTRAINTS = [
     "仅继承列出的 1～3 个家族特征，不复制参考角色整张脸",
@@ -95,6 +95,13 @@ FAMILY_INDEPENDENCE_CONSTRAINTS = [
     "不得仅通过改变年龄或性别制造亲属，也不得把参考角色直接年轻化或异性化",
     "气质关联只根据家庭环境、成长经历与人物关系推导，不作为遗传结果",
 ]
+
+def _normalize_appearance_fields(appearance: dict[str, object]) -> dict[str, object]:
+    normalized = dict(appearance)
+    legacy_hair_color = normalized.pop("hair_texture", None)
+    if legacy_hair_color and not normalized.get("hair_color"):
+        normalized["hair_color"] = legacy_hair_color
+    return normalized
 
 DOSSIER_VIEWS: tuple[tuple[str, str], ...] = (
     ("FRONT", "正面头肩身份照，正视镜头"),
@@ -756,7 +763,7 @@ def _profile_audit(profile: dict[str, object]) -> list[dict[str, str]]:
 
 def _profile_content(record: CharacterVisualProfileVersion) -> dict[str, object]:
     identity = _json(record.identity_fields_json)
-    appearance = _json(record.appearance_fields_json)
+    appearance = _normalize_appearance_fields(_json(record.appearance_fields_json))
     personality = _json(record.personality_visualization_json)
     return {
         "identity_fields": identity,
@@ -1086,7 +1093,9 @@ def _new_profile(
         source_story_bible_version_id=bible.id,
         source_relationship_graph_id=graph.id,
         identity_fields_json=canonical_json(profile["identity_fields"]),
-        appearance_fields_json=canonical_json(profile["appearance_fields"]),
+        appearance_fields_json=canonical_json(
+            _normalize_appearance_fields(dict(profile["appearance_fields"]))
+        ),
         personality_visualization_json=canonical_json(profile["personality_visualization"]),
         styling_fields_json=canonical_json(profile["styling_fields"]),
         project_style_json=canonical_json(profile["project_style"]),
@@ -1226,7 +1235,7 @@ def prepare_character_visuals(
                 "mouth_corner": "静止时嘴角走向自然，保留轻微不对称",
                 "skin_tone": "符合地域与生活环境的自然肤色",
                 "hairstyle": "符合职业和生活状态的日常发型",
-                "hair_texture": "符合地域、年龄与生活环境的自然发质",
+                "hair_color": "符合地域、年龄与生活环境的自然发色",
                 "body_type": "与年龄和职业匹配的自然体型",
                 "identifying_features": visual_notes,
                 "life_marks": "保留轻微肤质、疲劳与日常使用痕迹",
@@ -1285,7 +1294,7 @@ def prepare_character_visuals(
                     "mouth_corner": "",
                     "skin_tone": "",
                     "hairstyle": "",
-                    "hair_texture": "",
+                    "hair_color": "",
                     "body_type": "数字界面、投影或终端载体",
                     "life_marks": "通过运行状态、信号扰动和界面磨损表达使用痕迹",
                 }
@@ -1737,7 +1746,10 @@ def update_visual_profile(
     ):
         patch = changes.get(key)
         if isinstance(patch, dict):
-            profile[key] = {**dict(profile[key]), **patch}
+            merged = {**dict(profile[key]), **patch}
+            if key == "appearance_fields":
+                merged = _normalize_appearance_fields(merged)
+            profile[key] = merged
     if isinstance(changes.get("negative_constraints"), list):
         profile["negative_constraints"] = changes["negative_constraints"]
     if changes.get("selected_direction"):
@@ -1856,7 +1868,7 @@ def assemble_character_prompt(
                 "mouth_corner",
                 "skin_tone",
                 "hairstyle",
-                "hair_texture",
+                "hair_color",
             }
         }
     sections = [

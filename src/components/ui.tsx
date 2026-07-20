@@ -870,11 +870,13 @@ export function ProgressBar({ value, label }: { value: number; label?: string })
 export function PageHeader({
   eyebrow,
   title,
+  titleMeta,
   description,
   actions,
 }: {
   eyebrow?: string
   title: string
+  titleMeta?: ReactNode
   description?: string
   actions?: ReactNode
 }) {
@@ -882,7 +884,10 @@ export function PageHeader({
     <header className="page-header">
       <Stack gap="xs">
         {eyebrow ? <p className="eyebrow">{eyebrow}</p> : null}
-        <h1>{title}</h1>
+        <div className="page-header__title-row">
+          <h1>{title}</h1>
+          {titleMeta}
+        </div>
         {description ? <p className="page-header__description">{description}</p> : null}
       </Stack>
       {actions ? <Toolbar className="page-header__actions" label="页面操作">{actions}</Toolbar> : null}
