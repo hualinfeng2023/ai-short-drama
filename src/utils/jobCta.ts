@@ -91,11 +91,11 @@ export function getCompletedJobCta(
 
   switch (job.jobType) {
     case 'GENERATE_STORY_DIRECTIONS':
-      return { href: `/projects/${projectId}/story`, label: '查看 3 个方向' }
+      return { href: `/projects/${projectId}/story`, label: '查看' }
     case 'GENERATE_STORY_PACKAGE':
       return { href: `/projects/${projectId}/story`, label: '查看创作包' }
     case 'GENERATE_STORY_STRUCTURE':
-      return { href: `/projects/${projectId}/story`, label: '审核角色关系' }
+      return { href: `/projects/${projectId}/story`, label: '查看' }
     case 'GENERATE_SCRIPT_PACKAGE':
       return { href: `/projects/${projectId}/story`, label: '查看分集大纲与剧本' }
     case 'GENERATE_CHARACTER_CANDIDATES':
@@ -112,6 +112,6 @@ export function getCompletedJobCta(
     case 'EXPORT_PACKAGE_V2':
       return { href: `/projects/${projectId}/production`, label: '查看制作结果' }
     default:
-      return { href: `/projects/${projectId}`, label: '查看任务结果' }
+      return { href: `/projects/${projectId}`, label: '查看' }
   }
 }

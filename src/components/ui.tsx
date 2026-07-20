@@ -712,7 +712,7 @@ export function SelectControl({
 
 const statusMeta: Record<string, { label: string; tone: string; icon: ReactNode }> = {
   DRAFT: { label: '草稿', tone: 'neutral', icon: <CircleDot size={12} /> },
-  BRIEF_LOCKED: { label: '简报已锁定', tone: 'neutral', icon: <LockKeyhole size={12} /> },
+  BRIEF_LOCKED: { label: '设定已锁定', tone: 'neutral', icon: <LockKeyhole size={12} /> },
   READY: { label: '待开始', tone: 'neutral', icon: <CircleDot size={12} /> },
   QUEUED: { label: '排队中', tone: 'info', icon: <LoaderCircle size={12} /> },
   GENERATING: { label: '生成中', tone: 'info', icon: <LoaderCircle size={12} className="spin" /> },

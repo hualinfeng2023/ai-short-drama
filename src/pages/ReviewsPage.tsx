@@ -109,7 +109,7 @@ export function ReviewsPage() {
   if (pending.length === 0) {
     return (
       <div className="page page--reviews">
-        <PageHeader eyebrow="创作者审核" title="审核中心" description="首版仅支持单用户批准或请求修改；需要专业判断的高风险内容会直接阻断。" />
+        <PageHeader title="审核中心" description="首版仅支持单用户批准或请求修改；需要专业判断的高风险内容会直接阻断。" />
         <EmptyState
           title="没有待审核内容"
           description="所有候选版本都已处理。新生成的候选版本会自动进入这个队列。"
@@ -122,7 +122,6 @@ export function ReviewsPage() {
   return (
     <div className="page page--reviews">
       <PageHeader
-        eyebrow="创作者审核"
         title="审核中心"
         description={`${pending.length} 个镜头待审核${flaggedCount > 0 ? ` · ${flaggedCount} 个被系统标记差异` : ''}，按场景分组处理。`}
       />

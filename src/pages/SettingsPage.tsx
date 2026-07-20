@@ -321,7 +321,6 @@ export function SettingsPage() {
   return <div className="page page--settings">
     <PageHeader
       description="外观、运行环境、服务凭证与数据恢复，分门别类管理。"
-      eyebrow="工作台配置"
       title="系统设置"
     />
     <div className="settings-shell">

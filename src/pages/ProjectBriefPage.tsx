@@ -3,7 +3,6 @@ import {
   ArrowLeft,
   ArrowRight,
   Check,
-  ChevronDown,
   Clapperboard,
   Database,
   FilePenLine,
@@ -125,7 +124,6 @@ const IDEA_GENERATION_STAGES = [
   { title: '正在组织可拍摄叙事', detail: '把创意收束成清晰、连续的故事表达。' },
 ] as const
 type IdeaGenerationPhase = 'idle' | 'thinking' | 'writing'
-type BriefSectionKey = 'audience' | 'delivery' | 'guardrails'
 type BriefWizardStep = 'core' | 'audience' | 'constraints'
 
 const BRIEF_WIZARD_STEPS: { id: BriefWizardStep; label: string; detail: string }[] = [
@@ -157,39 +155,22 @@ interface BriefForm {
   blockingQuestions: string
 }
 
-function BriefDisclosure({
+function BriefSection({
   children,
   description,
-  meta,
-  onToggle,
-  open,
   title,
 }: {
   children: ReactNode
-  description: string
-  meta: string
-  onToggle: () => void
-  open: boolean
+  description?: string
   title: string
 }) {
   return (
-    <section className={`brief-disclosure${open ? ' is-open' : ''}`}>
-      <button
-        aria-expanded={open}
-        className="brief-disclosure__trigger"
-        onClick={onToggle}
-        type="button"
-      >
-        <span>
-          <strong>{title}</strong>
-          <small>{description}</small>
-        </span>
-        <span className="brief-disclosure__meta">
-          {meta}
-          <ChevronDown aria-hidden="true" size={16} />
-        </span>
-      </button>
-      {open ? <div className="brief-disclosure__content brief-form-grid">{children}</div> : null}
+    <section className="brief-section">
+      <div className="brief-section__heading">
+        <strong>{title}</strong>
+        {description ? <small>{description}</small> : null}
+      </div>
+      <div className="brief-section__content">{children}</div>
     </section>
   )
 }
@@ -270,7 +251,6 @@ export function ProjectBriefPage() {
   const [proposal, setProposal] = useState<DirectorProposal | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [openBriefSection, setOpenBriefSection] = useState<BriefSectionKey | null>(null)
   const [briefWizardStep, setBriefWizardStep] = useState<BriefWizardStep>('core')
   const storyIdeaRef = useRef<HTMLTextAreaElement>(null)
 
@@ -339,17 +319,6 @@ export function ProjectBriefPage() {
         setBaselineForm(persistedForm)
         setBriefVersion(briefs[0]?.version ?? null)
         setProposal(proposals[0] ?? null)
-        const missingTargeting = narrativeTargetingMissing(
-          persistedForm.narrativeProtagonist,
-          persistedForm.emotionalRewards,
-        )
-        setOpenBriefSection(
-          missingTargeting.length
-            ? 'audience'
-            : splitLines(persistedForm.blockingQuestions).length
-              ? 'guardrails'
-              : null,
-        )
       })
       .catch((reason: unknown) => {
         if (reason instanceof DOMException && reason.name === 'AbortError') return
@@ -423,17 +392,8 @@ export function ProjectBriefPage() {
     setError(null)
   }
 
-  function toggleBriefSection(section: BriefSectionKey) {
-    setOpenBriefSection((current) => current === section ? null : section)
-  }
-
   function goToBriefWizardStep(step: BriefWizardStep) {
     setBriefWizardStep(step)
-    if (step === 'audience') {
-      setOpenBriefSection((current) => current ?? 'audience')
-    } else if (step === 'constraints') {
-      setOpenBriefSection('guardrails')
-    }
   }
 
   const briefWizardStepIndex = BRIEF_WIZARD_STEPS.findIndex((item) => item.id === briefWizardStep)
@@ -893,67 +853,85 @@ export function ProjectBriefPage() {
     : project.status === 'PROPOSAL_RUNNING'
       ? 'GENERATE_STORY_DIRECTIONS'
       : null
+  const hasNextStepCta = Boolean(runningJobType)
+    || project.status === 'RELATIONSHIP_READY'
+    || project.status === 'CHARACTER_VISUAL_READY'
+  const headerActions = (
+    <>
+      {runningJobType ? (
+        <Link
+          aria-label="查看当前生成任务"
+          className="brief-task-entry"
+          to={`/tasks?project=${project.id}&jobType=${runningJobType}`}
+        >
+          <StatusBadge status={project.status} />
+          <span><ListChecks size={13} />查看任务<ArrowRight size={13} /></span>
+        </Link>
+      ) : (
+        <>
+          <StatusBadge status={project.status} />
+          {project.status === 'RELATIONSHIP_READY' ? (
+            <Link
+              className="button button--primary button--md"
+              to={`/projects/${project.id}/story#relationship-review`}
+            >
+              审核关系<ArrowRight size={16} />
+            </Link>
+          ) : project.status === 'CHARACTER_VISUAL_READY' ? (
+            <Link
+              className="button button--primary button--md"
+              to={`/projects/${project.id}/characters`}
+            >
+              锁定角色形象<ArrowRight size={16} />
+            </Link>
+          ) : null}
+        </>
+      )}
+      <Link className="button button--secondary button--md" to="/projects"><ArrowLeft size={16} />项目列表</Link>
+      {isActiveWorkspace ? (
+        <Link
+          className={`button button--${hasNextStepCta ? 'secondary' : 'primary'} button--md`}
+          to={`/projects/${activeProject.id}/episodes/${activeProject.episodeId}`}
+        >
+          <Clapperboard size={16} />进入工作台
+        </Link>
+      ) : null}
+    </>
+  )
   return (
     <div className="page page--brief">
       <PageHeader
-        eyebrow="项目概览"
-        title={form.name || project.name}
-        description={`完善项目设定，生成并选择故事方向，再进入后续创作。当前项目第 ${project.lockVersion} 版，项目简报第 ${briefVersion ?? '—'} 版。`}
-        actions={<><Link className="button button--secondary button--md" to="/projects"><ArrowLeft size={16} />项目列表</Link>{isActiveWorkspace ? <Link className="button button--primary button--md" to={`/projects/${activeProject.id}/episodes/${activeProject.episodeId}`}><Clapperboard size={16} />进入工作台</Link> : null}</>}
+        title="故事设定"
+        description={editable
+          ? `定义故事方向、制作规格与生成边界；保存后可生成故事方向。项目第 ${project.lockVersion} 版 · 简报第 ${briefVersion ?? '—'} 版。`
+          : `查看已锁定的故事方向、制作规格与生成边界。项目第 ${project.lockVersion} 版 · 简报第 ${briefVersion ?? '—'} 版。`}
+        actions={headerActions}
       />
 
       <div className="brief-editor-layout">
         <section className="brief-editor-card">
           <div className="section-heading">
             <div><h2>项目设定</h2></div>
-            <div className="brief-version-badges">
-              {!editable ? <StatusBadge
-                description="项目简报已锁定。项目已进入后续流程，当前简报仅供查看。"
+            {!editable ? (
+              <StatusBadge
+                description="故事设定已锁定。项目已进入后续流程，当前内容仅供查看。"
                 status="BRIEF_LOCKED"
-              /> : null}
-              {runningJobType ? (
-                <Link
-                  aria-label="查看当前生成任务"
-                  className="brief-task-entry"
-                  to={`/tasks?project=${project.id}&jobType=${runningJobType}`}
-                >
-                  <StatusBadge status={project.status} />
-                  <span><ListChecks size={13} />查看任务<ArrowRight size={13} /></span>
-                </Link>
-              ) : ['RELATIONSHIP_READY', 'CHARACTER_VISUAL_READY'].includes(project.status) ? (
-                <>
-                  <StatusBadge status={project.status} />
-                  <Link
-                    className="button button--secondary button--sm"
-                    to={project.status === 'CHARACTER_VISUAL_READY' ? `/projects/${project.id}/characters` : `/projects/${project.id}/story#relationship-review`}
-                  >
-                    {project.status === 'CHARACTER_VISUAL_READY' ? '锁定角色形象' : '审核关系'}<ArrowRight size={13} />
-                  </Link>
-                </>
-              ) : <StatusBadge status={project.status} />}
-            </div>
+              />
+            ) : null}
           </div>
-          <div className="brief-progressive-guide">
-            <span><ListChecks size={17} /></span>
-            <div>
-              <strong>{targetingMissing.length
-                ? `下一步：确认${targetingMissing.join('、')}`
-                : splitLines(form.blockingQuestions).length
-                  ? '下一步：处理生成前问题'
-                  : '核心设定已经完整'}</strong>
-              <p>先确认故事与核心规格；受众细节、发行设置和生成边界按当前任务展开。</p>
-            </div>
-          </div>
-          <nav aria-label="项目简报步骤" className="brief-wizard">
+          <nav
+            aria-label={editable ? '项目简报步骤' : '查看简报分区'}
+            className={`brief-wizard${editable ? '' : ' brief-wizard--readonly'}`}
+          >
             {BRIEF_WIZARD_STEPS.map((step, index) => (
               <button
                 aria-current={briefWizardStep === step.id ? 'step' : undefined}
-                className={`brief-wizard__step${briefWizardStep === step.id ? ' brief-wizard__step--active' : ''}${index < briefWizardStepIndex ? ' brief-wizard__step--done' : ''}`}
+                className={`brief-wizard__step${briefWizardStep === step.id ? ' brief-wizard__step--active' : ''}`}
                 key={step.id}
                 onClick={() => goToBriefWizardStep(step.id)}
                 type="button"
               >
-                <span className="brief-wizard__index">{index + 1}</span>
+                {editable ? <span className="brief-wizard__index">{index + 1}</span> : null}
                 <span className="brief-wizard__copy">
                   <strong>{step.label}</strong>
                   <small>{step.detail}</small>
@@ -1103,23 +1081,17 @@ export function ProjectBriefPage() {
             <label className="brief-field"><span>目标受众</span><SelectControl aria-label="目标受众" disabled={!editable} onChange={(event) => updateField('targetAudience', event.target.value as TargetAudience)} value={form.targetAudience}>{TARGET_AUDIENCE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
             <label className="brief-field"><span>主市场</span><SelectControl aria-label="主市场" disabled={!editable} onChange={(event) => setForm((current) => current ? { ...current, primaryMarket: event.target.value, secondaryMarkets: current.secondaryMarkets.filter((item) => item !== event.target.value) } : current)} value={form.primaryMarket}>{MARKET_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
 
-            <BriefDisclosure
+            <BriefSection
               description="补充项目画像和希望观众获得的情绪结果。"
-              meta={targetingMissing.length ? `还需确认：${targetingMissing.join('、')}` : `${form.emotionalRewards.length} 项情绪回报`}
-              onToggle={() => toggleBriefSection('audience')}
-              open={openBriefSection === 'audience'}
               title="受众与情绪"
             >
               <label className="brief-field brief-field--wide"><span>补充受众画像（可选）</span><input disabled={!editable} maxLength={240} onChange={(event) => updateField('audienceProfile', event.target.value)} placeholder="例如：25—40岁女性；仅用于本项目表达校准" value={form.audienceProfile} /><small>年龄、性别、兴趣或媒介习惯只作为项目画像，不决定主角、题材或情绪回报。</small></label>
               <fieldset className="brief-choice-field brief-field--wide" disabled={!editable}><legend>情绪回报（可多选，至少一项）</legend><div className="brief-choice-grid">{EMOTIONAL_REWARD_OPTIONS.map(([value, label]) => <label key={value}><input checked={form.emotionalRewards.includes(value)} onChange={() => toggleEmotionalReward(value)} type="checkbox" /><span>{label}</span></label>)}</div></fieldset>
               <div className="brief-field brief-field--wide brief-field--compact"><span>首批选题池配比</span><small>当前内容形态：女频 {slateMix.female_frequency}% · 泛人群 {slateMix.general}% · 男频 {slateMix.male_frequency}%。该配比只用于多项目选题组合，不会改写本项目设置。</small></div>
-            </BriefDisclosure>
+            </BriefSection>
 
-            <BriefDisclosure
+            <BriefSection
               description="需要跨市场、跨语言或多平台发行时再调整。"
-              meta={`${1 + form.secondaryMarkets.length} 个市场 · ${1 + form.secondaryPlatforms.length} 个平台`}
-              onToggle={() => toggleBriefSection('delivery')}
-              open={openBriefSection === 'delivery'}
               title="发行与本地化"
             >
               <fieldset className="brief-choice-field brief-field--wide" disabled={!editable}><legend>次要市场（可多选）</legend><div className="brief-choice-grid">{MARKET_OPTIONS.filter(([value]) => value !== form.primaryMarket).map(([value, label]) => <label key={value}><input checked={form.secondaryMarkets.includes(value)} onChange={() => toggleSelection('secondaryMarkets', value)} type="checkbox" /><span>{label}</span></label>)}</div></fieldset>
@@ -1127,15 +1099,12 @@ export function ProjectBriefPage() {
               <fieldset className="brief-choice-field" disabled={!editable}><legend>本地化语言（可多选）</legend><div className="brief-choice-grid">{LANGUAGE_OPTIONS.filter(([value]) => value !== form.canonicalLanguage).map(([value, label]) => <label key={value}><input checked={form.localizationTargets.includes(value)} onChange={() => toggleSelection('localizationTargets', value)} type="checkbox" /><span>{label}</span></label>)}</div></fieldset>
               <label className="brief-field"><span>主平台</span><SelectControl aria-label="主平台" disabled={!editable} onChange={(event) => setForm((current) => current ? { ...current, targetPlatform: event.target.value, secondaryPlatforms: current.secondaryPlatforms.filter((item) => item !== event.target.value) } : current)} value={form.targetPlatform}>{PLATFORM_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
               <fieldset className="brief-choice-field" disabled={!editable}><legend>同步平台（可多选）</legend><div className="brief-choice-grid">{PLATFORM_OPTIONS.filter(([value]) => value !== form.targetPlatform).map(([value, label]) => <label key={value}><input checked={form.secondaryPlatforms.includes(value)} onChange={() => toggleSelection('secondaryPlatforms', value)} type="checkbox" /><span>{label}</span></label>)}</div></fieldset>
-            </BriefDisclosure>
+            </BriefSection>
             </> : null}
 
             {briefWizardStep === 'constraints' ? <>
-            <BriefDisclosure
+            <BriefSection
               description="把必须满足、必须避免和阻断问题集中在一起。"
-              meta={`${splitLines(form.contentRequirements).length} 条要求 · ${splitLines(form.contentAvoidances).length} 条规避`}
-              onToggle={() => toggleBriefSection('guardrails')}
-              open={openBriefSection === 'guardrails'}
               title="生成边界"
             >
               <div className="brief-field brief-field--wide brief-field--compact">
@@ -1238,30 +1207,32 @@ export function ProjectBriefPage() {
                 />
                 {questionsDraftNote ? <small aria-live="polite" className="brief-field__note">{questionsDraftNote}</small> : null}
               </div>
-            </BriefDisclosure>
+            </BriefSection>
             </> : null}
           </div>
-          <div className="brief-wizard-footer">
-            {briefWizardStep !== 'core' ? (
-              <Button
-                onClick={() => goToBriefWizardStep(BRIEF_WIZARD_STEPS[briefWizardStepIndex - 1].id)}
-                variant="ghost"
-              >
-                上一步
-              </Button>
-            ) : <span />}
-            {briefWizardStep !== 'constraints' ? (
-              <Button
-                onClick={() => goToBriefWizardStep(BRIEF_WIZARD_STEPS[briefWizardStepIndex + 1].id)}
-                variant="secondary"
-              >
-                下一步
-              </Button>
-            ) : null}
-          </div>
+          {editable ? (
+            <div className="brief-wizard-footer">
+              {briefWizardStep !== 'core' ? (
+                <Button
+                  onClick={() => goToBriefWizardStep(BRIEF_WIZARD_STEPS[briefWizardStepIndex - 1].id)}
+                  variant="ghost"
+                >
+                  上一步
+                </Button>
+              ) : <span />}
+              {briefWizardStep !== 'constraints' ? (
+                <Button
+                  onClick={() => goToBriefWizardStep(BRIEF_WIZARD_STEPS[briefWizardStepIndex + 1].id)}
+                  variant="secondary"
+                >
+                  下一步
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
           {error ? <div className="brief-save-message brief-save-message--error" role="alert">{error}<Button onClick={() => window.location.reload()} size="sm" variant="ghost"><RefreshCw size={14} />重新载入</Button></div> : null}
           {notice ? <div className="brief-save-message brief-save-message--success">{notice}</div> : null}
-          {briefWizardStep === 'constraints' ? (
+          {editable ? (
           <div className="brief-editor-actions">
             <span>{dirty
               ? '有尚未保存的修改；生成前请先保存'
@@ -1291,7 +1262,7 @@ export function ProjectBriefPage() {
                 </Link>
               ) : project.status === 'SCRIPT_READY' ? (
                 <Link className="button button--primary button--md" to={`/projects/${project.id}/story`}>
-                  <Clapperboard size={16} />审核故事与剧本
+                  <Clapperboard size={16} />审核故事剧本
                 </Link>
               ) : (
                 <Button disabled={project.status !== 'DRAFT' || dirty || saving || generating || splitLines(form.blockingQuestions).length > 0 || targetingMissing.length > 0} onClick={generateProposal} variant="secondary">

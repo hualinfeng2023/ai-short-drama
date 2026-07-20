@@ -407,7 +407,7 @@ summary:focus-visible,
 .page {
   width: min(100%, var(--layout-content-max));
   min-height: calc(100vh - 68px);
-  padding: var(--space-10) clamp(var(--space-6), 3.2vw, var(--space-12)) var(--space-16);
+  padding: var(--space-10) var(--layout-content-inline-padding) var(--space-16);
   animation: apple-page-in var(--motion-duration-slow) var(--motion-ease-standard) both;
 }
 
@@ -1432,7 +1432,8 @@ summary:focus-visible,
   }
 
   .content-area { padding-bottom: calc(var(--layout-mobile-navigation-clearance) + env(safe-area-inset-bottom)); }
-  .page { min-height: calc(100vh - 68px); padding: var(--space-8) var(--space-6) var(--space-12); }
+  :root { --layout-content-inline-padding: var(--space-6); }
+  .page { min-height: calc(100vh - 68px); padding: var(--space-8) var(--layout-content-inline-padding) var(--space-12); }
 
   .mobile-project-nav-trigger { display: inline-flex; flex-shrink: 0; }
 
@@ -1662,6 +1663,8 @@ summary:focus-visible,
 /* Phones and narrow tablets */
 
 @media (max-width: 760px) {
+  :root { --layout-content-inline-padding: var(--space-4); }
+
   .topbar {
     height: 60px;
     gap: var(--space-2);
@@ -1708,7 +1711,7 @@ summary:focus-visible,
 
   .page {
     min-height: calc(100vh - 60px);
-    padding: var(--space-6) var(--space-4) var(--space-10);
+    padding: var(--space-6) var(--layout-content-inline-padding) var(--space-10);
   }
   .page-header { align-items: stretch; flex-direction: column; gap: var(--space-4); margin-bottom: var(--space-6); }
   .page-header h1 { font-size: var(--font-size-page-title); }
@@ -1883,6 +1886,7 @@ summary:focus-visible,
   .delivery-profile-grid,
   .character-candidate-grid,
   .brief-form-grid,
+  .brief-section__content,
   .brief-choice-grid,
   .story-generation-confirmation__grid,
   .short-drama-contract-grid,
@@ -2318,11 +2322,6 @@ span.project-workflow__stage--locked:hover { transform: none; }
 /* neutralize the legacy dash drawn by styles.css */
 .project-workflow > nav .project-workflow__stage::after { display: none; }
 
-a.project-workflow__stage:hover {
-  background: color-mix(in srgb, var(--color-text-primary) 5%, transparent);
-  transform: translateY(-1px);
-}
-a.project-workflow__stage:active { transform: translateY(0) scale(0.985); }
 a.project-workflow__stage:focus-visible {
   outline: 2px solid var(--color-action-primary);
   outline-offset: 2px;
@@ -2358,82 +2357,8 @@ a.project-workflow__stage:focus-visible {
   vertical-align: -2px;
 }
 
-/* rich tooltip (hover / keyboard focus) */
-.project-workflow__tip {
-  position: absolute;
-  top: calc(100% + 8px);
-  bottom: auto;
-  left: 50%;
-  z-index: 40;
-  min-width: 190px;
-  max-width: 250px;
-  padding: var(--space-2) var(--space-3) var(--space-2);
-  color: var(--color-action-primary-soft);
-  background: color-mix(in srgb, var(--color-text-primary) 95%, transparent);
-  border-radius: var(--radius-control);
-  box-shadow: var(--shadow-floating);
-  font-size: var(--font-size-caption);
-  line-height: 1.55;
-  text-align: left;
-  opacity: 0;
-  visibility: hidden;
-  transform: translate(-50%, 5px);
-  transition: opacity var(--motion-duration-fast) var(--motion-ease-standard),
-    transform var(--motion-duration-fast) var(--motion-ease-standard),
-    visibility var(--motion-duration-fast);
-  pointer-events: none;
-}
-.project-workflow__tip::after {
-  content: '';
-  position: absolute;
-  bottom: 100%;
-  left: 50%;
-  border: 5px solid transparent;
-  border-bottom-color: color-mix(in srgb, var(--color-text-primary) 95%, transparent);
-  transform: translateX(-50%);
-}
-.project-workflow__item:hover .project-workflow__tip,
-.project-workflow__item:focus-within .project-workflow__tip {
-  opacity: 1;
-  visibility: visible;
-  transform: translate(-50%, 0);
-}
-/* keep edge tooltips inside the card */
-.project-workflow__item:first-child .project-workflow__tip { left: 4px; transform: translate(0, 5px); }
-.project-workflow__item:first-child:hover .project-workflow__tip,
-.project-workflow__item:first-child:focus-within .project-workflow__tip { transform: translate(0, 0); }
-.project-workflow__item:first-child .project-workflow__tip::after { left: 32px; }
-.project-workflow__item:last-child .project-workflow__tip { left: auto; right: 4px; transform: translate(0, 5px); }
-.project-workflow__item:last-child:hover .project-workflow__tip,
-.project-workflow__item:last-child:focus-within .project-workflow__tip { transform: translate(0, 0); }
-.project-workflow__item:last-child .project-workflow__tip::after { left: auto; right: 32px; transform: none; }
-
-.project-workflow__tip-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-  margin-bottom: var(--space-1);
-}
-.project-workflow__tip-row strong { font-size: var(--font-size-caption); letter-spacing: 0.01em; }
-.project-workflow__tip small { color: color-mix(in srgb, var(--color-action-primary-soft) 72%, transparent); }
-.project-workflow__tip-status {
-  flex: 0 0 auto;
-  padding: var(--space-1) var(--space-2);
-  border-radius: var(--radius-round);
-  font-size: var(--font-size-caption);
-  font-style: normal;
-  font-weight: 700;
-}
-.project-workflow__tip-status--complete { color: var(--color-state-success); background: color-mix(in srgb, var(--color-state-success) 22%, transparent); }
-.project-workflow__tip-status--current,
-.project-workflow__tip-status--in_progress { color: var(--color-action-primary); background: color-mix(in srgb, var(--color-action-primary) 26%, transparent); }
-.project-workflow__tip-status--blocked { color: var(--color-state-warning); background: color-mix(in srgb, var(--color-state-warning) 24%, transparent); }
-.project-workflow__tip-status--locked { color: color-mix(in srgb, var(--color-action-primary-soft) 65%, transparent); background: color-mix(in srgb, var(--color-white) 10%, transparent); }
-
 @media (max-width: 800px) {
   .project-workflow { overflow: hidden; }
-  .project-workflow__tip { display: none; }
   .project-workflow > header > a { min-height: 40px; }
   .project-workflow__item .project-workflow__stage {
     min-width: 110px;
@@ -2604,16 +2529,6 @@ a.project-workflow__stage:focus-visible {
 .project-workflow__blocker { background: var(--color-state-warning-soft); color: var(--color-state-warning); }
 .project-workflow__blocker > a { color: var(--color-action-primary); }
 
-/* Dark-room adjustments: tooltip needs separation from the dark surface */
-:root[data-visual-mode="cinema"] .project-workflow__tip {
-  background: var(--color-action-primary-soft);
-  border: 1px solid color-mix(in srgb, var(--color-white) 12%, transparent);
-  box-shadow: var(--shadow-floating);
-}
-:root[data-visual-mode="cinema"] .project-workflow__tip::after {
-  border-top-color: transparent;
-  border-bottom-color: var(--color-action-primary-soft);
-}
 :root[data-visual-mode="cinema"] .project-workflow__stage--current {
   background: transparent;
   border-color: transparent;
@@ -2622,9 +2537,6 @@ a.project-workflow__stage:focus-visible {
   color: var(--workflow-complete-ink);
   background: var(--workflow-complete);
   border-color: color-mix(in srgb, var(--workflow-complete) 72%, var(--color-white));
-}
-:root[data-visual-mode="cinema"] a.project-workflow__stage:hover {
-  background: color-mix(in srgb, var(--color-white) 6%, transparent);
 }
 
 /* ---------------------------------------------------------------------------
@@ -2775,6 +2687,17 @@ a.project-workflow__stage:focus-visible {
   border-radius: var(--radius-control-sm);
   font: inherit;
   font-weight: 500;
+}
+
+.character-visual-editor__grid .select-control {
+  --select-control-inline-start: var(--space-2);
+}
+
+.character-visual-editor__hint {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-caption);
+  font-weight: 550;
+  line-height: 1.5;
 }
 
 .relationship-editor__version .select-control {
@@ -3721,40 +3644,6 @@ a.project-workflow__stage:focus-visible {
   border: 0;
 }
 
-.brief-progressive-guide {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-3);
-  margin-top: var(--space-4);
-  padding: var(--space-3) var(--space-3);
-  color: var(--color-text-secondary);
-  background: color-mix(in srgb, var(--color-action-primary-soft) 46%, var(--color-surface-subtle));
-  border-radius: var(--radius-control);
-}
-
-.brief-progressive-guide > span {
-  display: grid;
-  flex: 0 0 32px;
-  width: 32px;
-  height: 32px;
-  place-items: center;
-  color: var(--color-action-primary);
-  background: color-mix(in srgb, var(--color-action-primary-soft) 72%, var(--color-surface));
-  border-radius: var(--radius-control-sm);
-}
-
-.brief-progressive-guide strong {
-  display: block;
-  color: var(--color-text-primary);
-  font-size: var(--font-size-control);
-}
-
-.brief-progressive-guide p {
-  margin: var(--space-1) 0 0;
-  color: var(--color-text-secondary);
-  font-size: var(--font-size-caption);
-}
-
 .brief-disclosure {
   grid-column: 1 / -1;
   overflow: clip;
@@ -4121,7 +4010,6 @@ a.project-workflow__stage:focus-visible {
     font-size: var(--font-size-control);
   }
 
-  .brief-progressive-guide p,
   .brief-disclosure__trigger small {
     font-size: var(--font-size-control);
     line-height: 1.5;

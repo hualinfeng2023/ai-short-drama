@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ArrowRight, Ban, Clock3, Filter, LoaderCircle, RotateCcw, X } from 'lucide-react'
+import { ArrowRight, Ban, Clock3, LoaderCircle, RotateCcw, X } from 'lucide-react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import {
   cancelPersistedJob,
@@ -239,7 +239,6 @@ export function TasksPage() {
 
   return <div className="page page--tasks">
     <PageHeader
-      eyebrow="任务运行"
       title="生成任务"
       description={projectId ? '查看当前项目的生成进度与历史记录。' : '汇总查看所有项目的生成进度与历史记录。'}
       actions={<Link className="button button--primary button--md" to={nextWorkspace}>{projectId ? '打开当前工作区' : '返回项目列表'} <ArrowRight size={16} /></Link>}
@@ -251,7 +250,6 @@ export function TasksPage() {
       GENERATE_STORY_PACKAGE: '故事资料生成',
     }[focusedJobType]}</strong><small>{projectId ? '已定位到当前项目的对应任务' : '正在查看所有项目的对应任务'}</small></span></div><Link to={allTasksHref}><X size={14} />查看全部任务</Link></div> : null}
     <div className="task-project-scope">
-      <span>任务范围</span>
       <div className="task-project-scope__controls">
         <SelectControl
           aria-label="按项目筛选"
@@ -264,7 +262,7 @@ export function TasksPage() {
         {projectId ? <Link to={globalTasksHref}>查看全部项目</Link> : null}
       </div>
     </div>
-    <Toolbar className="task-toolbar" label="任务筛选"><TabList aria-label="按状态筛选"><Filter size={16} />{(['ALL', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED'] as const).map((item) => <Tab className={filter === item ? 'active' : ''} key={item} onClick={() => setFilter(item)} selected={filter === item}>{item === 'ALL' ? '全部状态' : item === 'RUNNING' ? '运行中' : item === 'SUCCEEDED' ? '已完成' : item === 'FAILED' ? '失败' : '已取消'}</Tab>)}</TabList><span>{filtered.length} 个任务 · {projectId ? '当前项目' : '所有项目'}</span></Toolbar>
+    <Toolbar className="task-toolbar" label="任务筛选"><TabList aria-label="按状态筛选">{(['ALL', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED'] as const).map((item) => <Tab className={filter === item ? 'active' : ''} key={item} onClick={() => setFilter(item)} selected={filter === item}>{item === 'ALL' ? '全部状态' : item === 'RUNNING' ? '运行中' : item === 'SUCCEEDED' ? '已完成' : item === 'FAILED' ? '失败' : '已取消'}</Tab>)}</TabList><span>{filtered.length} 个任务 · {projectId ? '当前项目' : '所有项目'}</span></Toolbar>
     {error ? <div className="brief-save-message brief-save-message--error" role="alert">{error}<Button onClick={refresh} size="sm" variant="ghost"><RotateCcw size={14} />重试读取</Button></div> : null}
     {loading ? <div className="brief-page-state"><LoaderCircle className="spin" size={20} />正在读取持久化任务…</div> : null}
     <section className={`task-list${projectId ? ' task-list--project-scoped' : ''}`}>

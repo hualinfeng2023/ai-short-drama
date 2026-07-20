@@ -135,6 +135,8 @@
   --layout-sidebar-width-collapsed: 4.75rem;
   --layout-panel-padding: var(--space-6);
   --layout-content-max: 92.5rem;
+  --layout-content-inline-padding: clamp(var(--space-6), 3.2vw, var(--space-12));
+  --layout-workflow-gap: var(--space-6);
   --layout-sticky-header-clearance: 5.25rem;
   --layout-mobile-navigation-clearance: 6.5rem;
 }

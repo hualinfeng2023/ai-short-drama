@@ -75,8 +75,7 @@ export function ProjectsPage() {
   return (
     <div className="page page--projects">
       <PageHeader
-        eyebrow="创作空间"
-        title="项目"
+        title="短剧库"
         description="继续上次创作，或从一句故事想法开始新的验证样片。"
         actions={
           <Link className="button button--primary button--md" to="/projects/new">

@@ -56,7 +56,7 @@ const SIDEBAR_COLLAPSED_KEY = 'studio-sidebar-collapsed'
 const MOBILE_NAV_HINTS_KEY = 'studio-mobile-nav-hints-v1'
 
 const navigation = [
-  { to: '/projects', label: '项目', hint: '浏览、创建与管理短剧项目', icon: FolderKanban },
+  { to: '/projects', label: '短剧库', hint: '浏览、创建与管理短剧项目', icon: FolderKanban },
   { to: '/tasks', label: '生成任务', hint: '跟踪 AI 生成进度与历史记录', icon: ListChecks },
   { to: '/reviews', label: '审核中心', hint: '比对并批准镜头候选版本', icon: ShieldCheck },
   { to: '/settings', label: '设置', hint: '外观模式与演示数据管理', icon: Settings },
@@ -68,10 +68,10 @@ interface Crumb {
 }
 
 function breadcrumb(pathname: string, projectName: string, projectHref: string): Crumb[] {
-  if (pathname === '/projects/new') return [{ label: '项目', to: '/projects' }, { label: '新建项目' }]
+  if (pathname === '/projects/new') return [{ label: '短剧库', to: '/projects' }, { label: '新建项目' }]
   if (pathname.includes('/scenes/')) return [{ label: projectName, to: projectHref }, { label: '第 1 集', to: projectHref }, { label: '场景工作台' }]
   if (pathname.endsWith('/preview')) return [{ label: projectName, to: projectHref }, { label: '第 1 集', to: projectHref }, { label: '完整小样' }]
-  if (pathname.endsWith('/story')) return [{ label: projectName, to: projectHref }, { label: '故事与剧本' }]
+  if (pathname.endsWith('/story')) return [{ label: projectName, to: projectHref }, { label: '故事剧本' }]
   if (pathname.endsWith('/characters')) return [{ label: projectName, to: projectHref }, { label: '角色形象生成与锁定' }]
   if (pathname.endsWith('/preproduction')) return [{ label: projectName, to: projectHref }, { label: '前期资产' }]
   if (pathname.endsWith('/storyboard')) return [{ label: projectName, to: projectHref }, { label: '动态分镜' }]
@@ -80,7 +80,7 @@ function breadcrumb(pathname: string, projectName: string, projectHref: string):
   if (pathname === '/tasks') return [{ label: '生成任务' }]
   if (pathname === '/reviews') return [{ label: '审核中心' }]
   if (pathname === '/settings') return [{ label: '系统设置' }]
-  return [{ label: '项目' }]
+  return [{ label: '短剧库' }]
 }
 
 function projectSubnavItems(
@@ -90,7 +90,7 @@ function projectSubnavItems(
 ) {
   return ([
     { label: '样片工作台', to: currentProjectLink, icon: Film, offlineReady: true },
-    { label: '故事与剧本', to: `/projects/${routeProjectId}/story`, icon: BookOpenText, offlineReady: false },
+    { label: '故事剧本', to: `/projects/${routeProjectId}/story`, icon: BookOpenText, offlineReady: false },
     { label: '角色', to: `/projects/${routeProjectId}/characters`, icon: Users, offlineReady: false },
     { label: '前期资产', to: `/projects/${routeProjectId}/preproduction`, icon: Boxes, offlineReady: false },
     { label: '动态分镜', to: `/projects/${routeProjectId}/storyboard`, icon: Images, offlineReady: false },

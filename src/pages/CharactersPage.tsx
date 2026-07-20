@@ -42,7 +42,7 @@ import {
 } from '../api/client'
 import { ConfirmModal } from '../components/ConfirmModal'
 import { PageLoadingSkeleton } from '../components/PageLoadingSkeleton'
-import { Button, getStatusLabel, Modal, PageHeader, StatusBadge } from '../components/ui'
+import { Button, getStatusLabel, Modal, PageHeader, SelectControl, StatusBadge } from '../components/ui'
 import { ServiceRequiredState } from '../components/ServiceRequiredState'
 import { buildCandidateGenerationSlots } from '../utils/candidateGenerationSlots'
 import { buildCharacterVisualFacts } from '../utils/characterVisualSummary'
@@ -212,6 +212,98 @@ function familyRelationshipLabel(character?: CharacterVisualRecord): string {
   if (/祖母|奶奶|外婆/.test(role)) return '祖母'
   if (/祖父|爷爷|外公/.test(role)) return '祖父'
   return '亲属'
+}
+
+const GENDER_EXPRESSION_OPTIONS = [
+  '女性表达',
+  '男性表达',
+  '非二元性别表达',
+  '按角色设定自然表达',
+  '不适用',
+] as const
+
+const ENTITY_KIND_OPTIONS = [
+  { value: 'HUMAN', label: '人类' },
+  { value: 'DIGITAL_ENTITY', label: '数字实体' },
+  { value: 'ROBOT', label: '机器人' },
+  { value: 'CREATURE', label: '非人型生物' },
+  { value: 'OBJECT', label: '拟人化物体' },
+] as const
+
+const CUSTOM_REGION_VALUE = '__custom_region__'
+
+const REGION_OPTIONS = [
+  '未指定（不得从语言、市场、姓名或职业推断族裔）',
+  '白人（未细分）',
+  '西北欧背景',
+  '中欧背景',
+  '南欧背景',
+  '东欧背景',
+  '黑人或非裔美国人',
+  '亚裔美国人（未细分）',
+  '华裔美国人',
+  '台湾裔美国人',
+  '香港裔美国人',
+  '日裔美国人',
+  '韩裔美国人',
+  '蒙古裔美国人',
+  '越南裔美国人',
+  '泰裔美国人',
+  '菲律宾裔美国人',
+  '柬埔寨裔美国人',
+  '老挝裔美国人',
+  '苗族裔美国人',
+  '缅甸裔美国人',
+  '印度尼西亚裔美国人',
+  '马来西亚裔美国人',
+  '新加坡裔美国人',
+  '印度裔美国人',
+  '巴基斯坦裔美国人',
+  '孟加拉裔美国人',
+  '斯里兰卡裔美国人',
+  '尼泊尔裔美国人',
+  '不丹裔美国人',
+  '西裔或拉丁裔美国人',
+  '美洲原住民或阿拉斯加原住民',
+  '中东或北非裔美国人',
+  '夏威夷原住民或太平洋岛民',
+  '多族裔',
+] as const
+
+function normalizeRegionValue(value: string): string {
+  if (value === '白人') return '白人（未细分）'
+  if (value === '亚裔美国人') return '亚裔美国人（未细分）'
+  if (value === '未指定' || value === 'unspecified') {
+    return '未指定（不得从语言、市场、姓名或职业推断族裔）'
+  }
+  return value
+}
+
+const CUSTOM_HEIGHT_VALUE = '__custom_height__'
+const HEIGHT_UNSPECIFIED = '未指定'
+const HEIGHT_NOT_APPLICABLE = '不适用'
+
+const HEIGHT_CM_OPTIONS = Array.from({ length: 200 - 145 + 1 }, (_, index) => `${145 + index} cm`)
+
+const HEIGHT_OPTIONS = [
+  HEIGHT_UNSPECIFIED,
+  ...HEIGHT_CM_OPTIONS,
+] as const
+
+function normalizeHeightValue(value: string): string {
+  const trimmed = value.trim()
+  if (!trimmed || /^unspecified$/i.test(trimmed) || trimmed === '未指定') {
+    return HEIGHT_UNSPECIFIED
+  }
+  if (trimmed === HEIGHT_NOT_APPLICABLE) return HEIGHT_NOT_APPLICABLE
+  const numeric = trimmed.match(/^(\d{2,3})\s*(cm|厘米)?$/i)
+  if (numeric) return `${Number(numeric[1])} cm`
+  return trimmed
+}
+
+function isKnownHeightOption(value: string): boolean {
+  return value === HEIGHT_NOT_APPLICABLE
+    || (HEIGHT_OPTIONS as readonly string[]).includes(value)
 }
 
 interface ProfileDraft {
@@ -390,6 +482,8 @@ export function CharactersPage() {
   const [refinements, setRefinements] = useState<Record<string, string>>({})
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState<ProfileDraft | null>(null)
+  const [customRegionActive, setCustomRegionActive] = useState(false)
+  const [customHeightActive, setCustomHeightActive] = useState(false)
   const [identityViewAction, setIdentityViewAction] = useState<IdentityViewAction | null>(null)
   const [identityViewNote, setIdentityViewNote] = useState('')
   const [identityImageViewer, setIdentityImageViewer] = useState<IdentityImageViewer | null>(null)
@@ -729,8 +823,13 @@ export function CharactersPage() {
   }
 
   function edit(character: CharacterVisualRecord) {
+    const nextDraft = profileDraft(character)
     setEditingId(character.id)
-    setDraft(profileDraft(character))
+    setDraft(nextDraft)
+    const region = normalizeRegionValue(nextDraft?.region ?? '')
+    setCustomRegionActive(Boolean(region) && !(REGION_OPTIONS as readonly string[]).includes(region))
+    const height = normalizeHeightValue(nextDraft?.height ?? '')
+    setCustomHeightActive(Boolean(height) && !isKnownHeightOption(height))
   }
 
   async function saveProfile(character: CharacterVisualRecord) {
@@ -749,7 +848,7 @@ export function CharactersPage() {
           story_identity: draft.storyIdentity,
         },
         appearance_fields: {
-          height: draft.height,
+          height: normalizeHeightValue(draft.height),
           face_shape: draft.faceShape,
           facial_features: draft.facialFeatures,
           brow_eye_shape: draft.browEyeShape,
@@ -780,6 +879,8 @@ export function CharactersPage() {
       })
       setEditingId(null)
       setDraft(null)
+      setCustomRegionActive(false)
+      setCustomHeightActive(false)
     })
   }
 
@@ -903,6 +1004,25 @@ export function CharactersPage() {
         (identity) => identity.sourceCandidateId === selectedCandidateId,
       )
       const isEditing = editingId === character.id && draft
+      const regionValue = isEditing ? normalizeRegionValue(draft.region) : ''
+      const regionOptions = isEditing
+        ? Array.from(new Set([
+          ...(regionValue && !(REGION_OPTIONS as readonly string[]).includes(regionValue) && !customRegionActive
+            ? [regionValue]
+            : []),
+          ...REGION_OPTIONS,
+        ]))
+        : []
+      const heightValue = isEditing ? normalizeHeightValue(draft.height) : ''
+      const heightOptions = isEditing
+        ? Array.from(new Set([
+          ...(heightValue === HEIGHT_NOT_APPLICABLE ? [HEIGHT_NOT_APPLICABLE] : []),
+          ...(heightValue && !isKnownHeightOption(heightValue) && !customHeightActive
+            ? [heightValue]
+            : []),
+          ...HEIGHT_OPTIONS,
+        ]))
+        : []
       const blockers = profile?.conflictReport.filter((item) => item.severity === 'BLOCKER') ?? []
       const candidateBatchVersions = new Map(character.batches.map((batch) => [batch.id, batch.version]))
       const newestCandidateBatch = [...character.batches]
@@ -1033,72 +1153,138 @@ export function CharactersPage() {
           <AlertTriangle size={17} />
           <div>
             <strong>角色文字设定已有更新，当前视觉档案已过期</strong>
-            <p>待同步字段：{pendingSourceLabels.join('、') || '角色设定'}。请先返回“故事与剧本”确认最新关系网；确认后系统会准备新的角色设定摘要。</p>
+            <p>待同步字段：{pendingSourceLabels.join('、') || '角色设定'}。请先返回「故事剧本」确认最新关系网；确认后系统会准备新的角色设定摘要。</p>
           </div>
           <Link className="button button--secondary button--sm" to={`/projects/${projectId}/story`}>返回确认</Link>
         </div> : null}
 
-        {familyConstraint && familySimilarity ? <section className="character-family-constraint" data-status={familyConstraint.status.toLowerCase()}>
-          <header>
-            <div className="character-family-constraint__title">
-              <span><Dna size={18} /></span>
-              <strong>家族相似性</strong>
-            </div>
-            {familyConstraint.status === 'WAITING_FOR_LOCKED_RELATIVE' ? <em><i />等待亲属基准</em> : null}
-          </header>
-          {familyConstraint.status === 'ACTIVE' ? <div className="character-family-active">
-            <div className="character-family-active__copy">
-              <p className="character-family-conclusion">
-                已参考{familySourceReferences.join('、') || '已锁定亲属'}的{familyFeatureLabels.join('、')}，保持{familySimilarity.label}。
-              </p>
-              <small>只继承家族特征，不复制五官，也不会覆盖已锁定身份。</small>
-            </div>
-            <div className="character-family-actions">
-              <Link className="button button--secondary button--sm" to={`/projects/${projectId}/story#relationship-review`}>
-                <SlidersHorizontal size={14} />调整相似度
-              </Link>
-              <details className="character-family-rules">
-                <summary className="button button--ghost button--sm"><ShieldCheck size={14} />查看规则</summary>
-                <div>
-                  <p><strong>系统详情</strong><span>约束版本 V{familyConstraint.version} · {familySimilarity.label}</span></p>
-                  <ul className="character-family-rule-traits">
-                    {familyConstraint.inheritedFeatures.map((feature) => <li key={`${feature.field}-${feature.sourceIdentityVersionId}`}><strong>{feature.label}</strong><span>{feature.value}</span><small>来源：{feature.sourceCharacterName}</small></li>)}
-                  </ul>
-                  <strong>生成边界</strong>
-                  <ul>{familyConstraint.independenceConstraints.map((item) => <li key={item}>{item}</li>)}</ul>
-                  {character.status === 'LOCKED' ? <small>当前角色已锁定，调整只影响未来生成。</small> : null}
-                </div>
-              </details>
-            </div>
-          </div> : <div className="character-family-waiting">
-            <LockKeyhole size={18} />
-            <div className="character-family-waiting__copy">
-              <strong>先锁定一位亲属，系统才会提取稳定家族特征，不会自动生图或覆盖已有内容。</strong>
-            </div>
-            {relativeToLock ? <Button
-              aria-label={`去完成${relativeToLock.name}的角色基准锁定`}
-              className="character-family-waiting__action"
-              onClick={() => jumpToCharacter(
-                relativeToLock.id,
-                '[data-character-lock-action="true"], .character-identity-dossier, .character-candidate-section',
-              )}
-              size="sm"
-              variant="secondary"
+        {familyConstraint && familySimilarity ? (
+          familyConstraint.status === 'WAITING_FOR_LOCKED_RELATIVE' ? (
+            <section
+              className="character-family-constraint character-family-constraint--waiting"
+              data-status="waiting_for_locked_relative"
             >
-              <UserRoundCheck size={14} />去锁定{relativeToLock.name}
-            </Button> : null}
-          </div>}
-        </section> : null}
+              <LockKeyhole size={18} />
+              <div className="character-family-waiting__copy">
+                <strong>先锁定一位亲属，系统才会提取稳定家族特征，不会自动生图或覆盖已有内容。</strong>
+              </div>
+              {relativeToLock ? <Button
+                aria-label={`去完成${relativeToLock.name}的角色基准锁定`}
+                className="character-family-waiting__action"
+                onClick={() => jumpToCharacter(
+                  relativeToLock.id,
+                  '[data-character-lock-action="true"], .character-identity-dossier, .character-candidate-section',
+                )}
+                size="sm"
+                variant="secondary"
+              >
+                <UserRoundCheck size={14} />去锁定{relativeToLock.name}
+              </Button> : null}
+            </section>
+          ) : (
+            <section className="character-family-constraint" data-status={familyConstraint.status.toLowerCase()}>
+              <header>
+                <div className="character-family-constraint__title">
+                  <span><Dna size={18} /></span>
+                  <strong>家族相似性</strong>
+                </div>
+              </header>
+              <div className="character-family-active">
+                <div className="character-family-active__copy">
+                  <p className="character-family-conclusion">
+                    已参考{familySourceReferences.join('、') || '已锁定亲属'}的{familyFeatureLabels.join('、')}，保持{familySimilarity.label}。
+                  </p>
+                  <small>只继承家族特征，不复制五官，也不会覆盖已锁定身份。</small>
+                </div>
+                <div className="character-family-actions">
+                  <Link className="button button--secondary button--sm" to={`/projects/${projectId}/story#relationship-review`}>
+                    <SlidersHorizontal size={14} />调整相似度
+                  </Link>
+                  <details className="character-family-rules">
+                    <summary className="button button--ghost button--sm"><ShieldCheck size={14} />查看规则</summary>
+                    <div>
+                      <p><strong>系统详情</strong><span>约束版本 V{familyConstraint.version} · {familySimilarity.label}</span></p>
+                      <ul className="character-family-rule-traits">
+                        {familyConstraint.inheritedFeatures.map((feature) => <li key={`${feature.field}-${feature.sourceIdentityVersionId}`}><strong>{feature.label}</strong><span>{feature.value}</span><small>来源：{feature.sourceCharacterName}</small></li>)}
+                      </ul>
+                      <strong>生成边界</strong>
+                      <ul>{familyConstraint.independenceConstraints.map((item) => <li key={item}>{item}</li>)}</ul>
+                      {character.status === 'LOCKED' ? <small>当前角色已锁定，调整只影响未来生成。</small> : null}
+                    </div>
+                  </details>
+                </div>
+              </div>
+            </section>
+          )
+        ) : null}
 
         {isEditing ? <section className="character-visual-editor">
           <header><div><span>生成前可调整</span><h3>外貌、造型与表演表现</h3></div><small>保存后会创建新版本并重新运行一致性审核</small></header>
           <div className="character-visual-editor__grid" data-entity-kind={draft.entityKind}>
-            <label>角色形态<select onChange={(event) => setDraft({ ...draft, entityKind: event.target.value })} value={draft.entityKind}><option value="HUMAN">人类</option><option value="DIGITAL_ENTITY">数字实体</option><option value="ROBOT">机器人</option><option value="CREATURE">非人型生物</option><option value="OBJECT">拟人化物体</option></select></label>
+            <label>角色形态<SelectControl aria-label="角色形态" onChange={(event) => setDraft({ ...draft, entityKind: event.target.value })} value={draft.entityKind}>{ENTITY_KIND_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</SelectControl></label>
             <label>呈现载体<input onChange={(event) => setDraft({ ...draft, embodiment: event.target.value })} placeholder="例如：屏幕界面、全息投影或实体终端" value={draft.embodiment} /></label>
             <label>{draft.entityKind === 'DIGITAL_ENTITY' ? '运行时长' : '年龄'}<input onChange={(event) => setDraft({ ...draft, age: event.target.value })} value={draft.age} /></label>
-            <label className="is-human-only">身高<input onChange={(event) => setDraft({ ...draft, height: event.target.value })} placeholder="例如：178 cm" value={draft.height} /></label>
-            <label className="is-human-only">性别表达<input onChange={(event) => setDraft({ ...draft, genderExpression: event.target.value })} value={draft.genderExpression} /></label>
-            <label className="is-human-only">地域<input onChange={(event) => setDraft({ ...draft, region: event.target.value })} value={draft.region} /></label>
+            <label className="is-human-only">身高<SelectControl
+              aria-label="身高"
+              onChange={(event) => {
+                const nextValue = event.target.value
+                const custom = nextValue === CUSTOM_HEIGHT_VALUE
+                setCustomHeightActive(custom)
+                setDraft({ ...draft, height: custom ? '' : nextValue })
+              }}
+              searchable
+              value={customHeightActive ? CUSTOM_HEIGHT_VALUE : heightValue}
+            >
+              {heightOptions.map((option) => (
+                <option key={option} value={option}>{option}</option>
+              ))}
+              <option value={CUSTOM_HEIGHT_VALUE}>其他／自定义身高</option>
+            </SelectControl>
+            {customHeightActive ? (
+              <input
+                aria-label="自定义身高"
+                onChange={(event) => setDraft({ ...draft, height: event.target.value })}
+                placeholder="例如：178 cm"
+                value={draft.height}
+              />
+            ) : null}
+            </label>
+            <label className="is-human-only">性别表达<SelectControl aria-label="性别表达" onChange={(event) => setDraft({ ...draft, genderExpression: event.target.value })} searchable={false} value={draft.genderExpression}>
+              {!GENDER_EXPRESSION_OPTIONS.includes(draft.genderExpression as typeof GENDER_EXPRESSION_OPTIONS[number]) && draft.genderExpression
+                ? <option value={draft.genderExpression}>{draft.genderExpression}</option>
+                : null}
+              {GENDER_EXPRESSION_OPTIONS.map((option) => (
+                <option key={option} value={option}>{option}</option>
+              ))}
+            </SelectControl></label>
+            <label className="is-human-only">地域<SelectControl
+              aria-label="地域"
+              onChange={(event) => {
+                const nextValue = event.target.value
+                const custom = nextValue === CUSTOM_REGION_VALUE
+                setCustomRegionActive(custom)
+                setDraft({ ...draft, region: custom ? '' : nextValue })
+              }}
+              searchable
+              value={customRegionActive ? CUSTOM_REGION_VALUE : regionValue}
+            >
+              {regionOptions.map((option) => (
+                <option key={option} value={option}>
+                  {option.startsWith('未指定') ? '未指定' : option}
+                </option>
+              ))}
+              <option value={CUSTOM_REGION_VALUE}>其他／自定义背景</option>
+            </SelectControl>
+            {customRegionActive ? <>
+              <input
+                aria-label="自定义地域或族裔背景"
+                onChange={(event) => setDraft({ ...draft, region: event.target.value })}
+                placeholder="例如：爱尔兰裔美国人、意大利裔美国人或其他具体亚洲背景"
+                value={draft.region}
+              />
+              <small className="character-visual-editor__hint">只用于外观与文化设定，不会推断性格、职业或剧情功能。</small>
+            </> : null}
+            </label>
             <label>时代<input onChange={(event) => setDraft({ ...draft, era: event.target.value })} value={draft.era} /></label>
             <label>{draft.entityKind === 'DIGITAL_ENTITY' ? '系统定位' : '职业'}<input onChange={(event) => setDraft({ ...draft, occupation: event.target.value })} value={draft.occupation} /></label>
             <label className="is-human-only">阶层<input onChange={(event) => setDraft({ ...draft, socialClass: event.target.value })} value={draft.socialClass} /></label>
@@ -1112,7 +1298,7 @@ export function CharactersPage() {
             <label className="is-human-only">发型<input onChange={(event) => setDraft({ ...draft, hairstyle: event.target.value })} value={draft.hairstyle} /></label>
             <label className="is-human-only">发质<input onChange={(event) => setDraft({ ...draft, hairTexture: event.target.value })} value={draft.hairTexture} /></label>
             <label>{draft.entityKind === 'DIGITAL_ENTITY' ? '形态结构' : '体型'}<input onChange={(event) => setDraft({ ...draft, bodyType: event.target.value })} value={draft.bodyType} /></label>
-            <label>{draft.entityKind === 'DIGITAL_ENTITY' ? '视觉特征' : '识别特征'}<input onChange={(event) => setDraft({ ...draft, identifyingFeatures: event.target.value })} value={draft.identifyingFeatures} /></label>
+            <label className="is-wide">{draft.entityKind === 'DIGITAL_ENTITY' ? '视觉特征' : '识别特征'}<textarea onChange={(event) => setDraft({ ...draft, identifyingFeatures: event.target.value })} rows={3} value={draft.identifyingFeatures} /></label>
             <label className="is-wide">生活痕迹<input onChange={(event) => setDraft({ ...draft, lifeMarks: event.target.value })} value={draft.lifeMarks} /></label>
             <label>表情<input onChange={(event) => setDraft({ ...draft, expression: event.target.value })} value={draft.expression} /></label>
             <label>眼神<input onChange={(event) => setDraft({ ...draft, gaze: event.target.value })} value={draft.gaze} /></label>
@@ -1126,7 +1312,7 @@ export function CharactersPage() {
             <label className="is-wide">禁止元素<input onChange={(event) => setDraft({ ...draft, forbiddenElements: event.target.value })} value={draft.forbiddenElements} /></label>
             <label className="is-wide">负面约束<textarea onChange={(event) => setDraft({ ...draft, negativeConstraints: event.target.value })} rows={2} value={draft.negativeConstraints} /></label>
           </div>
-          <footer><Button onClick={() => { setEditingId(null); setDraft(null) }} variant="secondary">取消</Button><Button disabled={busy !== null} onClick={() => void saveProfile(character)}>{busy === `save-${character.id}` ? <LoaderCircle className="spin" size={15} /> : <ShieldCheck size={15} />}保存并重新审核</Button></footer>
+          <footer><Button onClick={() => { setEditingId(null); setDraft(null); setCustomRegionActive(false); setCustomHeightActive(false) }} variant="secondary">取消</Button><Button disabled={busy !== null} onClick={() => void saveProfile(character)}>{busy === `save-${character.id}` ? <LoaderCircle className="spin" size={15} /> : <ShieldCheck size={15} />}保存并重新审核</Button></footer>
         </section> : null}
 
         {profile && character.status !== 'LOCKED' ? <section className="character-candidate-section">
