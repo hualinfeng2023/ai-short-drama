@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { ArrowRight, Check, CheckCircle2, Film, Layers3, ShieldCheck, TriangleAlert, X } from 'lucide-react'
 import { Link } from 'react-router'
-import { Button, EmptyState, PageHeader, StatusBadge } from '../components/ui'
+import { Button, EmptyState, IconButton, PageHeader, StatusBadge, Tab, TabList, Toolbar } from '../components/ui'
 import { useStudio } from '../store/StudioContext'
 import { useToast } from '../store/ToastContext'
 
@@ -77,33 +77,31 @@ export function ReviewsPage() {
         description={`${pending.length} 个镜头待审核${flaggedCount > 0 ? ` · ${flaggedCount} 个被系统标记差异` : ''}，按场景分组处理。`}
       />
 
-      <div className="review-queue-bar">
-        <div className="review-filter" role="tablist" aria-label="按差异标记筛选">
+      <Toolbar className="review-queue-bar" label="审核队列筛选">
+        <TabList className="review-filter" aria-label="按差异标记筛选">
           {FILTERS.map((item) => {
             const count = item.id === 'all' ? pending.length : item.id === 'flagged' ? flaggedCount : pending.length - flaggedCount
             return (
-              <button
-                aria-selected={filter === item.id}
+              <Tab
                 className={filter === item.id ? 'active' : ''}
                 key={item.id}
                 onClick={() => { setFilter(item.id); clearSelection() }}
-                role="tab"
-                type="button"
+                selected={filter === item.id}
               >
                 {item.label}
                 <em>{count}</em>
-              </button>
+              </Tab>
             )
           })}
-        </div>
+        </TabList>
         {selected.size > 0 ? (
           <div className="review-batch" role="status">
             <span>已选 {selected.size} 个镜头</span>
             <Button onClick={approveSelected} size="sm"><Check size={15} />批量批准</Button>
-            <button className="review-batch__clear" onClick={clearSelection} type="button"><X size={14} />清除</button>
+            <IconButton className="review-batch__clear" label="清除选择" onClick={clearSelection} size="sm" variant="ghost"><X size={14} /></IconButton>
           </div>
         ) : null}
-      </div>
+      </Toolbar>
 
       {groups.length === 0 ? (
         <EmptyState

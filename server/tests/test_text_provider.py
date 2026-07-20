@@ -237,6 +237,124 @@ async def test_text_provider_splits_real_directions_into_three_calls(
     )
 
 
+async def test_text_provider_reuses_completed_routes_and_only_generates_missing_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = {
+        item["direction_key"]: item
+        for item in deterministic_directions(BRIEF).model_dump(mode="json")["directions"]
+    }
+    existing_results = {
+        direction_key: TextGenerationResult(
+            payload=source[direction_key],
+            provider="volcengine-ark",
+            model="test-model",
+            request_id=f"request-{direction_key}",
+            repair_attempts=0,
+        )
+        for direction_key in ("emotion", "plot")
+    }
+    calls: list[str] = []
+    completed: list[str] = []
+
+    async def fake_ark_json(
+        _settings: object,
+        *,
+        prompt: str,
+        validator: object,
+        **_kwargs: object,
+    ) -> TextGenerationResult:
+        direction_key = next(key for key in source if f"必须为 {key}" in prompt)
+        calls.append(direction_key)
+        assert validator is StoryDirection
+        return TextGenerationResult(
+            payload=source[direction_key],
+            provider="volcengine-ark",
+            model="test-model",
+            request_id=f"request-{direction_key}",
+            repair_attempts=0,
+        )
+
+    async def on_route_complete(
+        direction_key: str,
+        _result: TextGenerationResult,
+    ) -> None:
+        completed.append(direction_key)
+
+    monkeypatch.setattr("app.services.text_provider._ark_json", fake_ark_json)
+    result = await RoutedTextProvider().generate_directions(
+        replace(get_settings(), ark_api_key="test-key"),
+        BRIEF,
+        existing_results=existing_results,
+        on_route_complete=on_route_complete,
+    )
+
+    assert calls == ["market"]
+    assert completed == ["market"]
+    assert [item["direction_key"] for item in result.payload["directions"]] == [
+        "emotion",
+        "plot",
+        "market",
+    ]
+    assert result.request_id == "request-emotion,request-plot,request-market"
+
+
+async def test_text_provider_preserves_successful_routes_when_one_route_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = {
+        item["direction_key"]: item
+        for item in deterministic_directions(BRIEF).model_dump(mode="json")["directions"]
+    }
+    completed: list[str] = []
+
+    async def fake_ark_json(
+        _settings: object,
+        *,
+        prompt: str,
+        **_kwargs: object,
+    ) -> TextGenerationResult:
+        direction_key = next(key for key in source if f"必须为 {key}" in prompt)
+        if direction_key == "market":
+            raise TextProviderError(
+                "ARK_TEXT_TOTAL_TIMEOUT",
+                "市场钩子方向生成超时",
+                retryable=True,
+                details={"timeout_seconds": 300},
+            )
+        return TextGenerationResult(
+            payload=source[direction_key],
+            provider="volcengine-ark",
+            model="test-model",
+            request_id=f"request-{direction_key}",
+            repair_attempts=0,
+        )
+
+    async def on_route_complete(
+        direction_key: str,
+        _result: TextGenerationResult,
+    ) -> None:
+        completed.append(direction_key)
+
+    monkeypatch.setattr("app.services.text_provider._ark_json", fake_ark_json)
+    with pytest.raises(TextProviderError) as caught:
+        await RoutedTextProvider().generate_directions(
+            replace(get_settings(), ark_api_key="test-key"),
+            BRIEF,
+            on_route_complete=on_route_complete,
+        )
+
+    assert set(completed) == {"emotion", "plot"}
+    assert caught.value.code == "ARK_TEXT_PARTIAL_FAILURE"
+    assert caught.value.retryable is True
+    assert caught.value.details["completed_routes"] == ["emotion", "plot"]
+    assert caught.value.details["failed_routes"] == ["market"]
+    assert caught.value.details["failed_parts"] == ["market"]
+    assert caught.value.details["route_errors"]["market"]["code"] == (
+        "ARK_TEXT_TOTAL_TIMEOUT"
+    )
+
+
 def test_first_topic_slate_mix_matches_production_format_strategy() -> None:
     assert TOPIC_SLATE_MIX == {
         "live_action": {

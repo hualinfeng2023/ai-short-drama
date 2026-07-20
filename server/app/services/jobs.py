@@ -934,6 +934,42 @@ def update_job_diagnostics(
     return True
 
 
+def update_job_intermediate_output(
+    session: Session,
+    *,
+    job_id: str,
+    worker_id: str,
+    updates: dict[str, object],
+    lease_seconds: int,
+) -> bool:
+    now = datetime.now(UTC)
+    job = job_or_404(session, job_id)
+    session.refresh(job)
+    if job.cancel_requested or job.status == "CANCEL_REQUESTED":
+        return False
+    if job.status != "RUNNING" or job.worker_id != worker_id:
+        return False
+    output = _json_object(job.output_json)
+    output.update(updates)
+    job.output_json = canonical_json(output)
+    job.heartbeat_at = now
+    job.lease_until = now + timedelta(seconds=lease_seconds)
+    job.updated_at = now
+    append_event(
+        session,
+        project_id=job.project_id,
+        job_id=job.id,
+        event_type="job.intermediate_output",
+        payload={
+            "job_id": job.id,
+            "status": job.status,
+            "output_keys": sorted(output),
+        },
+    )
+    session.commit()
+    return True
+
+
 def finish_job_success(
     session: Session, job_id: str, worker_id: str, output: dict[str, object]
 ) -> None:

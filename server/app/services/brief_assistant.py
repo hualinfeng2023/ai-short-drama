@@ -1,4 +1,5 @@
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -7,11 +8,19 @@ from pydantic import BaseModel, Field, ValidationError
 
 from app.config import Settings, get_settings
 from app.domain.narrative_targeting import targeting_prompt_guardrails
-from app.schemas import BriefAvoidancesSuggestionRead, BriefRequirementsSuggestionRead
+from app.schemas import (
+    BriefAvoidancesSuggestionRead,
+    BriefBlockingQuestionsSuggestionRead,
+    BriefRequirementsSuggestionRead,
+)
 
 
 class RequirementsPayload(BaseModel):
     items: list[str] = Field(min_length=3, max_length=6)
+
+
+class BlockingQuestionsPayload(BaseModel):
+    items: list[str] = Field(default_factory=list, max_length=5)
 
 
 @dataclass(frozen=True)
@@ -49,6 +58,46 @@ def _normalize_items(items: list[str], existing: list[str]) -> list[str]:
             continue
         unique.append(cleaned[:80])
     return unique[:6]
+
+
+def _normalize_questions(items: list[str], existing: list[str]) -> list[str]:
+    existing_normalized = {
+        item.strip().rstrip("？?。；; ")
+        for item in existing
+        if item.strip()
+    }
+    unique: list[str] = []
+    for item in items:
+        cleaned = item.strip().lstrip("-•0123456789.、 ").rstrip("？?。；; ")
+        cleaned = re.sub(
+            r"[，,](?:这|该|其|不同|答案|选择|会|将).*?$",
+            "",
+            cleaned,
+        ).strip()
+        structured_field_markers = (
+            "叙事主角",
+            "单数主角",
+            "双主角",
+            "群像",
+            "主角性别",
+            "核心主角的性别",
+            "情绪回报",
+            "目标受众",
+            "视觉风格",
+            "主市场",
+            "目标平台",
+            "目标时长",
+            "画幅",
+        )
+        if (
+            not cleaned
+            or cleaned in existing_normalized
+            or cleaned in unique
+            or any(marker in cleaned for marker in structured_field_markers)
+        ):
+            continue
+        unique.append(f"{cleaned[:119]}？")
+    return unique[:5]
 
 
 def _local_requirements(brief: dict[str, Any]) -> list[str]:
@@ -93,6 +142,23 @@ def _local_avoidances(brief: dict[str, Any]) -> list[str]:
     return _normalize_items(candidates, list(brief.get("existing_avoidances", [])))
 
 
+def _local_blocking_questions(brief: dict[str, Any]) -> list[str]:
+    candidates: list[str] = []
+    unresolved_markers = ("待确认", "待定", "尚未明确", "未决定")
+    source_items = [
+        *list(brief.get("content_requirements", [])),
+        *list(brief.get("content_avoidances", [])),
+    ]
+    for item in source_items:
+        text = str(item).strip()
+        if not text or not any(marker in text for marker in unresolved_markers):
+            continue
+        subject = re.sub(r"(仍)?(待确认|待定|尚未明确|未决定)", "", text).strip("：:，,。；; ")
+        if subject:
+            candidates.append(f"{subject}最终如何确定")
+    return _normalize_questions(candidates, list(brief.get("existing_questions", [])))
+
+
 def _provider_prompt(brief: dict[str, Any]) -> str:
     return f"""你是短剧制片人与内容策略师。请根据 Brief 生成 4 至 6 条“必须满足”的制作要求。
 
@@ -121,6 +187,26 @@ def _avoidances_provider_prompt(brief: dict[str, Any]) -> str:
 4. 不虚构 Brief 之外的事实，不把正向制作要求改写成负向句，不写“遵守平台规则”“避免低质量”等空泛措辞。
 5. 不要过度限制合理创意；只给出对当前项目确有价值的约束。
 6. 严格返回 JSON：{{"items":["规避项1","规避项2"]}}，不要 Markdown 或解释。
+
+{targeting_prompt_guardrails(brief)}
+
+Brief：
+{json.dumps(brief, ensure_ascii=False)}
+"""
+
+
+def _blocking_questions_provider_prompt(brief: dict[str, Any]) -> str:
+    return f"""你是短剧开发制片人与创作决策编辑。
+请审阅当前 Brief，只起草会实质阻断故事方向生成、且无法从现有信息可靠确定的问题，最多 5 条。
+
+要求：
+1. 只有不同答案会显著改变叙事主角、核心冲突、关键规则、结局承诺或制作可行性时，才提出问题。
+2. 已被 Brief、必须满足或必须避免明确回答的事项不能再问；不要重复现有问题。
+3. 叙事主角、目标受众、情绪回报、题材、风格、市场、平台、时长和画幅都有独立表单控件；即使它们尚未填写，也不能在这里重复提问。
+4. 不询问可以安全交给后续创作决定的偏好，不制造虚假缺口，不把建议或制作要求伪装成问题。
+5. 每条问题必须具体、自洽、让用户可以直接回答；不基于年龄、性别、地域或受众标签推断套路。
+6. 如果没有真正阻断项，返回空数组。
+7. 严格返回 JSON：{{"items":["问题1","问题2"]}}，不要 Markdown 或解释。
 
 {targeting_prompt_guardrails(brief)}
 
@@ -211,6 +297,47 @@ async def _call_ark_avoidances(
     )
 
 
+async def _call_ark_blocking_questions(
+    settings: Settings,
+    brief: dict[str, Any],
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> GeneratedRequirements:
+    if not settings.ark_api_key:
+        raise BriefAssistantError("ARK_API_KEY 未配置")
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(min(settings.ark_request_timeout_seconds, 20)),
+            transport=transport,
+        ) as client:
+            response = await client.post(
+                settings.ark_responses_url,
+                headers={
+                    "Authorization": f"Bearer {settings.ark_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": settings.ark_prompt_model,
+                    "input": _blocking_questions_provider_prompt(brief),
+                    "thinking": {"type": "disabled"},
+                },
+            )
+            response.raise_for_status()
+            output = _extract_output_text(response.json())
+            decoded = json.loads((output or "").removeprefix("```json").removesuffix("```").strip())
+            payload = BlockingQuestionsPayload.model_validate(decoded)
+    except (httpx.HTTPError, ValueError, json.JSONDecodeError, ValidationError) as exc:
+        raise BriefAssistantError("火山方舟 Brief 问题分析暂时不可用") from exc
+    return GeneratedRequirements(
+        items=_normalize_questions(
+            payload.items,
+            list(brief.get("existing_questions", [])),
+        ),
+        provider="volcengine-ark",
+        model=settings.ark_prompt_model,
+    )
+
+
 async def suggest_brief_requirements(
     brief: dict[str, Any],
     *,
@@ -252,6 +379,30 @@ async def suggest_brief_avoidances(
         )
         warning = str(exc)
     return BriefAvoidancesSuggestionRead(
+        items=result.items,
+        provider=result.provider,
+        model=result.model,
+        warning=warning,
+    )
+
+
+async def suggest_brief_blocking_questions(
+    brief: dict[str, Any],
+    *,
+    settings: Settings | None = None,
+) -> BriefBlockingQuestionsSuggestionRead:
+    resolved_settings = settings or get_settings()
+    try:
+        result = await _call_ark_blocking_questions(resolved_settings, brief)
+        warning = None
+    except BriefAssistantError as exc:
+        result = GeneratedRequirements(
+            items=_local_blocking_questions(brief),
+            provider="local-fallback",
+            model="brief-blocking-questions-generator-v1",
+        )
+        warning = str(exc)
+    return BriefBlockingQuestionsSuggestionRead(
         items=result.items,
         provider=result.provider,
         model=result.model,

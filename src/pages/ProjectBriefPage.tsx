@@ -15,6 +15,7 @@ import {
   RotateCcw,
   Save,
   ShieldCheck,
+  Sparkles,
 } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router'
 import {
@@ -27,6 +28,7 @@ import {
   generateStoryDirections,
   rewriteBriefStory,
   suggestBriefAvoidances,
+  suggestBriefBlockingQuestions,
   suggestBriefRequirements,
   suggestProjectName,
   updateProjectDraft,
@@ -252,6 +254,9 @@ export function ProjectBriefPage() {
   const [draftingAvoidances, setDraftingAvoidances] = useState(false)
   const [avoidancesBeforeDraft, setAvoidancesBeforeDraft] = useState<string | null>(null)
   const [avoidancesDraftNote, setAvoidancesDraftNote] = useState<string | null>(null)
+  const [draftingQuestions, setDraftingQuestions] = useState(false)
+  const [questionsBeforeDraft, setQuestionsBeforeDraft] = useState<string | null>(null)
+  const [questionsDraftNote, setQuestionsDraftNote] = useState<string | null>(null)
   const [approving, setApproving] = useState(false)
   const [assumptionsConfirmed, setAssumptionsConfirmed] = useState(false)
   const [proposal, setProposal] = useState<DirectorProposal | null>(null)
@@ -414,7 +419,7 @@ export function ProjectBriefPage() {
   }
 
   async function save() {
-    if (!projectId || !project || !form || !editable || !dirty || saving || rewritingIdea || draftingRequirements || draftingAvoidances) return
+    if (!projectId || !project || !form || !editable || !dirty || saving || rewritingIdea || draftingRequirements || draftingAvoidances || draftingQuestions) return
     setSaving(true)
     setNotice(null)
     setError(null)
@@ -468,6 +473,8 @@ export function ProjectBriefPage() {
       setRequirementsDraftNote(null)
       setAvoidancesBeforeDraft(null)
       setAvoidancesDraftNote(null)
+      setQuestionsBeforeDraft(null)
+      setQuestionsDraftNote(null)
       setBriefVersion(result.briefVersion)
       setNotice(`项目简报第 ${result.briefVersion} 版已保存，项目版本更新为第 ${result.project.lockVersion} 版。`)
       try {
@@ -716,6 +723,64 @@ export function ProjectBriefPage() {
     setForm((current) => current ? { ...current, contentAvoidances: avoidancesBeforeDraft } : current)
     setAvoidancesBeforeDraft(null)
     setAvoidancesDraftNote('已撤销规避项建议。')
+    setNotice(null)
+    setError(null)
+  }
+
+  async function intelligentlyDraftBlockingQuestions() {
+    if (!projectId || !form || !editable || draftingQuestions || form.idea.trim().length < 10) return
+    setDraftingQuestions(true)
+    setQuestionsDraftNote(null)
+    setError(null)
+    try {
+      const existing = splitLines(form.blockingQuestions)
+      const result = await suggestBriefBlockingQuestions(projectId, {
+        idea: form.idea,
+        genre: form.genre,
+        style: form.style,
+        target_duration_sec: form.targetDurationSec,
+        aspect_ratio: form.aspectRatio,
+        target_platform: form.targetPlatform,
+        narrative_protagonist: form.narrativeProtagonist,
+        target_audience: form.targetAudience,
+        emotional_rewards: form.emotionalRewards,
+        audience_profile: form.audienceProfile,
+        production_format: form.productionFormat,
+        primary_market: form.primaryMarket,
+        canonical_language: form.canonicalLanguage,
+        content_requirements: splitLines(form.contentRequirements),
+        content_avoidances: splitLines(form.contentAvoidances),
+        existing_questions: existing,
+      })
+      const merged = [...existing]
+      result.items.forEach((item) => {
+        if (!merged.includes(item)) merged.push(item)
+      })
+      setQuestionsBeforeDraft(form.blockingQuestions)
+      setForm((current) => current ? { ...current, blockingQuestions: merged.join('\n') } : current)
+      const addedCount = merged.length - existing.length
+      setQuestionsDraftNote(
+        addedCount > 0
+          ? result.warning
+            ? `已起草 ${addedCount} 个待确认问题（本地智能回退：${result.warning}）。回答或删除问题后再保存。`
+            : `AI 已起草 ${addedCount} 个会实质影响生成的问题。回答或删除问题后再保存。`
+          : result.warning
+            ? `本地检查未发现新的阻断问题（AI 服务提示：${result.warning}）。`
+            : 'AI 已完成检查，当前简报没有需要新增的阻断问题。',
+      )
+      setNotice(null)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '生成前问题智能起草失败')
+    } finally {
+      setDraftingQuestions(false)
+    }
+  }
+
+  function undoQuestionsDraft() {
+    if (questionsBeforeDraft === null) return
+    setForm((current) => current ? { ...current, blockingQuestions: questionsBeforeDraft } : current)
+    setQuestionsBeforeDraft(null)
+    setQuestionsDraftNote('已撤销 AI 起草的问题。')
     setNotice(null)
     setError(null)
   }
@@ -1096,7 +1161,40 @@ export function ProjectBriefPage() {
                 />
                 {avoidancesDraftNote ? <small aria-live="polite" className="brief-field__note">{avoidancesDraftNote}</small> : null}
               </div>
-              <label className="brief-field brief-field--wide brief-field--compact"><span>生成前必须回答的问题（每行一条）</span><textarea disabled={!editable} maxLength={2000} onChange={(event) => updateField('blockingQuestions', event.target.value)} placeholder="留空即可生成；有内容时系统会阻止方案生成" value={form.blockingQuestions} /></label>
+              <div className="brief-field brief-field--wide brief-field--compact">
+                <div className="brief-field__heading">
+                  <label htmlFor="brief-blocking-questions">生成前必须回答的问题（每行一条）</label>
+                  <span className="brief-field__actions">
+                    <button
+                      disabled={!editable || apiStatus !== 'connected' || draftingQuestions || form.idea.trim().length < 10}
+                      onClick={() => void intelligentlyDraftBlockingQuestions()}
+                      type="button"
+                    >
+                      {draftingQuestions ? <LoaderCircle className="spin" size={12} /> : <Sparkles size={12} />}
+                      {draftingQuestions ? '正在分析' : 'AI 起草问题'}
+                    </button>
+                    {questionsBeforeDraft !== null ? (
+                      <button className="brief-field__action--undo" onClick={undoQuestionsDraft} type="button">
+                        <RotateCcw size={12} />撤销
+                      </button>
+                    ) : null}
+                  </span>
+                </div>
+                <textarea
+                  aria-busy={draftingQuestions}
+                  disabled={!editable || draftingQuestions}
+                  id="brief-blocking-questions"
+                  maxLength={2000}
+                  onChange={(event) => {
+                    updateField('blockingQuestions', event.target.value)
+                    setQuestionsBeforeDraft(null)
+                    setQuestionsDraftNote(null)
+                  }}
+                  placeholder="留空即可生成；有内容时系统会阻止方案生成"
+                  value={form.blockingQuestions}
+                />
+                {questionsDraftNote ? <small aria-live="polite" className="brief-field__note">{questionsDraftNote}</small> : null}
+              </div>
             </BriefDisclosure>
           </div>
           {error ? <div className="brief-save-message brief-save-message--error" role="alert">{error}<Button onClick={() => window.location.reload()} size="sm" variant="ghost"><RefreshCw size={14} />重新载入</Button></div> : null}
@@ -1112,7 +1210,7 @@ export function ProjectBriefPage() {
                   ? '故事资料包已生成，等待审核'
                   : '当前内容已同步'}</span>
             <div>
-              <Button disabled={!editable || !dirty || saving || rewritingIdea || draftingRequirements || draftingAvoidances || form.idea.trim().length < 10 || !form.name.trim()} onClick={save}>
+              <Button disabled={!editable || !dirty || saving || rewritingIdea || draftingRequirements || draftingAvoidances || draftingQuestions || form.idea.trim().length < 10 || !form.name.trim()} onClick={save}>
                 {saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}
                 {saving ? '保存中' : '保存新版本'}
               </Button>

@@ -50,7 +50,7 @@ CHARACTER_CLEAN_FRAME_CONSTRAINT = (
     "（尤其右下角水印）、Logo、品牌标识、签名、角标、时间戳、二维码、边框、"
     "UI 元素或其他标记；即使参考图中存在，也必须完全忽略，不能临摹、复制或迁移到结果图中"
 )
-CHARACTER_PROFILE_EXTRACTION_VERSION = "character-profile-extraction-v2"
+CHARACTER_PROFILE_EXTRACTION_VERSION = "character-profile-extraction-v3"
 IDENTITY_DOSSIER_MAX_WAIT_SECONDS = 120
 AGE_MENTION_PATTERN = re.compile(
     r"(?<![\d零〇一二两三四五六七八九十百])"
@@ -245,20 +245,68 @@ def _relationship_context(
     ]
 
 
-def _visualize_personality(personality: list[str]) -> dict[str, str]:
-    source = "、".join(personality)
-    expression = "克制、少量微表情"
-    gaze = "稳定注视，保留环境警觉"
-    posture = "脊背自然挺直，重心稳定"
-    action = "动作简洁，避免夸张手势"
-    if any(word in source for word in ("警觉", "防备", "敏锐")):
-        gaze = "目光敏锐，先观察环境再看向对方"
+LEGACY_PERSONALITY_VISUALIZATION = {
+    "expression": "克制、少量微表情",
+    "gaze": "稳定注视，保留环境警觉",
+    "posture": "脊背自然挺直，重心稳定",
+    "movement": "动作简洁，避免夸张手势",
+}
+
+
+def _visualize_personality(
+    personality: list[str],
+    *,
+    role: str = "",
+    dramatic_function: str = "",
+    visual_notes: str = "",
+) -> dict[str, str]:
+    source = "、".join(
+        item for item in [*personality, role, dramatic_function, visual_notes] if item
+    )
+    expression = "表情跟随当下行动目标变化，避免固定模板"
+    gaze = "目光自然落在当前行动目标上，不预设统一的警觉或威慑感"
+    posture = "姿态服从角色当下处境与行动目的"
+    action = "动作由职业习惯和剧情任务驱动，避免无依据的夸张手势"
+
+    if any(word in source for word in ("小心翼翼", "怕惹事", "回避", "谨慎", "畏缩")):
+        expression = "表情谨慎，开口前会有短暂停顿"
+        gaze = "与人对视短暂，确认安全后才停留；谈到敏感往事时会移开目光"
+        posture = "肩背略收，身体保持可退让的余地"
+        action = "动作幅度偏小，先确认周围反应再继续"
+    elif any(word in source for word in ("眼神锐利", "目光锐利", "看不出情绪", "深不可测")):
+        expression = "表面和缓，眉眼很少泄露真实情绪"
+        gaze = "视线锐利且停留更久，先判断对方反应再表态"
+        posture = "身体放松但占据稳定位置，不急于回应"
+        action = "动作节奏从容，通过停顿而非手势施加压力"
+    elif any(word in source for word in ("颐指气使", "看不起", "不耐烦", "盛气凌人", "强势")):
+        expression = "嘴角与眉峰带明显的不耐和优越感"
+        gaze = "目光习惯自上而下扫视，与下属交流时带持续审视"
+        posture = "身体正面占据空间，重心很少后撤"
+        action = "发号施令时动作短促明确，不等待对方完整回应"
+    elif any(word in source for word in ("秘密", "隐瞒", "心事", "旧事")):
+        expression = "日常神态坦率自然，触及隐情时表情会短暂收住"
+        gaze = "看人时直接而有温度，谈到过去时会出现短暂停顿或回避"
+        posture = "日常姿态松弛，面对关键追问时身体会略微收紧"
+        action = "熟悉事务上动作利落，涉及隐情时会用手边事情转移注意"
+    elif any(word in source for word in ("利落", "果断", "推动", "行动", "验证", "调查")):
+        expression = "反应快，情绪变化集中在眉眼与短暂停顿"
+        gaze = "注视直接、转换迅速，遇到线索时会在人物与关键物件间快速确认"
+        posture = "重心前置，随时准备接续下一步行动"
+        action = "动作干净明确，决定后很少重复犹豫"
+    elif any(word in source for word in ("温和", "和蔼", "体贴", "照顾", "亲切")):
+        expression = "表情松弛有亲和力，笑意主要停留在眼周"
+        gaze = "视线停留柔和，倾听时会稳定看向对方并给出回应"
+        posture = "肩颈放松，身体朝向交流对象"
+        action = "动作耐心，常通过递物或让出空间表达关照"
+    elif any(word in source for word in ("警觉", "防备", "敏锐")):
+        gaze = "目光敏锐，先确认周围变化再看向对方"
         posture = "肩颈略收，身体与出口保持可移动角度"
+
     if any(word in source for word in ("冷静", "克制")):
-        expression = "闭口中性表情，眉眼克制"
-    if any(word in source for word in ("执着", "强势", "果断")):
-        posture = "站姿稳定，身体正面占据空间"
-        action = "说话时动作少而明确"
+        expression = "闭口中性表情，眉眼克制，情绪通过停顿而非夸张表情呈现"
+    if any(word in source for word in ("执着", "果断")):
+        posture = "站姿稳定，重心明确朝向行动目标"
+        action = "决定后动作少而明确，不做无效试探"
     return {
         "expression": expression,
         "gaze": gaze,
@@ -267,6 +315,29 @@ def _visualize_personality(personality: list[str]) -> dict[str, str]:
         "clothing_signal": "衣物保持真实生活褶皱，以职业与阶层而非潮流标签表达身份",
         "personal_items": "只保留与职业或剧情功能直接相关的随身物品",
     }
+
+
+def _enrich_legacy_personality_visualization(
+    personality: dict[str, object],
+    *,
+    identity: dict[str, object],
+    appearance: dict[str, object],
+) -> dict[str, object]:
+    enriched = dict(personality)
+    if not any(
+        not enriched.get(field) or enriched.get(field) == legacy_value
+        for field, legacy_value in LEGACY_PERSONALITY_VISUALIZATION.items()
+    ):
+        return enriched
+    derived = _visualize_personality(
+        [],
+        dramatic_function=_as_text(identity.get("story_identity"), ""),
+        visual_notes=_as_text(appearance.get("identifying_features"), ""),
+    )
+    for field, legacy_value in LEGACY_PERSONALITY_VISUALIZATION.items():
+        if not enriched.get(field) or enriched.get(field) == legacy_value:
+            enriched[field] = derived[field]
+    return enriched
 
 
 def _profile_audit(profile: dict[str, object]) -> list[dict[str, str]]:
@@ -353,10 +424,17 @@ def _profile_audit(profile: dict[str, object]) -> list[dict[str, str]]:
 
 
 def _profile_content(record: CharacterVisualProfileVersion) -> dict[str, object]:
+    identity = _json(record.identity_fields_json)
+    appearance = _json(record.appearance_fields_json)
+    personality = _json(record.personality_visualization_json)
     return {
-        "identity_fields": _json(record.identity_fields_json),
-        "appearance_fields": _json(record.appearance_fields_json),
-        "personality_visualization": _json(record.personality_visualization_json),
+        "identity_fields": identity,
+        "appearance_fields": appearance,
+        "personality_visualization": _enrich_legacy_personality_visualization(
+            personality,
+            identity=identity,
+            appearance=appearance,
+        ),
         "styling_fields": _json(record.styling_fields_json),
         "project_style": _json(record.project_style_json),
         "negative_constraints": _json(record.negative_constraints_json),
@@ -799,7 +877,12 @@ def prepare_character_visuals(
                 "identifying_features": visual_notes,
                 "life_marks": "保留轻微肤质、疲劳与日常使用痕迹",
             },
-            "personality_visualization": _visualize_personality(personality),
+            "personality_visualization": _visualize_personality(
+                personality,
+                role=_as_text(raw.get("role"), ""),
+                dramatic_function=_as_text(raw.get("dramatic_function"), ""),
+                visual_notes=visual_notes,
+            ),
             "styling_fields": {
                 "wardrobe": visual_notes,
                 "materials": "真实织物纹理，符合职业与阶层",

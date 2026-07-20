@@ -338,6 +338,34 @@ class BriefAvoidancesSuggestionRead(BaseModel):
     warning: str | None = None
 
 
+class BriefBlockingQuestionsSuggestionRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    idea: str = Field(min_length=10, max_length=4000)
+    genre: str = Field(min_length=1, max_length=80)
+    style: str = Field(min_length=1, max_length=80)
+    target_duration_sec: int = Field(ge=45, le=90)
+    aspect_ratio: Literal["9:16", "16:9"]
+    target_platform: str = Field(min_length=1, max_length=40)
+    narrative_protagonist: NarrativeProtagonist = "unspecified"
+    target_audience: TargetAudience = "general"
+    emotional_rewards: list[EmotionalReward] = Field(default_factory=list, max_length=7)
+    audience_profile: str = Field(default="", max_length=240)
+    production_format: ProductionFormat = "live_action"
+    primary_market: str = Field(default="CN", min_length=2, max_length=16)
+    canonical_language: str = Field(default="zh-CN", min_length=2, max_length=24)
+    content_requirements: list[str] = Field(default_factory=list, max_length=30)
+    content_avoidances: list[str] = Field(default_factory=list, max_length=30)
+    existing_questions: list[str] = Field(default_factory=list, max_length=20)
+
+
+class BriefBlockingQuestionsSuggestionRead(BaseModel):
+    items: list[str]
+    provider: str
+    model: str
+    warning: str | None = None
+
+
 class BriefStoryRewriteRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 

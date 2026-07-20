@@ -1,6 +1,8 @@
 import {
   Children,
   Fragment,
+  cloneElement,
+  createElement,
   isValidElement,
   useCallback,
   useEffect,
@@ -11,7 +13,9 @@ import {
   useState,
   type ButtonHTMLAttributes,
   type ComponentPropsWithoutRef,
+  type HTMLAttributes,
   type KeyboardEvent as ReactKeyboardEvent,
+  type ReactElement,
   type ReactNode,
 } from 'react'
 import { createPortal } from 'react-dom'
@@ -32,6 +36,232 @@ export function Button({
     <button className={`button button--${variant} button--${size} ${className}`} type={type ?? 'button'} {...props}>
       {children}
     </button>
+  )
+}
+
+type SurfaceProps = HTMLAttributes<HTMLElement> & {
+  as?: 'article' | 'aside' | 'div' | 'section'
+  elevation?: 'none' | 'surface' | 'floating'
+  padding?: 'none' | 'sm' | 'md' | 'lg'
+  radius?: 'control' | 'surface' | 'panel'
+  tone?: 'default' | 'subtle' | 'muted' | 'transparent'
+}
+
+export function Surface({
+  as = 'section',
+  className = '',
+  elevation = 'surface',
+  padding = 'lg',
+  radius = 'surface',
+  tone = 'default',
+  ...props
+}: SurfaceProps) {
+  return createElement(as, {
+    ...props,
+    className: `ds-surface ${className}`.trim(),
+    'data-elevation': elevation,
+    'data-padding': padding,
+    'data-radius': radius,
+    'data-tone': tone,
+  })
+}
+
+type StackProps = HTMLAttributes<HTMLElement> & {
+  align?: 'start' | 'center' | 'end' | 'stretch'
+  as?: 'div' | 'section'
+  direction?: 'column' | 'row'
+  gap?: 'none' | 'xs' | 'sm' | 'md' | 'lg' | 'xl' | '2xl'
+  justify?: 'start' | 'center' | 'end' | 'between'
+  wrap?: boolean
+}
+
+export function Stack({
+  align = 'stretch',
+  as = 'div',
+  className = '',
+  direction = 'column',
+  gap = 'md',
+  justify = 'start',
+  wrap = false,
+  ...props
+}: StackProps) {
+  return createElement(as, {
+    ...props,
+    className: `ds-stack ${className}`.trim(),
+    'data-align': align,
+    'data-direction': direction,
+    'data-gap': gap,
+    'data-justify': justify,
+    'data-wrap': wrap,
+  })
+}
+
+type FieldControlProps = {
+  'aria-describedby'?: string
+  'aria-invalid'?: boolean
+  id?: string
+}
+
+export function FormField({
+  children,
+  className = '',
+  error,
+  hint,
+  id,
+  label,
+  optional = false,
+}: {
+  children: ReactElement<FieldControlProps>
+  className?: string
+  error?: ReactNode
+  hint?: ReactNode
+  id?: string
+  label: ReactNode
+  optional?: boolean
+}) {
+  const generatedId = useId()
+  const controlId = id ?? `field-${generatedId.replace(/:/g, '')}`
+  const hintId = hint ? `${controlId}-hint` : undefined
+  const errorId = error ? `${controlId}-error` : undefined
+  const describedBy = [children.props['aria-describedby'], hintId, errorId].filter(Boolean).join(' ') || undefined
+  const control = cloneElement(children, {
+    'aria-describedby': describedBy,
+    'aria-invalid': Boolean(error) || undefined,
+    id: children.props.id ?? controlId,
+  })
+
+  return (
+    <div className={`ds-form-field ${className}`.trim()} data-invalid={Boolean(error)}>
+      <label className="ds-form-field__label" htmlFor={controlId}>
+        <span>{label}</span>
+        {optional ? <em>选填</em> : null}
+      </label>
+      <div className="ds-form-field__control">{control}</div>
+      {hint ? <p className="ds-form-field__hint" id={hintId}>{hint}</p> : null}
+      {error ? <p className="ds-form-field__error" id={errorId} role="alert">{error}</p> : null}
+    </div>
+  )
+}
+
+export function IconButton({
+  className = '',
+  label,
+  size = 'md',
+  title,
+  type,
+  variant = 'secondary',
+  ...props
+}: ButtonHTMLAttributes<HTMLButtonElement> & {
+  label: string
+  size?: 'sm' | 'md'
+  variant?: 'secondary' | 'ghost' | 'danger'
+}) {
+  return (
+    <button
+      aria-label={label}
+      className={`icon-button ${className}`.trim()}
+      data-size={size}
+      data-variant={variant}
+      title={title ?? label}
+      type={type ?? 'button'}
+      {...props}
+    />
+  )
+}
+
+export function Tabs({ className = '', ...props }: HTMLAttributes<HTMLDivElement>) {
+  return <div className={`tabs ${className}`.trim()} {...props} />
+}
+
+export function TabList({
+  className = '',
+  onKeyDown,
+  ...props
+}: HTMLAttributes<HTMLDivElement>) {
+  return (
+    <div
+      className={`tab-list ${className}`.trim()}
+      role="tablist"
+      onKeyDown={(event) => {
+        onKeyDown?.(event)
+        if (event.defaultPrevented || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+        const tabs = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]:not(:disabled)'))
+        const currentIndex = tabs.indexOf(document.activeElement as HTMLButtonElement)
+        if (currentIndex < 0 || tabs.length === 0) return
+        event.preventDefault()
+        const nextIndex = event.key === 'Home'
+          ? 0
+          : event.key === 'End'
+            ? tabs.length - 1
+            : (currentIndex + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length
+        tabs[nextIndex]?.focus()
+      }}
+      {...props}
+    />
+  )
+}
+
+export function Tab({
+  className = '',
+  controls,
+  selected,
+  type,
+  ...props
+}: ButtonHTMLAttributes<HTMLButtonElement> & {
+  controls?: string
+  selected: boolean
+}) {
+  return (
+    <button
+      aria-controls={controls}
+      aria-selected={selected}
+      className={`tab ${className}`.trim()}
+      role="tab"
+      tabIndex={selected ? 0 : -1}
+      type={type ?? 'button'}
+      {...props}
+    />
+  )
+}
+
+export function TabPanel({
+  active,
+  className = '',
+  labelledBy,
+  ...props
+}: HTMLAttributes<HTMLDivElement> & {
+  active: boolean
+  labelledBy?: string
+}) {
+  return (
+    <div
+      aria-labelledby={labelledBy}
+      className={`tab-panel ${className}`.trim()}
+      hidden={!active}
+      role="tabpanel"
+      tabIndex={0}
+      {...props}
+    />
+  )
+}
+
+export function Toolbar({
+  className = '',
+  label,
+  surface = false,
+  ...props
+}: HTMLAttributes<HTMLDivElement> & {
+  label: string
+  surface?: boolean
+}) {
+  return (
+    <div
+      aria-label={label}
+      className={`toolbar ${className}`.trim()}
+      data-surface={surface}
+      role="toolbar"
+      {...props}
+    />
   )
 }
 
@@ -590,9 +820,9 @@ export function Toast({
         <strong>{title}</strong>
         <p>{message}</p>
       </div>
-      <button aria-label="关闭通知" className="toast__close" onClick={onDismiss} type="button">
+      <IconButton className="toast__close" label="关闭通知" onClick={onDismiss} size="sm" variant="ghost">
         <X size={15} />
-      </button>
+      </IconButton>
     </div>
   )
 }
@@ -634,12 +864,12 @@ export function PageHeader({
 }) {
   return (
     <header className="page-header">
-      <div>
+      <Stack gap="xs">
         {eyebrow ? <p className="eyebrow">{eyebrow}</p> : null}
         <h1>{title}</h1>
         {description ? <p className="page-header__description">{description}</p> : null}
-      </div>
-      {actions ? <div className="page-header__actions">{actions}</div> : null}
+      </Stack>
+      {actions ? <Toolbar className="page-header__actions" label="页面操作">{actions}</Toolbar> : null}
     </header>
   )
 }
@@ -689,11 +919,14 @@ export function Modal({
   const requestClose = () => {
     if (closing) return
     setClosing(true)
+    const duration = Number.parseFloat(
+      window.getComputedStyle(document.documentElement).getPropertyValue('--motion-duration-fast'),
+    )
     closeTimer.current = window.setTimeout(() => {
       closeTimer.current = null
       setClosing(false)
       onClose()
-    }, 150)
+    }, Number.isFinite(duration) ? duration : 0)
   }
 
   return (
@@ -716,9 +949,9 @@ export function Modal({
           <h2 id={titleId}>{title}</h2>
           {description ? <p id={descriptionId}>{description}</p> : null}
         </div>
-        <Button aria-label="关闭" onClick={requestClose} size="sm" variant="ghost">
+        <IconButton label="关闭" onClick={requestClose} size="sm" variant="ghost">
           <X size={18} />
-        </Button>
+        </IconButton>
       </div>
       <div className="modal__body">{children}</div>
       {footer ? <div className="modal__footer">{footer}</div> : null}
@@ -736,11 +969,11 @@ export function EmptyState({
   action?: ReactNode
 }) {
   return (
-    <div className="empty-state" role="status">
+    <Surface as="div" className="empty-state" padding="lg" radius="panel" role="status">
       <span className="empty-state__mark" aria-hidden="true" />
       <h2>{title}</h2>
       <p>{description}</p>
       {action}
-    </div>
+    </Surface>
   )
 }

@@ -8,7 +8,10 @@ from app.config import get_settings
 from app.services.brief_assistant import (
     _call_ark,
     _call_ark_avoidances,
+    _call_ark_blocking_questions,
+    _normalize_questions,
     suggest_brief_avoidances,
+    suggest_brief_blocking_questions,
     suggest_brief_requirements,
 )
 
@@ -136,3 +139,55 @@ async def test_brief_avoidances_ark_contract_returns_structured_unique_items() -
     assert len(result.items) == 3
     assert "existing_avoidances" in str(captured["input"])
     assert "不要过度限制合理创意" in str(captured["input"])
+
+
+async def test_blocking_questions_local_fallback_only_uses_real_missing_decisions() -> None:
+    result = await suggest_brief_blocking_questions(
+        {
+            **BRIEF,
+            "narrative_protagonist": "unspecified",
+            "emotional_rewards": [],
+            "content_requirements": ["前三秒建立危机", "合伙人的秘密内容待确认"],
+            "existing_questions": [],
+        },
+        settings=replace(get_settings(), ark_api_key=None),
+    )
+
+    assert result.provider == "local-fallback"
+    assert result.warning == "ARK_API_KEY 未配置"
+    assert result.items == ["合伙人的秘密内容最终如何确定？"]
+    assert all("叙事主角" not in item and "情绪回报" not in item for item in result.items)
+
+
+async def test_blocking_questions_ark_contract_allows_no_new_blockers() -> None:
+    captured: dict[str, object] = {}
+    brief = {
+        **BRIEF,
+        "existing_questions": [],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"output_text": '{"items":[]}'})
+
+    result = await _call_ark_blocking_questions(
+        replace(get_settings(), ark_api_key="test-key"),
+        brief,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.items == []
+    assert result.provider == "volcengine-ark"
+    assert "不制造虚假缺口" in str(captured["input"])
+    assert "都有独立表单控件" in str(captured["input"])
+    assert "existing_questions" in str(captured["input"])
+
+
+async def test_blocking_questions_are_direct_and_do_not_repeat_structured_fields() -> None:
+    assert _normalize_questions(
+        [
+            "合伙人的秘密涉及违法犯罪还是私人情感纠纷，这会直接改变核心冲突方向，需要确认吗？",
+            "核心主角的性别需要明确吗？",
+        ],
+        [],
+    ) == ["合伙人的秘密涉及违法犯罪还是私人情感纠纷？"]

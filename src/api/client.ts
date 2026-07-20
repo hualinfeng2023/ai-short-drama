@@ -876,6 +876,32 @@ export interface BriefAvoidancesSuggestion {
   warning?: string
 }
 
+export interface BriefBlockingQuestionsSuggestionInput {
+  idea: string
+  genre: string
+  style: string
+  target_duration_sec: number
+  aspect_ratio: '9:16' | '16:9'
+  target_platform: string
+  narrative_protagonist: NarrativeProtagonist
+  target_audience: TargetAudience
+  emotional_rewards: EmotionalReward[]
+  audience_profile: string
+  production_format: ProductionFormat
+  primary_market: string
+  canonical_language: string
+  content_requirements: string[]
+  content_avoidances: string[]
+  existing_questions: string[]
+}
+
+export interface BriefBlockingQuestionsSuggestion {
+  items: string[]
+  provider: string
+  model: string
+  warning?: string
+}
+
 export interface BriefStoryRewriteInput {
   idea: string
   genre: string
@@ -1621,6 +1647,28 @@ export async function suggestBriefAvoidances(
     model: string
     warning: string | null
   }>(`/api/v1/projects/${projectId}/brief-avoidance-suggestions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  return {
+    items: result.items,
+    provider: result.provider,
+    model: result.model,
+    warning: result.warning ?? undefined,
+  }
+}
+
+export async function suggestBriefBlockingQuestions(
+  projectId: string,
+  input: BriefBlockingQuestionsSuggestionInput,
+): Promise<BriefBlockingQuestionsSuggestion> {
+  const result = await requestJson<{
+    items: string[]
+    provider: string
+    model: string
+    warning: string | null
+  }>(`/api/v1/projects/${projectId}/brief-blocking-question-suggestions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),

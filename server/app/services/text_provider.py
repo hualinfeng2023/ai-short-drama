@@ -851,7 +851,12 @@ def assemble_story_package(
 
 class TextProvider(Protocol):
     async def generate_directions(
-        self, settings: Settings, brief: dict[str, Any]
+        self,
+        settings: Settings,
+        brief: dict[str, Any],
+        *,
+        existing_results: dict[str, TextGenerationResult] | None = None,
+        on_route_complete: Callable[[str, TextGenerationResult], Awaitable[None]] | None = None,
     ) -> TextGenerationResult: ...
 
     async def generate_story_package(
@@ -2182,7 +2187,12 @@ async def generate_script_excerpt_rewrite(
 
 class RoutedTextProvider:
     async def generate_directions(
-        self, settings: Settings, brief: dict[str, Any]
+        self,
+        settings: Settings,
+        brief: dict[str, Any],
+        *,
+        existing_results: dict[str, TextGenerationResult] | None = None,
+        on_route_complete: Callable[[str, TextGenerationResult], Awaitable[None]] | None = None,
     ) -> TextGenerationResult:
         if not settings.ark_api_key:
             batch = deterministic_directions(brief)
@@ -2246,26 +2256,128 @@ class RoutedTextProvider:
                 repair_attempts=result.repair_attempts,
             )
 
-        tasks = [
-            asyncio.create_task(generate_route(direction_key, label, emphasis))
+        results_by_key: dict[str, TextGenerationResult] = {}
+        for direction_key, _, _ in DIRECTION_ROUTES:
+            cached = (existing_results or {}).get(direction_key)
+            if cached is None:
+                continue
+            direction = StoryDirection.model_validate(cached.payload)
+            if direction.direction_key == direction_key:
+                results_by_key[direction_key] = cached
+
+        callback_lock = asyncio.Lock()
+
+        async def generate_and_record(
+            direction_key: str,
+            label: str,
+            emphasis: str,
+        ) -> TextGenerationResult:
+            result = await generate_route(direction_key, label, emphasis)
+            if on_route_complete is not None:
+                async with callback_lock:
+                    await on_route_complete(direction_key, result)
+            return result
+
+        pending_routes = [
+            (direction_key, label, emphasis)
             for direction_key, label, emphasis in DIRECTION_ROUTES
+            if direction_key not in results_by_key
+        ]
+        tasks = [
+            asyncio.create_task(generate_and_record(direction_key, label, emphasis))
+            for direction_key, label, emphasis in pending_routes
         ]
         try:
-            results = await asyncio.gather(*tasks)
+            task_results = await asyncio.gather(*tasks, return_exceptions=True)
         except BaseException:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
+        route_errors: dict[str, dict[str, Any]] = {}
+        for (direction_key, _, _), result in zip(
+            pending_routes, task_results, strict=True
+        ):
+            if isinstance(result, BaseException):
+                if isinstance(result, TextProviderError):
+                    route_errors[direction_key] = {
+                        "code": result.code,
+                        "message": str(result),
+                        "retryable": result.retryable,
+                        "details": result.details,
+                    }
+                else:
+                    route_errors[direction_key] = {
+                        "code": "ARK_TEXT_ROUTE_ERROR",
+                        "message": str(result),
+                        "retryable": True,
+                        "details": {"exception_type": type(result).__name__},
+                    }
+                continue
+            results_by_key[direction_key] = result
+
+        if route_errors:
+            completed_routes = [
+                direction_key
+                for direction_key, _, _ in DIRECTION_ROUTES
+                if direction_key in results_by_key
+            ]
+            failed_routes = [
+                direction_key
+                for direction_key, _, _ in DIRECTION_ROUTES
+                if direction_key in route_errors
+            ]
+            error_codes = {str(item["code"]) for item in route_errors.values()}
+            code = (
+                next(iter(error_codes))
+                if not completed_routes and len(error_codes) == 1
+                else "ARK_TEXT_PARTIAL_FAILURE"
+            )
+            primary_error = next(iter(route_errors.values()))
+            primary_details = (
+                dict(primary_error["details"])
+                if not completed_routes and isinstance(primary_error["details"], dict)
+                else {}
+            )
+            message = (
+                f"3 个故事方向均未生成完成：{primary_error['message']}"
+                if not completed_routes
+                else (
+                    f"3 个故事方向中已有 {len(completed_routes)} 个完成，"
+                    f"{len(failed_routes)} 个失败；已保留成功结果，将只重试失败方向"
+                )
+            )
+            raise TextProviderError(
+                code,
+                message,
+                retryable=all(bool(item["retryable"]) for item in route_errors.values()),
+                details={
+                    **primary_details,
+                    "completed_routes": completed_routes,
+                    "failed_routes": failed_routes,
+                    "failed_parts": failed_routes,
+                    "completed_steps": [
+                        f"故事方向 {direction_key}" for direction_key in completed_routes
+                    ],
+                    "route_errors": route_errors,
+                },
+            )
+
+        results = [
+            results_by_key[direction_key]
+            for direction_key, _, _ in DIRECTION_ROUTES
+        ]
         batch = StoryDirectionBatch.model_validate(
             {"directions": [result.payload for result in results]}
         )
         request_ids = [result.request_id for result in results if result.request_id]
+        providers = {result.provider for result in results}
+        models = {result.model for result in results}
         return TextGenerationResult(
             payload=batch.model_dump(mode="json"),
-            provider=results[0].provider,
-            model=results[0].model,
+            provider=results[0].provider if len(providers) == 1 else "mixed",
+            model=results[0].model if len(models) == 1 else "mixed",
             request_id=",".join(request_ids) or None,
             repair_attempts=sum(result.repair_attempts for result in results),
         )

@@ -22,6 +22,7 @@ import {
   saveRelationshipGraph,
   suggestBriefRequirements,
   suggestBriefAvoidances,
+  suggestBriefBlockingQuestions,
   suggestProjectName,
   updateProjectDraft,
   type ApiWorkspace,
@@ -693,6 +694,43 @@ describe('project naming client', () => {
     expect(result.warning).toBe('ARK_API_KEY 未配置')
     expect(fetchMock.mock.calls[0][0]).toBe(
       '/api/v1/projects/project-id/brief-avoidance-suggestions',
+    )
+  })
+
+  it('sends the brief context and maps blocking question suggestions', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        items: ['主角最终是否公开能力来源？'],
+        provider: 'volcengine-ark',
+        model: 'doubao-seed-2-0-lite-260215',
+        warning: null,
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await suggestBriefBlockingQuestions('project-id', {
+      idea: '一对姐妹得到两颗神药，在末日中走向不同选择。',
+      genre: 'urban_drama',
+      style: 'realistic_cinematic',
+      target_duration_sec: 60,
+      aspect_ratio: '9:16',
+      target_platform: 'douyin',
+      narrative_protagonist: 'dual',
+      target_audience: 'general',
+      emotional_rewards: ['family'],
+      audience_profile: '',
+      production_format: 'live_action',
+      primary_market: 'CN',
+      canonical_language: 'zh-CN',
+      content_requirements: ['前三秒建立危机'],
+      content_avoidances: ['避免无铺垫反转'],
+      existing_questions: [],
+    })
+
+    expect(result.items).toEqual(['主角最终是否公开能力来源？'])
+    expect(result.warning).toBeUndefined()
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      '/api/v1/projects/project-id/brief-blocking-question-suggestions',
     )
   })
 

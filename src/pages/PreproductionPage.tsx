@@ -8,7 +8,7 @@ import {
   lockCharacterCandidate,
   type PreproductionWorkspace,
 } from '../api/client'
-import { Button, PageHeader, StatusBadge, getStatusLabel } from '../components/ui'
+import { Button, PageHeader, StatusBadge, Surface, getStatusLabel } from '../components/ui'
 import { ServiceRequiredState } from '../components/ServiceRequiredState'
 import { useStudio } from '../store/StudioContext'
 import { localizeDisplayText } from '../utils/localizeDisplayText'
@@ -124,7 +124,7 @@ export function PreproductionPage() {
       <div><span>声音 / 场景 / 道具</span><strong>{workspace.voices.length} / {workspace.locations.length} / {workspace.props.length}</strong></div>
     </section>
 
-    <section className="story-section">
+    <Surface className="story-section">
       <div className="section-heading"><div><p className="eyebrow">角色形象</p><h2>已锁定身份引用</h2><p>角色身份已在剧本生成前人工锁定；本阶段只读取身份与基础 Look Version，不会替换候选或覆盖既有镜头。</p></div></div>
       <div className="preproduction-character-list">{workspace.characters.map((character) => {
         const lockedReferenceUrl = character.lockedCandidateId && activeProject.id === projectId
@@ -143,7 +143,7 @@ export function PreproductionPage() {
         <footer>{character.lockedCandidateId ? <span><LockKeyhole size={16} />角色形象已冻结</span> : <Button disabled={!selected[character.id] || busy !== null} onClick={() => void lockCharacter(character.id)}>{busy === character.id ? <LoaderCircle className="spin" size={16} /> : <LockKeyhole size={16} />}锁定 {character.name}</Button>}</footer>
       </article>
       })}</div>
-    </section>
+    </Surface>
 
     <section className="preproduction-assets">
       <article><p className="eyebrow">造型版本</p><h2>{workspace.looks.length} 个已生成版本</h2>{workspace.looks.map((look) => <div key={look.id}><strong>{localizeDisplayText(look.label)}</strong><span>第 {look.version} 版 · {localizeDisplayText(look.usageScope)}</span><StatusBadge status={look.status} /></div>)}</article>
