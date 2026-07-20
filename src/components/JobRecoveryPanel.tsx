@@ -9,7 +9,6 @@ import {
   Play,
   Save,
   ShieldAlert,
-  UserRoundCheck,
 } from 'lucide-react'
 
 import type { Job, JobRecoveryAction, JobRecoveryRequest } from '../types'
@@ -110,12 +109,6 @@ export function JobRecoveryPanel({
           size="sm"
           variant="ghost"
         ><MessageSquareText size={15} />补充信息</Button> : null}
-        {can('ESCALATE_HUMAN') ? <Button
-          disabled={busy || plan.handoffStatus === 'REQUESTED'}
-          onClick={() => onRecover('ESCALATE_HUMAN', { note: '请人工复核失败步骤、中间结果和可靠性风险' })}
-          size="sm"
-          variant="ghost"
-        ><UserRoundCheck size={15} />{plan.handoffStatus === 'REQUESTED' ? '已转人工' : '转人工处理'}</Button> : null}
       </div>
 
       {showInput ? <form

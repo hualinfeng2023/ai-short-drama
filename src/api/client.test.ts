@@ -4,6 +4,7 @@ import {
   analyzeRelationshipRevisionImpact,
   createRelationshipGraphRevision,
   createProjectDraft,
+  deleteCharacterVisualCandidate,
   deleteProjectRecord,
   enhanceShotPrompt,
   fetchJobs,
@@ -169,7 +170,7 @@ describe('mapWorkspace', () => {
         candidate_take: null, continuity: 'CLEAR', location: '室内', time_of_day: '日',
       }],
       jobs: [{
-        id: 'job-id', project_id: 'project-id', job_type: 'DEMO_RENDER',
+        id: 'job-id', project_id: 'project-id', project_name: '项目', job_type: 'DEMO_RENDER',
         entity_type: 'shot', entity_id: 'shot-id', label: '任务', entity: 'shot-id',
         status: 'SUCCEEDED', progress: 100, stage: '完成', attempt: 1, max_attempts: 3,
         available_at: '2026-07-13T12:00:00Z', heartbeat_at: null,
@@ -192,7 +193,7 @@ describe('global jobs client', () => {
   it('loads all jobs without silently scoping to the demo project', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       data: [{
-        id: 'job-global', project_id: 'project-other', job_type: 'DEMO_RENDER',
+        id: 'job-global', project_id: 'project-other', project_name: '另一个项目', job_type: 'DEMO_RENDER',
         entity_type: 'project', entity_id: 'project-other', label: '跨项目任务',
         entity: 'project:project-other', status: 'RUNNING', progress: 45,
         stage: '正在生成', attempt: 1, max_attempts: 3,
@@ -208,7 +209,12 @@ describe('global jobs client', () => {
     const jobs = await fetchJobs()
 
     expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/jobs')
-    expect(jobs[0]).toMatchObject({ id: 'job-global', projectId: 'project-other', status: 'RUNNING' })
+    expect(jobs[0]).toMatchObject({
+      id: 'job-global',
+      projectId: 'project-other',
+      projectName: '另一个项目',
+      status: 'RUNNING',
+    })
   })
 
   it('sends a structured recovery action without losing partial progress', async () => {
@@ -501,6 +507,38 @@ describe('project write client', () => {
       secondaryMarkets: ['SG'],
       platformTargets: [{ platform: 'douyin', priority: 'PRIMARY' }],
       payloadSchemaVersion: 'brief-v3',
+    })
+  })
+})
+
+describe('character candidate write client', () => {
+  it('deletes one historical candidate with optimistic version data', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        character_id: 'character-id',
+        candidate_id: 'candidate-id',
+        deleted: true,
+        lock_version: 8,
+      },
+      trace_id: 'trace-delete-candidate',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await deleteCharacterVisualCandidate(
+      apiProject.id,
+      'character-id',
+      'candidate-id',
+      7,
+    )
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/v1/projects/${apiProject.id}/characters/character-id/visual-candidates/candidate-id`,
+      expect.objectContaining({ method: 'DELETE' }),
+    )
+    const request = fetchMock.mock.calls[0][1] as RequestInit
+    expect(JSON.parse(String(request.body))).toEqual({
+      expected_version: 7,
+      actor: '创作者',
     })
   })
 })

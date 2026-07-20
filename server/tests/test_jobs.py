@@ -408,7 +408,13 @@ async def test_global_jobs_aggregates_multiple_projects(client: AsyncClient) -> 
 
     assert expected_ids <= {job["id"] for job in global_jobs}
     assert {job["project_id"] for job in global_jobs} >= {PROJECT_ID, project["id"]}
+    assert next(job for job in global_jobs if job["id"] == created_job_id)[
+        "project_name"
+    ] == project["name"]
     assert created_job_id in {job["id"] for job in scoped_jobs}
+    assert next(job for job in scoped_jobs if job["id"] == created_job_id)[
+        "project_name"
+    ] == project["name"]
     assert seeded_job_id not in {job["id"] for job in scoped_jobs}
 
 
@@ -1357,15 +1363,6 @@ async def test_failed_job_exposes_and_executes_recovery_actions(client: AsyncCli
     assert saved.status_code == 200
     assert saved.json()["data"]["status"] == "FAILED"
     assert saved.json()["data"]["error_details"]["recovery"]["intermediate_result_saved"] is True
-
-    handoff = await client.post(
-        f"/api/v1/jobs/{job_id}/recovery",
-        json={"action": "ESCALATE_HUMAN", "note": "请检查主镜头连续性"},
-        headers={"Idempotency-Key": "handoff-job-v1"},
-    )
-    assert handoff.status_code == 200
-    assert handoff.json()["data"]["stage"] == "等待人工处理"
-    assert handoff.json()["data"]["error_details"]["recovery"]["handoff_status"] == "REQUESTED"
 
     resumed = await client.post(
         f"/api/v1/jobs/{job_id}/recovery",

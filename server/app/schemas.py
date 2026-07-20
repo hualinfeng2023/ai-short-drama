@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from pydantic import (
+    AliasPath,
     AnyHttpUrl,
     BaseModel,
     ConfigDict,
@@ -626,6 +627,7 @@ class ShotVideoGenerateRequest(BaseModel):
 class JobRead(OrmModel):
     id: str
     project_id: str
+    project_name: str = Field(validation_alias=AliasPath("project", "name"))
     job_type: str
     entity_type: str
     entity_id: str
@@ -686,13 +688,11 @@ class JobRecoveryRequest(BaseModel):
         "FALLBACK_EXECUTION",
         "SAVE_INTERMEDIATE",
         "PROVIDE_INPUT",
-        "ESCALATE_HUMAN",
     ]
     failed_part_ids: list[str] = Field(default_factory=list, max_length=100)
     model: str | None = Field(default=None, max_length=120)
     strategy: str | None = Field(default=None, max_length=120)
     additional_input: str | None = Field(default=None, max_length=4000)
-    note: str | None = Field(default=None, max_length=1000)
 
     @model_validator(mode="after")
     def validate_action_payload(self) -> "JobRecoveryRequest":
@@ -1137,7 +1137,10 @@ class CharacterRevisionChanges(BaseModel):
 
     name: str | None = Field(default=None, min_length=1, max_length=120)
     role: str | None = Field(default=None, min_length=1, max_length=240)
+    gender: Literal["male", "female", "nonbinary", "unspecified"] | None = None
+    ethnicity: str | None = Field(default=None, min_length=1, max_length=160)
     age: str | None = Field(default=None, min_length=1, max_length=80)
+    height: str | None = Field(default=None, min_length=1, max_length=80)
     occupation: str | None = Field(default=None, min_length=1, max_length=160)
     personality: list[str] | None = Field(default=None, min_length=1, max_length=5)
     dramatic_function: str | None = Field(default=None, min_length=1, max_length=1000)
@@ -1224,18 +1227,27 @@ class CharacterCandidateGenerateRequest(BaseModel):
     count: int = Field(default=3, ge=1, le=3)
     source_candidate_id: str | None = Field(default=None, min_length=36, max_length=36)
     refinement_note: str | None = Field(default=None, max_length=500)
+    custom_prompt: str | None = Field(default=None, min_length=20, max_length=6000)
     actor: str = Field(default="创作者", min_length=1, max_length=80)
 
     @model_validator(mode="after")
     def validate_refinement(self) -> "CharacterCandidateGenerateRequest":
-        if bool(self.source_candidate_id) != bool(self.refinement_note):
-            raise ValueError("微调生成必须同时提供来源候选和调整说明")
+        instruction_count = int(bool(self.refinement_note)) + int(bool(self.custom_prompt))
+        if bool(self.source_candidate_id) != bool(instruction_count):
+            raise ValueError("基于候选重新生成必须同时提供来源候选和调整说明或自定义提示词")
+        if instruction_count > 1:
+            raise ValueError("调整说明和自定义提示词不能同时提交")
         return self
 
 
 class CharacterCandidateSelectRequest(BaseModel):
     expected_version: int = Field(ge=1)
     candidate_id: str = Field(min_length=36, max_length=36)
+    actor: str = Field(default="创作者", min_length=1, max_length=80)
+
+
+class CharacterCandidateDeleteRequest(BaseModel):
+    expected_version: int = Field(ge=1)
     actor: str = Field(default="创作者", min_length=1, max_length=80)
 
 

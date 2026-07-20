@@ -8,7 +8,6 @@ const RECOVERY_ACTIONS = new Set<JobRecoveryAction>([
   'FALLBACK_EXECUTION',
   'SAVE_INTERMEDIATE',
   'PROVIDE_INPUT',
-  'ESCALATE_HUMAN',
 ])
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -38,7 +37,6 @@ export interface JobRecoveryPlan {
   availableActions: JobRecoveryAction[]
   unreliableOutputs: string[]
   reliabilityNote: string
-  handoffStatus: 'NOT_REQUESTED' | 'REQUESTED'
 }
 
 export function getJobRecoveryPlan(job: Job): JobRecoveryPlan | null {
@@ -66,7 +64,6 @@ export function getJobRecoveryPlan(job: Job): JobRecoveryPlan | null {
       'FALLBACK_EXECUTION',
       'SAVE_INTERMEDIATE',
       'PROVIDE_INPUT',
-      'ESCALATE_HUMAN',
     )
   }
   const failedStep = typeof rawRecovery.failed_step === 'string' && rawRecovery.failed_step
@@ -98,8 +95,5 @@ export function getJobRecoveryPlan(job: Job): JobRecoveryPlan | null {
       : degradedSuccess
         ? '任务通过降级方案完成；继续使用前需要人工复核。'
         : '已完成步骤可以保留，但失败步骤及其下游结果不能视为最终可信结果。',
-    handoffStatus: rawRecovery.handoff_status === 'REQUESTED'
-      ? 'REQUESTED'
-      : 'NOT_REQUESTED',
   }
 }

@@ -111,6 +111,7 @@ function newJob(label: string, entity: string, stage: string): Job {
   return {
     id: `job-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     projectId: PROJECT_ID,
+    projectName: initialAppState.project.name,
     jobType: 'LOCAL_MOCK',
     entityType: 'local',
     entityId: entity,

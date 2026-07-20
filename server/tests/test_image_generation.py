@@ -4,6 +4,10 @@ from dataclasses import replace
 
 import httpx
 import pytest
+from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
 from app.config import get_settings
 from app.db.models import Asset, Job, Take
 from app.db.session import get_engine
@@ -11,12 +15,10 @@ from app.jobs.contracts import JobExecutionContext, JobExecutionError
 from app.jobs.handlers.production import _generate_character_image
 from app.jobs.worker import PersistentJobWorker
 from app.seed import PROJECT_ID, SHOT_IDS
+from app.services.character_image_qc import evaluate_character_image_quality
 from app.services.character_visuals import CHARACTER_CLEAN_FRAME_CONSTRAINT
 from app.services.identity_consistency import evaluate_identity_consistency
 from app.services.image_provider import GeneratedImage, generate_image
-from httpx import AsyncClient
-from sqlalchemy import select
-from sqlalchemy.orm import Session
 
 pytestmark = pytest.mark.anyio
 
@@ -255,6 +257,86 @@ async def test_identity_qc_auto_passes_only_above_threshold() -> None:
     assert result.status == "PASSED"
     assert result.score == 0.93
     assert result.provider == "volcengine-ark"
+
+
+async def test_character_generation_qc_records_four_independent_visual_checks() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["model"] == "doubao-seed-2-0-lite-260215"
+        content = payload["input"][0]["content"]
+        assert [item["type"] for item in content] == ["input_text", "input_image"]
+        return httpx.Response(
+            200,
+            json={
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": json.dumps(
+                                    {
+                                        "watermark": {
+                                            "passed": True,
+                                            "confidence": 0.98,
+                                            "reason": "未发现文字或标记",
+                                        },
+                                        "foreground_occlusion": {
+                                            "passed": False,
+                                            "confidence": 0.91,
+                                            "reason": "前景物体遮挡右手",
+                                        },
+                                        "body_continuity": {
+                                            "passed": True,
+                                            "confidence": 0.95,
+                                            "reason": "身体结构连续",
+                                        },
+                                        "pure_white_background": {
+                                            "passed": False,
+                                            "confidence": 0.89,
+                                            "reason": "背景存在灰色渐变",
+                                        },
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+    settings = replace(
+        get_settings(),
+        ark_api_key="test-key",
+        ark_prompt_model="doubao-seed-2-0-lite-260215",
+    )
+    result = await evaluate_character_image_quality(
+        settings,
+        GeneratedImage(
+            content=b"generated-character",
+            mime="image/png",
+            width=1024,
+            height=1024,
+            model="seedream-test",
+            request_id=None,
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result.status == "FAILED"
+    assert [item.check_type for item in result.checks] == [
+        "WATERMARK_FREE",
+        "FOREGROUND_CLEAR",
+        "BODY_CONTINUITY",
+        "PURE_WHITE_BACKGROUND",
+    ]
+    assert [item.status for item in result.checks] == [
+        "PASSED",
+        "FAILED",
+        "PASSED",
+        "FAILED",
+    ]
 
 
 async def test_shot_generation_job_persists_and_applies_take(

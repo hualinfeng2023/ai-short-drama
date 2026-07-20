@@ -410,6 +410,16 @@ export function SelectControl({
   }, [searchEnabled, visibleOptions])
 
   useLayoutEffect(() => {
+    if (!open) return
+    const menu = menuRef.current
+    if (!menu || typeof menu.showPopover !== 'function') return
+    if (!menu.matches(':popover-open')) menu.showPopover()
+    return () => {
+      if (menu.matches(':popover-open')) menu.hidePopover()
+    }
+  }, [open])
+
+  useLayoutEffect(() => {
     if (open) updateMenuPosition()
   }, [open, updateMenuPosition])
 
@@ -582,6 +592,7 @@ export function SelectControl({
     <div
       className="select-menu"
       data-placement={menuPosition.placement}
+      popover="manual"
       ref={menuRef}
       style={{
         left: menuPosition.left,
@@ -652,7 +663,7 @@ export function SelectControl({
         {searchEnabled ? `${visibleOptions.length} 个选项` : '↑↓ 移动 · Enter 选择 · Esc 关闭'}
       </div>
     </div>,
-    document.body,
+    triggerRef.current?.closest('dialog') ?? document.body,
   ) : null
 
   return (

@@ -104,10 +104,7 @@ export function ProjectsPage() {
 
       <section className="project-library" aria-labelledby="project-library-title">
         <div className="section-heading">
-          <div>
-            <p className="eyebrow">项目库</p>
-            <h2 id="project-library-title">全部项目</h2>
-          </div>
+          <h2 id="project-library-title">全部项目</h2>
           {apiStatus === 'mock_fallback' ? <Button onClick={() => { resetDemo(); notify('已恢复内置演示项目。') }} size="sm" variant="ghost">
             <RotateCcw size={15} /> 恢复演示项目
           </Button> : null}

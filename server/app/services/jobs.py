@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 from sqlalchemy import exists, or_, select, update
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy.orm import Session, aliased, selectinload
 
 from app.db.models import (
     ChangeSet,
@@ -77,7 +77,6 @@ def _failure_details_with_recovery(
     actions = [
         "SAVE_INTERMEDIATE",
         "PROVIDE_INPUT",
-        "ESCALATE_HUMAN",
         "SWITCH_MODEL",
         "FALLBACK_EXECUTION",
     ]
@@ -99,7 +98,6 @@ def _failure_details_with_recovery(
         "reliability_note": (
             "已完成步骤与中间结果可以保留，但失败步骤及其下游结果不能视为最终可信结果。"
         ),
-        "handoff_status": "NOT_REQUESTED",
     }
     return merged
 
@@ -418,14 +416,19 @@ def job_or_404(session: Session, job_id: str) -> Job:
 
 
 def list_jobs(session: Session) -> list[JobRead]:
-    jobs = session.scalars(select(Job).order_by(Job.created_at.desc())).all()
+    jobs = session.scalars(
+        select(Job).options(selectinload(Job.project)).order_by(Job.created_at.desc())
+    ).all()
     return [job_to_read(job) for job in jobs]
 
 
 def list_project_jobs(session: Session, project_id: str) -> list[JobRead]:
     project_or_404(session, project_id)
     jobs = session.scalars(
-        select(Job).where(Job.project_id == project_id).order_by(Job.created_at.desc())
+        select(Job)
+        .options(selectinload(Job.project))
+        .where(Job.project_id == project_id)
+        .order_by(Job.created_at.desc())
     ).all()
     return [job_to_read(job) for job in jobs]
 
@@ -662,25 +665,6 @@ def request_job_recovery(
         session.refresh(job)
         return job_to_read(job)
 
-    if request.action == "ESCALATE_HUMAN":
-        recovery["handoff_status"] = "REQUESTED"
-        recovery["handoff_requested_at"] = now.isoformat()
-        recovery["handoff_note"] = request.note or "请人工复核失败步骤和中间结果"
-        details["recovery"] = recovery
-        job.error_details_json = canonical_json(details)
-        job.stage = "等待人工处理"
-        job.updated_at = now
-        append_event(
-            session,
-            project_id=job.project_id,
-            job_id=job.id,
-            event_type="job.handoff_requested",
-            payload={"job_id": job.id, "status": job.status},
-        )
-        session.commit()
-        session.refresh(job)
-        return job_to_read(job)
-
     failed_part_ids = request.failed_part_ids or _string_list(recovery.get("failed_parts"))
     if request.action == "RETRY_FAILED_PARTS" and not failed_part_ids:
         raise HTTPException(
@@ -703,7 +687,6 @@ def request_job_recovery(
         "model": request.model,
         "strategy": request.strategy,
         "additional_input": request.additional_input,
-        "note": request.note,
         "preserve_intermediate_output": True,
     }
     job.input_json = canonical_json(input_payload)
@@ -1007,7 +990,6 @@ def finish_job_success(
                     if degraded
                     else "任务已从失败点恢复并完成。"
                 ),
-                "handoff_status": "NOT_REQUESTED",
             }
         }
     job.status = "SUCCEEDED"

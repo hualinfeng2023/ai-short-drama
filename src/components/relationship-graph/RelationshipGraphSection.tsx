@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointer
 import {
   Check,
   ChevronDown,
+  CircleAlert,
   Clock3,
   GitCompare,
   List,
@@ -23,7 +24,6 @@ import {
   approveRelationshipGraph,
   analyzeRelationshipRevisionImpact,
   createRelationshipGraphRevision,
-  fetchRelationshipGraphDiff,
   fetchRelationshipGraphValidation,
   generateRelationshipUpbringingSuggestion,
   saveRelationshipGraph,
@@ -34,7 +34,6 @@ import {
   type RelationshipEdgeRecord,
   type FamilyRelationType,
   type RelationshipGraphPayloadRecord,
-  type RelationshipGraphDiff,
   type RelationshipRevisionImpact,
   type RelationshipGraphValidationIssue,
   type RelationshipGraphVersionRecord,
@@ -137,32 +136,6 @@ const SAVE_LABELS = {
   conflict: '版本冲突',
 } as const
 
-const DIFF_FIELD_LABELS: Record<string, string> = {
-  relationship_types: '关系类型',
-  family_kinship: '血缘与成长环境',
-  surface_relationship: '明面关系',
-  true_relationship: '真实关系',
-  source_view: '前者认知',
-  target_view: '后者认知',
-  trust_level: '信任',
-  emotional_temperature: '情感温度',
-  power_balance: '权力平衡',
-  conflict_intensity: '冲突强度',
-  story_function: '剧情功能',
-  secret: '关系秘密',
-  is_core: '核心关系',
-  locked: '核心锁定',
-  sequence: '变化顺序',
-  scene_ordinal: '关联场景',
-  trigger_type: '触发类型',
-  trigger_ref: '触发引用',
-  before_state: '变化前状态',
-  after_state: '变化后状态',
-  evidence: '触发证据',
-  emotional_consequence: '情绪后果',
-  audience_visibility: '观众可见范围',
-}
-
 const VALIDATION_CODE_LABELS: Record<string, string> = {
   INVALID_CHARACTER_REFERENCE: '角色引用无效',
   CORE_CHARACTER_ISOLATED: '核心角色孤立',
@@ -190,6 +163,15 @@ function wrapRelationshipLabel(label: string, charactersPerLine = 16): string[] 
     lines.push(characters.slice(index, index + charactersPerLine).join(''))
   }
   return lines
+}
+
+function relationshipLabelWidth(lines: string[]): number {
+  const widestLine = Math.max(...lines.map((line) => Array.from(line).reduce((width, character) => {
+    if (/[\u2e80-\u9fff\uf900-\ufaff]/.test(character)) return width + 11
+    if (/[A-Za-z0-9]/.test(character)) return width + 6.5
+    return width + 4.5
+  }, 0)))
+  return clamp(Math.ceil(widestLine + 28), 144, 214)
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {
@@ -493,6 +475,7 @@ function RelationshipGraphCanvas({
           const midpointX = (source.x + target.x) / 2
           const midpointY = (source.y + target.y) / 2
           const labelLines = wrapRelationshipLabel(edgeLabel(edge, layer))
+          const labelWidth = relationshipLabelWidth(labelLines)
           const labelHeight = 16 + labelLines.length * 18
           const labelTop = midpointY - labelHeight / 2
           return <g
@@ -515,7 +498,7 @@ function RelationshipGraphCanvas({
               y1={source.y}
               y2={target.y}
             />
-            <rect height={labelHeight} rx="8" width="230" x={midpointX - 115} y={labelTop} />
+            <rect height={labelHeight} rx="8" width={labelWidth} x={midpointX - labelWidth / 2} y={labelTop} />
             <text textAnchor="middle" x={midpointX} y={labelTop + 20}>
               {labelLines.map((line, index) => <tspan dy={index === 0 ? 0 : 18} key={`${edge.relationshipKey}-${index}`} x={midpointX}>{line}</tspan>)}
             </text>
@@ -580,8 +563,7 @@ export function RelationshipGraphSection({
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [validationIssues, setValidationIssues] = useState(selectedGraph.validationIssues)
-  const [dialog, setDialog] = useState<'diff' | 'revision' | null>(null)
-  const [diff, setDiff] = useState<RelationshipGraphDiff | null>(null)
+  const [dialog, setDialog] = useState<'approval' | 'revision' | null>(null)
   const [revisionImpact, setRevisionImpact] = useState<RelationshipRevisionImpact | null>(null)
   const [revisionIntent, setRevisionIntent] = useState('调整这段关系，并同步修订受影响的剧情与场景。')
   const [revisionKeys, setRevisionKeys] = useState<string[]>(
@@ -592,7 +574,9 @@ export function RelationshipGraphSection({
   const [upbringingSuggestionError, setUpbringingSuggestionError] = useState<string | null>(null)
   const [newBeatEpisodeOrdinal, setNewBeatEpisodeOrdinal] = useState(1)
   const [pendingDeleteBeatOrdinal, setPendingDeleteBeatOrdinal] = useState<number | null>(null)
+  const [relationshipHelpOpen, setRelationshipHelpOpen] = useState(false)
   const upbringingSuggestionRequestRef = useRef(0)
+  const relationshipHelpRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     setDraftState((current) => syncRelationshipDraftState(current, selectedGraph))
@@ -605,6 +589,24 @@ export function RelationshipGraphSection({
     window.addEventListener('beforeunload', warn)
     return () => window.removeEventListener('beforeunload', warn)
   }, [draftState.dirty])
+
+  useEffect(() => {
+    if (!relationshipHelpOpen) return
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (!relationshipHelpRef.current?.contains(event.target as Node)) {
+        setRelationshipHelpOpen(false)
+      }
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setRelationshipHelpOpen(false)
+    }
+    document.addEventListener('pointerdown', closeOnOutsideClick)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsideClick)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [relationshipHelpOpen])
 
   useEffect(() => {
     if (!focusTarget) return
@@ -737,19 +739,6 @@ export function RelationshipGraphSection({
     onGraphChanged(graph)
   }
 
-  function comparisonBase(): RelationshipGraphVersionRecord | undefined {
-    return versions.find((item) => item.id === selectedGraph.parentVersionId)
-      ?? versions.filter((item) => item.version < selectedGraph.version).sort((a, b) => b.version - a.version)[0]
-  }
-
-  async function openDiff() {
-    const base = comparisonBase()
-    if (!base) return
-    const result = await fetchRelationshipGraphDiff(base.id, selectedGraph.id)
-    setDiff(result)
-    setDialog('diff')
-  }
-
   function openRevision() {
     setRevisionKeys(selectedEdge ? [selectedEdge.relationshipKey] : selectedGraph.graph.edges.map((edge) => edge.relationshipKey))
     setRevisionIntent('调整这段关系，并同步修订受影响的剧情与场景。')
@@ -767,6 +756,20 @@ export function RelationshipGraphSection({
     const graph = await createRelationshipGraphRevision(revisionImpact)
     setDialog(null)
     applyRemoteGraph(graph, '关系修改版已创建。当前剧本已标记为过期，请完成修改并重新确认关系。')
+  }
+
+  async function confirmRelationshipApproval() {
+    const result = await approveRelationshipGraph(
+      selectedGraph.id,
+      selectedGraph.projectLockVersion,
+      selectedGraph.lockVersion,
+    )
+    setDialog(null)
+    applyRemoteGraph(result.graph, '关系基线已批准，角色视觉档案已准备。')
+    onCharacterVisualsReady(
+      result.characterVisuals.route,
+      result.characterVisuals.characterCount,
+    )
   }
 
   async function run(action: () => Promise<void>) {
@@ -883,8 +886,28 @@ export function RelationshipGraphSection({
   return (
     <section className="story-section relationship-editor" aria-labelledby="relationship-editor-title" id="relationship-review">
       <div className="relationship-editor__heading">
-        <div><p className="eyebrow">关系基线确认</p><h2 id="relationship-editor-title">角色关系设计</h2><p>先确认人物之间的明面关系、真实关系与变化节拍，再让系统据此生成分集大纲和剧本。</p></div>
-        <div className="relationship-editor__version"><label>关系版本<SelectControl aria-label="选择关系版本" onChange={(event) => switchVersion(event.target.value)} value={selectedGraph.id}>{versions.map((version) => <option key={version.id} value={version.id}>第 {version.version} 版 · {version.status === 'DRAFT' ? '草稿' : version.status === 'READY_FOR_REVIEW' ? '待审核' : version.status === 'APPROVED' ? '已批准' : '历史版本'}</option>)}</SelectControl></label><StatusBadge status={selectedGraph.status} />{comparisonBase() ? <Button disabled={busy || draftState.dirty} onClick={() => void run(openDiff)} size="sm" variant="secondary"><GitCompare size={15} />比较版本</Button> : null}</div>
+        <div>
+          <p className="eyebrow">关系基线确认</p>
+          <div className="relationship-editor__title-row">
+            <h2 id="relationship-editor-title">角色关系设计</h2>
+            <div className="relationship-editor__help" ref={relationshipHelpRef}>
+              <button
+                aria-controls="relationship-editor-help"
+                aria-expanded={relationshipHelpOpen}
+                aria-label="查看角色关系设计说明"
+                onClick={() => setRelationshipHelpOpen((current) => !current)}
+                type="button"
+              >
+                <CircleAlert size={17} />
+              </button>
+              {relationshipHelpOpen ? <div id="relationship-editor-help" role="note">
+                <strong>为什么要先确认关系？</strong>
+                <p>先确认人物之间的明面关系、真实关系与变化节拍，再让系统据此生成分集大纲和剧本。</p>
+              </div> : null}
+            </div>
+          </div>
+        </div>
+        <div className="relationship-editor__version"><label>关系版本<SelectControl aria-label="选择关系版本" onChange={(event) => switchVersion(event.target.value)} value={selectedGraph.id}>{versions.map((version) => <option key={version.id} value={version.id}>第 {version.version} 版 · {version.status === 'DRAFT' ? '草稿' : version.status === 'READY_FOR_REVIEW' ? '待审核' : version.status === 'APPROVED' ? '已批准' : '历史版本'}</option>)}</SelectControl></label><StatusBadge status={selectedGraph.status} /></div>
       </div>
 
       {!selectedGraph.editability.semanticEditable ? <div className="relationship-editor__readonly"><LockKeyhole size={17} /><div><strong>当前为只读状态</strong><p>{selectedGraph.editability.reasonMessage ?? '当前项目阶段不开放关系语义编辑。'}</p></div></div> : null}
@@ -1044,10 +1067,36 @@ export function RelationshipGraphSection({
 
       <section className="relationship-validation" aria-labelledby="relationship-validation-title"><header><div><h3 id="relationship-validation-title">关系网检查</h3><p>阻断问题必须修正后才能确认关系并生成剧本。</p></div><span>{validationIssues.filter((issue) => issue.severity === 'BLOCKER').length} 个阻断 · {validationIssues.filter((issue) => issue.severity === 'WARNING').length} 个提醒</span></header>{validationIssues.length ? <ul>{validationIssues.map((issue) => <li data-severity={issue.severity.toLowerCase()} key={`${issue.code}-${issue.relationshipKey ?? issue.characterKey ?? ''}`}><button onClick={() => selectIssue(issue)} type="button"><strong>{validationTone(issue.severity)}</strong><span>{issue.message}</span><small title={issue.code}>{VALIDATION_CODE_LABELS[issue.code] ?? '关系规则'}</small></button></li>)}</ul> : <div className="relationship-validation__empty"><Check size={16} />当前检查未发现问题</div>}</section>
 
-      <footer className="relationship-editor__actions"><div><strong>{selectedGraph.status === 'DRAFT' ? '草稿可直接确认，也可以先提交审核。' : selectedGraph.status === 'READY_FOR_REVIEW' ? '当前版本已提交审核，可批准或撤回。' : '当前版本仅供查看。'}</strong><p>批准后会自动准备结构化角色视觉档案；不会后台生图，也不会自动采用任何候选。</p></div><div>{selectedGraph.editability.canCreateRevision ? <Button disabled={busy || draftState.dirty} onClick={openRevision} variant="secondary"><GitCompare size={16} />创建修改版</Button> : null}{selectedGraph.status === 'DRAFT' && selectedGraph.editability.canSubmit ? <Button disabled={busy || draftState.dirty} onClick={() => void run(async () => { const graph = await submitRelationshipGraph(selectedGraph); applyRemoteGraph(graph, '关系网已提交审核。') })} variant="secondary">提交审核</Button> : null}{selectedGraph.status === 'READY_FOR_REVIEW' ? <Button disabled={busy || draftState.dirty} onClick={() => void run(async () => { const graph = await withdrawRelationshipGraph(selectedGraph); applyRemoteGraph(graph, '已撤回审核，可继续编辑。') })} variant="secondary">撤回审核</Button> : null}<Button disabled={busy || draftState.dirty || !selectedGraph.editability.canApprove || validationIssues.some((issue) => issue.severity === 'BLOCKER')} onClick={() => void run(async () => { if (!window.confirm('确认当前角色文字设定与关系基线，并进入角色形象步骤？')) return; const result = await approveRelationshipGraph(selectedGraph.id, selectedGraph.projectLockVersion, selectedGraph.lockVersion); applyRemoteGraph(result.graph, '关系基线已批准，角色视觉档案已准备。'); onCharacterVisualsReady(result.characterVisuals.route, result.characterVisuals.characterCount) })}><Check size={16} />确认关系并准备角色形象</Button></div></footer>
+      <footer className="relationship-editor__actions"><div><strong>{selectedGraph.status === 'DRAFT' ? '草稿可直接确认，也可以先提交审核。' : selectedGraph.status === 'READY_FOR_REVIEW' ? '当前版本已提交审核，可批准或撤回。' : '当前版本仅供查看。'}</strong><p>批准后会自动准备结构化角色视觉档案；不会后台生图，也不会自动采用任何候选。</p></div><div>{selectedGraph.editability.canCreateRevision ? <Button disabled={busy || draftState.dirty} onClick={openRevision} variant="secondary"><GitCompare size={16} />创建修改版</Button> : null}{selectedGraph.status === 'DRAFT' && selectedGraph.editability.canSubmit ? <Button disabled={busy || draftState.dirty} onClick={() => void run(async () => { const graph = await submitRelationshipGraph(selectedGraph); applyRemoteGraph(graph, '关系网已提交审核。') })} variant="secondary">提交审核</Button> : null}{selectedGraph.status === 'READY_FOR_REVIEW' ? <Button disabled={busy || draftState.dirty} onClick={() => void run(async () => { const graph = await withdrawRelationshipGraph(selectedGraph); applyRemoteGraph(graph, '已撤回审核，可继续编辑。') })} variant="secondary">撤回审核</Button> : null}<Button disabled={busy || draftState.dirty || !selectedGraph.editability.canApprove || validationIssues.some((issue) => issue.severity === 'BLOCKER')} onClick={() => setDialog('approval')}><Check size={16} />确认关系并准备角色形象</Button></div></footer>
 
-      <Modal className="modal--relationship-change" description={diff ? `第 ${diff.fromVersion} 版 → 第 ${diff.toVersion} 版` : undefined} footer={<Button onClick={() => setDialog(null)}>关闭</Button>} onClose={() => setDialog(null)} open={dialog === 'diff'} title="关系版本比较">
-        {diff?.changes.length ? <div className="relationship-diff"><div className="relationship-diff__summary"><strong>最高影响等级 {diff.highestPriority}</strong><span>P0 {diff.counts.P0} · P1 {diff.counts.P1} · P2 {diff.counts.P2} · P3 {diff.counts.P3} · P4 {diff.counts.P4}</span></div><ul>{diff.changes.map((change, index) => <li key={`${change.category}-${change.relationshipKey}-${change.beatOrdinal ?? index}`}><span className={`relationship-impact-level is-${change.priority.toLowerCase()}`}>{change.priority}</span><div><strong>{change.category.startsWith('BEAT_') ? '关系变化事件' : change.relationshipKey}</strong><p>{change.summary}</p>{change.fields.length ? <small>{change.fields.map((field) => DIFF_FIELD_LABELS[field] ?? field).join('、')}</small> : null}</div></li>)}</ul></div> : <div className="relationship-dialog-empty"><Check size={18} />两个版本的创作语义完全一致</div>}
+      <Modal
+        className="modal--relationship-approval"
+        description="确认后系统会准备角色视觉档案，并进入角色形象步骤。"
+        footer={<>
+          <Button disabled={busy} onClick={() => setDialog(null)} variant="secondary">取消</Button>
+          <Button disabled={busy} onClick={() => void run(confirmRelationshipApproval)}>
+            {busy ? <LoaderCircle className="spin" size={16} /> : <ShieldCheck size={16} />}
+            {busy ? '正在确认…' : '确认并进入角色形象'}
+          </Button>
+        </>}
+        onClose={() => { if (!busy) setDialog(null) }}
+        open={dialog === 'approval'}
+        title="确认关系基线？"
+      >
+        <div className="relationship-approval-confirmation">
+          <div className="relationship-approval-confirmation__lead">
+            <span><ShieldCheck size={23} /></span>
+            <div>
+              <strong>当前版本将成为后续制作依据</strong>
+              <p>角色文字设定与人物关系会共同锁定为本次角色形象生成的身份基线。</p>
+            </div>
+          </div>
+          <ul>
+            <li><Sparkles size={17} /><div><strong>自动准备视觉档案</strong><p>系统会为 {characters.length} 位角色整理年龄、族裔、身高、外貌与造型约束。</p></div></li>
+            <li><LockKeyhole size={17} /><div><strong>不会自动生成或采用图片</strong><p>进入下一步后，仍由你主动生成候选、人工比较并确认角色基准。</p></div></li>
+          </ul>
+          <p className="relationship-approval-confirmation__note">后续仍可创建修改版；已批准版本会保留，不会被直接覆盖。</p>
+        </div>
       </Modal>
 
       <Modal className="modal--relationship-change" description="系统会先计算影响范围；确认后才复制为可编辑草稿。" footer={<><Button disabled={busy} onClick={() => setDialog(null)} variant="secondary">取消</Button>{revisionImpact ? <Button disabled={busy} onClick={() => void run(confirmRevision)}>确认影响并创建修改版</Button> : <Button disabled={busy || revisionKeys.length === 0 || revisionIntent.trim().length < 6} onClick={() => void run(analyzeRevision)}>查看影响范围</Button>}</>} onClose={() => setDialog(null)} open={dialog === 'revision'} title="创建关系修改版">

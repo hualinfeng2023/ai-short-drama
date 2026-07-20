@@ -1,12 +1,13 @@
 from io import BytesIO
 from types import SimpleNamespace
 
+from PIL import Image, ImageDraw
+
 from app.services.storyboards_v2 import (
     _line_character_keys,
     _scene_character_keys,
     mask_character_reference_watermark,
 )
-from PIL import Image, ImageDraw
 
 
 def _characters() -> dict[str, SimpleNamespace]:
@@ -79,3 +80,12 @@ def test_character_reference_mask_leaves_unsupported_content_unchanged() -> None
     content = b"not-an-image"
 
     assert mask_character_reference_watermark(content, "image/gif") == content
+
+
+def test_character_reference_without_watermark_is_not_reencoded_or_masked() -> None:
+    source = Image.new("RGB", (200, 120), (245, 245, 245))
+    encoded = BytesIO()
+    source.save(encoded, format="PNG")
+    content = encoded.getvalue()
+
+    assert mask_character_reference_watermark(content, "image/png") == content

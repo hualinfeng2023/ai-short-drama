@@ -236,6 +236,7 @@ interface ApiIdentityReviewRecord {
 interface ApiJob {
   id: string
   project_id: string
+  project_name: string
   job_type: string
   entity_type: string
   entity_id: string
@@ -530,6 +531,12 @@ export interface CharacterVisualRecord {
   visualBrief: string
   status: string
   lockVersion: number
+  sourceStale: boolean
+  pendingSourceChanges?: {
+    storyBibleVersion: number
+    storyBibleStatus: string
+    changedFields: string[]
+  }
   lockedCandidateId?: string
   currentProfileVersionId?: string
   lockedIdentityVersionId?: string
@@ -557,11 +564,14 @@ export interface CharacterVisualRecord {
     status: string
     reviewStatus: string
     selected: boolean
+    deletable: boolean
+    deleteBlockReason?: string
     variantKey?: string
     variantLabel?: string
     variantDescription?: string
     refinementNote?: string
     sourceCandidateId?: string
+    generationPrompt: string
   }>
   identities: Array<{
     id: string
@@ -1101,6 +1111,7 @@ function mapJob(job: ApiJob): Job {
   return {
     id: job.id,
     projectId: job.project_id,
+    projectName: job.project_name,
     jobType: job.job_type,
     entityType: job.entity_type,
     entityId: job.entity_id,
@@ -2981,7 +2992,10 @@ export async function createRelationshipGraphRevision(
 export interface CharacterRevisionChanges {
   name?: string
   role?: string
+  gender?: 'male' | 'female' | 'nonbinary' | 'unspecified'
+  ethnicity?: string
   age?: string
+  height?: string
   occupation?: string
   personality?: string[]
   dramatic_function?: string
@@ -3334,6 +3348,14 @@ export async function fetchCharacterVisuals(
         visualBrief: String(raw.visual_brief),
         status: String(raw.status),
         lockVersion: Number(raw.lock_version),
+        sourceStale: Boolean(raw.source_stale),
+        ...(isRecord(raw.pending_source_changes) ? {
+          pendingSourceChanges: {
+            storyBibleVersion: Number(raw.pending_source_changes.story_bible_version),
+            storyBibleStatus: String(raw.pending_source_changes.story_bible_status),
+            changedFields: (raw.pending_source_changes.changed_fields ?? []) as string[],
+          },
+        } : {}),
         ...(raw.locked_candidate_id == null
           ? {}
           : { lockedCandidateId: String(raw.locked_candidate_id) }),
@@ -3379,6 +3401,10 @@ export async function fetchCharacterVisuals(
           status: String(item.status),
           reviewStatus: String(item.review_status),
           selected: Boolean(item.selected),
+          deletable: Boolean(item.deletable),
+          ...(item.delete_block_reason == null
+            ? {}
+            : { deleteBlockReason: String(item.delete_block_reason) }),
           ...(item.variant_key == null ? {} : { variantKey: String(item.variant_key) }),
           ...(item.variant_label == null ? {} : { variantLabel: String(item.variant_label) }),
           ...(item.variant_description == null
@@ -3390,6 +3416,7 @@ export async function fetchCharacterVisuals(
           ...(item.source_candidate_id == null
             ? {}
             : { sourceCandidateId: String(item.source_candidate_id) }),
+          generationPrompt: String(item.generation_prompt ?? ''),
         })),
         identities: identities.map((item) => ({
           id: String(item.id),
@@ -3487,7 +3514,12 @@ export async function generateCharacterVisualCandidates(
   characterId: string,
   expectedVersion: number,
   profileVersionId: string,
-  refinement?: { sourceCandidateId: string; note: string },
+  options?: {
+    count?: 1 | 2 | 3
+    sourceCandidateId?: string
+    note?: string
+    customPrompt?: string
+  },
 ) {
   return requestJson<{ batch: Record<string, unknown>; jobs: ApiJob[] }>(
     `/api/v1/projects/${projectId}/characters/${characterId}/visual-candidates`,
@@ -3497,13 +3529,43 @@ export async function generateCharacterVisualCandidates(
       body: JSON.stringify({
         expected_version: expectedVersion,
         profile_version_id: profileVersionId,
-        count: 3,
-        ...(refinement
+        count: options?.count ?? 3,
+        ...(options?.sourceCandidateId && options.note
           ? {
-              source_candidate_id: refinement.sourceCandidateId,
-              refinement_note: refinement.note,
+              source_candidate_id: options.sourceCandidateId,
+              refinement_note: options.note,
             }
           : {}),
+        ...(options?.sourceCandidateId && options.customPrompt
+          ? {
+              source_candidate_id: options.sourceCandidateId,
+              custom_prompt: options.customPrompt,
+            }
+          : {}),
+        actor: '创作者',
+      }),
+    },
+  )
+}
+
+export async function deleteCharacterVisualCandidate(
+  projectId: string,
+  characterId: string,
+  candidateId: string,
+  expectedVersion: number,
+) {
+  return requestJson<{
+    character_id: string
+    candidate_id: string
+    deleted: boolean
+    lock_version: number
+  }>(
+    `/api/v1/projects/${projectId}/characters/${characterId}/visual-candidates/${candidateId}`,
+    {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        expected_version: expectedVersion,
         actor: '创作者',
       }),
     },
@@ -4329,7 +4391,6 @@ export async function recoverPersistedJob(
       model: request.model ?? null,
       strategy: request.strategy ?? null,
       additional_input: request.additionalInput ?? null,
-      note: request.note ?? null,
     }),
   })
   return mapJob(job)

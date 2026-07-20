@@ -1,7 +1,12 @@
+import json
+from types import SimpleNamespace
+
 from app.services.character_visuals import (
     LEGACY_PERSONALITY_VISUALIZATION,
+    _entity_kind,
     _enrich_legacy_personality_visualization,
     _visualize_personality,
+    assemble_character_prompt,
 )
 
 
@@ -56,3 +61,46 @@ def test_legacy_visualization_is_enriched_without_overwriting_manual_fields() ->
     assert enriched["expression"] == "创作者手动确认的平静表情"
     assert enriched["gaze"] == "与人对视短暂，确认安全后才停留；谈到敏感往事时会移开目光"
     assert enriched["posture"] == "肩背略收，身体保持可退让的余地"
+
+
+def test_digital_entity_uses_non_human_visual_prompt() -> None:
+    assert _entity_kind(
+        {
+            "occupation": "Autonomous General AI System",
+            "story_identity": "通过屏幕与主角对话",
+        },
+        {"identifying_features": "clean cold blue interface, no physical body"},
+    ) == "DIGITAL_ENTITY"
+
+    profile = SimpleNamespace(
+        identity_fields_json=json.dumps(
+            {
+                "occupation": "Autonomous General AI System",
+                "story_identity": "核心支持角色",
+                "age": "3 years of operation",
+                "gender_expression": "不适用",
+                "region": "不适用",
+            }
+        ),
+        appearance_fields_json=json.dumps(
+            {
+                "identifying_features": "clean cold blue interface, no physical body",
+                "height": "不适用",
+                "face_shape": "自然骨相",
+            }
+        ),
+        personality_visualization_json="{}",
+        styling_fields_json=json.dumps({"colors": "冷蓝色"}),
+        project_style_json=json.dumps({"realism": "写实科幻"}),
+        negative_constraints_json="[]",
+        recommended_directions_json="[]",
+        selected_direction=None,
+    )
+
+    prompt = assemble_character_prompt(profile)["prompt"]
+
+    assert "非人类数字实体视觉方案" in prompt
+    assert "禁止生成人类脸孔、人体、服装或真人选角照" in prompt
+    assert "单人角色选角照" not in prompt
+    assert "face_shape" not in prompt
+    assert "gender_expression" not in prompt

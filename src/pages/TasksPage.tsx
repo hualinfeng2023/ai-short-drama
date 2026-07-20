@@ -35,7 +35,6 @@ const eventTypes = [
   'job.succeeded',
   'job.recovery_requested',
   'job.intermediate_saved',
-  'job.handoff_requested',
   'proposal.ready',
   'story.approved',
   'characters.candidates_ready',
@@ -72,15 +71,10 @@ function createdLabel(value: string) {
     })
 }
 
-function taskSourceLabel(job: Job) {
-  const source = job.entity.split(':', 1)[0]
-  const labels: Record<string, string> = {
-    brief_version: '项目简报',
-    proposal_version: '已确认故事方向',
-    shot: '镜头任务',
-    story_version: '故事与剧本',
-  }
-  return labels[source] ?? '生成任务'
+function taskDisplayLabel(job: Job) {
+  const label = localizeDisplayText(job.label)
+  const projectPrefix = `${localizeDisplayText(job.projectName)} · `
+  return label.startsWith(projectPrefix) ? label.slice(projectPrefix.length) : label
 }
 
 export function TasksPage() {
@@ -219,8 +213,7 @@ export function TasksPage() {
         FALLBACK_EXECUTION: '任务将采用降级方案执行，完成后仍需人工复核。',
         SAVE_INTERMEDIATE: '中间结果已经保存。',
         PROVIDE_INPUT: '补充信息已保存，任务将从失败处继续。',
-        ESCALATE_HUMAN: '任务已经转入人工处理队列。',
-      }[action], action === 'ESCALATE_HUMAN' || action === 'FALLBACK_EXECUTION' ? 'info' : 'success')
+      }[action], action === 'FALLBACK_EXECUTION' ? 'info' : 'success')
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '任务恢复失败')
     } finally {
@@ -245,10 +238,10 @@ export function TasksPage() {
     <Toolbar className="task-toolbar" label="任务筛选"><TabList aria-label="按状态筛选"><Filter size={16} />{(['ALL', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED'] as const).map((item) => <Tab className={filter === item ? 'active' : ''} key={item} onClick={() => setFilter(item)} selected={filter === item}>{item === 'ALL' ? '全部状态' : item === 'RUNNING' ? '运行中' : item === 'SUCCEEDED' ? '已完成' : item === 'FAILED' ? '失败' : '已取消'}</Tab>)}</TabList><span>{filtered.length} 个任务 · {projectId ? '当前项目' : '所有项目'}</span></Toolbar>
     {error ? <div className="brief-save-message brief-save-message--error" role="alert">{error}<Button onClick={refresh} size="sm" variant="ghost"><RotateCcw size={14} />重试读取</Button></div> : null}
     {loading ? <div className="brief-page-state"><LoaderCircle className="spin" size={20} />正在读取持久化任务…</div> : null}
-    <section className="task-list">
+    <section className={`task-list${projectId ? ' task-list--project-scoped' : ''}`}>
       <div className="task-list__header" aria-hidden="true">
-        <span>任务</span><span>来源</span><span>创建时间</span><span>任务 ID</span>
-        <span>当前步骤</span><span>状态</span><span>用时</span><span />
+        <span>任务</span>{projectId ? null : <span>项目</span>}<span>创建时间</span><span>任务 ID</span>
+        <span>任务状态</span><span>用时</span><span />
       </div>
       {filtered.map((job) => {
       const active = ACTIVE_JOB_STATUSES.has(job.status)
@@ -262,17 +255,20 @@ export function TasksPage() {
         ? ` · 错误码：${job.errorCode}`
         : ''
       return <article data-active={active || undefined} data-focused={focusedJobType === job.jobType || undefined} key={job.id}>
-        <div className="task-list__lead"><span className={`activity-dot activity-dot--${job.status.toLowerCase()}`} /><div><strong>{localizeDisplayText(job.label)}</strong></div></div>
-        <span className="task-list__source" title={projectId ? taskSourceLabel(job) : `${taskSourceLabel(job)} · 项目 ${job.projectId}`}>{taskSourceLabel(job)}{projectId ? '' : ` · ${job.projectId.slice(0, 8)}`}</span>
+        <div className="task-list__lead"><span className={`activity-dot activity-dot--${job.status.toLowerCase()}`} /><div><strong>{taskDisplayLabel(job)}</strong></div></div>
+        {projectId ? null : <Link className="task-list__project" title={`打开项目：${job.projectName}`} to={`/projects/${job.projectId}`}>{job.projectName}</Link>}
         <span className="task-list__created">{createdLabel(job.createdAt)}</span>
         <code className="task-list__id" title={job.id}>{job.id.slice(0, 8)}</code>
-        <div className="task-list__stage">
-          <strong title={localizeDisplayText(job.stage)}>{localizeDisplayText(job.stage)}</strong>
-          {active ? <ProgressBar value={job.progress} /> : job.status === 'SUCCEEDED' ? null : <small>{taskDetail}{visibleErrorCode}</small>}
-        </div>
-        <div className="task-list__status">
-          {active ? <span className="task-list__stage-progress">{Math.round(job.progress)}%</span> : null}
-          <StatusBadge status={job.status} />
+        <div className="task-list__state">
+          <div className="task-list__state-summary">
+            <StatusBadge status={job.status} />
+            {active ? <span className="task-list__stage-progress">{Math.round(job.progress)}%</span> : null}
+          </div>
+          {job.status === 'FAILED' ? <small>{taskDetail}{visibleErrorCode}</small> : null}
+          {active ? <>
+            <small title={localizeDisplayText(job.stage)}>{localizeDisplayText(job.stage)}</small>
+            <ProgressBar value={job.progress} />
+          </> : null}
         </div>
         <span className="task-list__timing"><span><Clock3 size={14} />{formatElapsedTime(elapsedSeconds)}</span></span>
         <div className="task-list__actions">{active ? <Button disabled={actingJobId === job.id} onClick={() => void cancel(job.id)} size="sm" variant="ghost">{actingJobId === job.id ? <LoaderCircle className="spin" size={15} /> : <Ban size={15} />}取消</Button> : null}{failedGuidance?.secondaryCta ? <Link className="button button--secondary button--sm task-list__cta" to={failedGuidance.secondaryCta.href}>{failedGuidance.secondaryCta.label}<ArrowRight size={14} /></Link> : null}{completedCta ? <Link className="button button--secondary button--sm task-list__cta" to={completedCta.href}>{completedCta.label}<ArrowRight size={14} /></Link> : null}</div>

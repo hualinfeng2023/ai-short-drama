@@ -292,8 +292,10 @@ class BibleCharacter(BaseModel):
     key: str
     name: str
     role: str
-    gender: Literal["male", "female", "unspecified"] = "unspecified"
+    gender: Literal["male", "female", "nonbinary", "unspecified"] = "unspecified"
+    ethnicity: str = "unspecified"
     age: str
+    height: str = "未指定"
     occupation: str
     personality: list[str] = Field(min_length=1, max_length=5)
     dramatic_function: str
