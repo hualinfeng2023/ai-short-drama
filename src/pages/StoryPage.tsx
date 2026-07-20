@@ -54,9 +54,11 @@ import {
   type ScriptExcerptRewriteAction,
 } from '../api/client'
 import { RelationshipGraphSection, type RelationshipCharacter } from '../components/relationship-graph/RelationshipGraphSection'
-import { Button, Modal, PageHeader, SelectControl, StatusBadge } from '../components/ui'
+import { ImpactConfirmModal } from '../components/ConfirmModal'
+import { Button, Modal, PageHeader, SelectControl, StatusBadge, getStatusLabel } from '../components/ui'
 import { ServiceRequiredState } from '../components/ServiceRequiredState'
 import { useStudio } from '../store/StudioContext'
+import { useToast } from '../store/ToastContext'
 import type { BriefVersionRecord, DirectorProposal, NarrativeTargeting, ProjectRecord } from '../types'
 import { directionKeyLabel, directionKeyTurns, isQuestionStyleHook } from '../utils/storyDirection'
 import { localizeDisplayText } from '../utils/localizeDisplayText'
@@ -443,6 +445,7 @@ export function StoryPage() {
   const { projectId } = useParams()
   const navigate = useNavigate()
   const { refreshProjects } = useStudio()
+  const { notify } = useToast()
   const [project, setProject] = useState<ProjectRecord | null>(null)
   const [workspace, setWorkspace] = useState<StoryWorkspace | null>(null)
   const [brief, setBrief] = useState<BriefVersionRecord | null>(null)
@@ -459,6 +462,7 @@ export function StoryPage() {
   const [characterRevisionError, setCharacterRevisionError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [acting, setActing] = useState(false)
+  const [approveScriptOpen, setApproveScriptOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [scriptSelection, setScriptSelection] = useState<ScriptTextSelection | null>(null)
@@ -579,6 +583,18 @@ export function StoryPage() {
     } finally {
       setActing(false)
     }
+  }
+
+  async function confirmApproveScript() {
+    if (!latestScript || !project) return
+    await runAction(async () => {
+      const job = await approveScriptVersion(latestScript.id, project.lockVersion)
+      await refreshProjects()
+      setApproveScriptOpen(false)
+      notify('首集剧本已批准，角色任务已入队。')
+      setNotice(`剧本已批准，角色任务已入队：${job.stage}`)
+      navigate(`/tasks?project=${project.id}`)
+    })
   }
 
   function captureScriptSelection(
@@ -1000,6 +1016,15 @@ export function StoryPage() {
 
       <section className="story-section">
         <div className="section-heading"><div><p className="eyebrow">{directionSelectionOpen ? '方向审核' : '方向基线'}</p><h2>{directionSelectionOpen ? mergeMode ? '选择要合并的故事方向' : '选择一个故事方向' : '已确认的故事方向'}</h2><p>{directionSelectionOpen ? mergeMode ? '至少选择两个方向，系统会保留各自优势并生成一个新的融合版本。' : '先比较最影响决策的差异，需要时再展开完整方案。确认后先生成可审核的故事结构与角色关系。' : '该方向已作为故事设定与角色关系的创作基线，当前阶段不再重复展示其他候选方向。'}</p></div>{directions.length === 0 ? <Button disabled={acting || project.status !== 'DRAFT'} onClick={() => void runAction(async () => { const job = await generateStoryDirections(project.id, project.lockVersion, crypto.randomUUID()); setNotice(`任务已入队：${job.stage}`); navigate(`/tasks?project=${project.id}`) })}><BookOpenCheck size={16} />生成 3 个方向</Button> : null}</div>
+        {directions.length === 0 ? <div className="story-direction-empty" role="status">
+          <p>还没有故事方向。完成以下步骤后即可开始生成：</p>
+          <ul className="story-prerequisite-list">
+            <li className={brief ? 'is-done' : 'is-pending'}>{brief ? <Check size={15} /> : <AlertTriangle size={15} />}<span>项目简报已保存并作为评审依据</span></li>
+            <li className={project.status === 'DRAFT' ? 'is-done' : 'is-pending'}>{project.status === 'DRAFT' ? <Check size={15} /> : <AlertTriangle size={15} />}<span>项目处于草稿状态（当前：{getStatusLabel(project.status)}）</span></li>
+            <li className={project.status !== 'PROPOSAL_RUNNING' ? 'is-done' : 'is-pending'}>{project.status !== 'PROPOSAL_RUNNING' ? <Check size={15} /> : <LoaderCircle className="spin" size={15} />}<span>{project.status === 'PROPOSAL_RUNNING' ? '故事方向正在生成中' : '当前没有进行中的方向任务'}</span></li>
+          </ul>
+          {project.status === 'PROPOSAL_RUNNING' ? <Link className="button button--secondary button--md" to={`/tasks?project=${project.id}`}>查看生成任务</Link> : project.status !== 'DRAFT' ? <Link className="button button--secondary button--md" to={`/projects/${project.id}`}>返回项目简报</Link> : !brief ? <Link className="button button--secondary button--md" to={`/projects/${project.id}`}>先完善项目简报</Link> : null}
+        </div> : null}
         {directionSelectionOpen && mergeMode ? <section className="story-merge-explanation" aria-label="合并方向规则">
           <article><Check size={16} /><div><strong>保留什么</strong><p>保留选中方向的核心冲突、情绪承诺、有效转折和续作动作，不是简单拼接文案。</p></div></article>
           <article><AlertTriangle size={16} /><div><strong>如何处理冲突</strong><p>以 Brief 必须满足与必须避免为最高优先级，再统一人物动机、时间线和因果链；无法兼容的内容会明确取舍。</p></div></article>
@@ -1313,9 +1338,25 @@ export function StoryPage() {
               )
             })}
           </div>
-          <div className="story-direction-actions"><span>{workspace.relationshipGraphStale ? '关系修改版尚未批准，当前剧本已过期。' : '批准后锁定第 2 阶段，并让全部剧本角色进入前期制作。'}</span><Button disabled={acting || workspace.relationshipGraphStale || latestScript.status !== 'READY_FOR_REVIEW' || project.status !== 'SCRIPT_READY'} onClick={() => void runAction(async () => { const job = await approveScriptVersion(latestScript.id, project.lockVersion); await refreshProjects(); setNotice(`剧本已批准，角色任务已入队：${job.stage}`); navigate(`/tasks?project=${project.id}`) })}><Check size={16} />{workspace.relationshipGraphStale ? '关系更新后才能批准' : '批准首集剧本'}</Button></div>
+          <div className="story-direction-actions"><span>{workspace.relationshipGraphStale ? '关系修改版尚未批准，当前剧本已过期。' : '批准后锁定第 2 阶段，并让全部剧本角色进入前期制作。'}</span><Button disabled={acting || workspace.relationshipGraphStale || latestScript.status !== 'READY_FOR_REVIEW' || project.status !== 'SCRIPT_READY'} onClick={() => setApproveScriptOpen(true)}><Check size={16} />{workspace.relationshipGraphStale ? '关系更新后才能批准' : '批准首集剧本'}</Button></div>
         </section>
       </> : null}
+
+      <ImpactConfirmModal
+        confirmLabel="批准首集剧本"
+        description="批准后剧本版本将冻结，修改需创建修改版。"
+        items={[
+          { icon: <LockKeyhole size={16} />, title: '锁定第 2 阶段', detail: `剧本第 ${latestScript?.version ?? 1} 版将成为后续制作的文本基线。` },
+          { icon: <UsersRound size={16} />, title: '角色进入前期制作', detail: `${characters.length} 位剧本角色将触发视觉档案与前期资产任务。` },
+          { icon: <Sparkles size={16} />, title: '任务入队', detail: '批准后会跳转到任务页，等待角色与前期资产就绪。' },
+        ]}
+        loading={acting}
+        onClose={() => { if (!acting) setApproveScriptOpen(false) }}
+        onConfirm={() => void confirmApproveScript()}
+        open={approveScriptOpen}
+        subtitle="确认剧本、关系基线与角色设定无误后再继续。"
+        title="批准首集剧本？"
+      />
 
       {scriptRewriteMenuOpen && scriptSelection ? createPortal((
         <div

@@ -1116,7 +1116,9 @@ function mapJob(job: ApiJob): Job {
     entityType: job.entity_type,
     entityId: job.entity_id,
     label: job.label,
-    entity: job.entity,
+    entity: typeof job.entity === 'string' && job.entity
+      ? job.entity
+      : `${job.entity_type}:${job.entity_id}`,
     status: job.status,
     progress: job.progress,
     stage: job.stage,

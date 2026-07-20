@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   AlertTriangle,
+  ArrowDown,
   ArrowLeftRight,
+  ArrowUp,
   Check,
+  CheckSquare,
   ChevronDown,
   ChevronRight,
   Clock3,
@@ -15,7 +18,9 @@ import {
   RotateCcw,
   Save,
   ShieldCheck,
+  Square,
   UserRound,
+  X,
 } from 'lucide-react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import {
@@ -24,6 +29,7 @@ import {
   fetchRuntimeConfig,
   type RuntimeConfig,
 } from '../api/client'
+import { ConfirmModal } from '../components/ConfirmModal'
 import { Button, FormField, Modal, ProgressBar, SelectControl, StatusBadge, Tab, TabList, Tabs } from '../components/ui'
 import { useStudio } from '../store/StudioContext'
 import { useToast } from '../store/ToastContext'
@@ -84,6 +90,39 @@ function displayActor(value: string): string {
   return value === 'demo-user' ? '演示用户' : value
 }
 
+function moveSelectedShots(
+  shotIds: string[],
+  selectedIds: string[],
+  direction: 'up' | 'down',
+): string[] {
+  const selected = new Set(selectedIds)
+  const block = shotIds.filter((id) => selected.has(id))
+  if (block.length === 0) return shotIds
+
+  const firstIndex = shotIds.indexOf(block[0])
+  const lastIndex = shotIds.indexOf(block[block.length - 1])
+
+  if (direction === 'up') {
+    if (firstIndex === 0) return shotIds
+    const swapItem = shotIds[firstIndex - 1]
+    return [
+      ...shotIds.slice(0, firstIndex - 1),
+      ...block,
+      swapItem,
+      ...shotIds.slice(lastIndex + 1),
+    ]
+  }
+
+  if (lastIndex >= shotIds.length - 1) return shotIds
+  const swapItem = shotIds[lastIndex + 1]
+  return [
+    ...shotIds.slice(0, firstIndex),
+    swapItem,
+    ...block,
+    ...shotIds.slice(lastIndex + 2),
+  ]
+}
+
 export function ShotWorkspacePage() {
   const { notify } = useToast()
   const { sceneId } = useParams()
@@ -94,6 +133,7 @@ export function ShotWorkspacePage() {
     project,
     jobs,
     updateShot,
+    reorderSceneShots,
     generateTake,
     generateVideo,
     reviewCandidateIdentity,
@@ -135,6 +175,9 @@ export function ShotWorkspacePage() {
   const [showIdentityOverride, setShowIdentityOverride] = useState(false)
   const [identityReviewError, setIdentityReviewError] = useState<string | null>(null)
   const [bindingNote, setBindingNote] = useState<string | null>(null)
+  const [pendingNavigate, setPendingNavigate] = useState<{ sceneId: string; shotId: string } | null>(null)
+  const [batchMode, setBatchMode] = useState(false)
+  const [selectedShotIds, setSelectedShotIds] = useState<string[]>([])
   const runningJob = jobs.find((job) => job.entity.includes(currentShot.id) && job.status === 'RUNNING')
   const activeImageJob = jobs.find((job) =>
     job.entity.includes(currentShot.id)
@@ -267,9 +310,55 @@ export function ShotWorkspacePage() {
   })
 
   function selectShot(shotId: string, targetSceneId = scene.id) {
-    if (dirty && !window.confirm('当前镜头有未保存修改，确定切换吗？')) return
+    if (batchMode && targetSceneId === scene.id) {
+      setSelectedShotIds((current) => (
+        current.includes(shotId)
+          ? current.filter((id) => id !== shotId)
+          : [...current, shotId]
+      ))
+      return
+    }
+    if (shotId === currentShot.id && targetSceneId === scene.id) return
+    if (dirty) {
+      setPendingNavigate({ sceneId: targetSceneId, shotId })
+      return
+    }
     navigate(`/projects/${project.id}/episodes/${project.episodeId}/scenes/${targetSceneId}?shot=${shotId}`)
   }
+
+  function confirmNavigate() {
+    if (!pendingNavigate) return
+    setDirty(false)
+    navigate(`/projects/${project.id}/episodes/${project.episodeId}/scenes/${pendingNavigate.sceneId}?shot=${pendingNavigate.shotId}`)
+    setPendingNavigate(null)
+  }
+
+  function toggleBatchMode() {
+    setBatchMode((current) => {
+      if (current) setSelectedShotIds([])
+      return !current
+    })
+  }
+
+  function selectAllSceneShots() {
+    setSelectedShotIds(sceneShots.map((shot) => shot.id))
+  }
+
+  function moveSelectedShotsInScene(direction: 'up' | 'down') {
+    if (selectedShotIds.length === 0) return
+    const nextOrder = moveSelectedShots(scene.shotIds, selectedShotIds, direction)
+    if (nextOrder.join('|') === scene.shotIds.join('|')) {
+      notify(direction === 'up' ? '已在当前场景最前，无法继续上移。' : '已在当前场景最后，无法继续下移。', 'info')
+      return
+    }
+    reorderSceneShots(scene.id, nextOrder)
+    notify(`已${direction === 'up' ? '上移' : '下移'} ${selectedShotIds.length} 个镜头。`)
+  }
+
+  const selectedReviewCount = selectedShotIds.filter((shotId) => {
+    const shot = project.shots.find((item) => item.id === shotId)
+    return shot?.status === 'PENDING_REVIEW'
+  }).length
 
   function saveShot() {
     updateShot(currentShot.id, { description, dialogue })
@@ -354,7 +443,39 @@ export function ShotWorkspacePage() {
   return (
     <div className="shot-workspace">
       <aside className="scene-tree">
-        <header><p className="eyebrow">第 1 集 · 验证样片</p><h2>场景与镜头</h2></header>
+        <header>
+          <p className="eyebrow">第 1 集 · 验证样片</p>
+          <div className="scene-tree__heading">
+            <h2>场景与镜头</h2>
+            <Button
+              aria-pressed={batchMode}
+              onClick={toggleBatchMode}
+              size="sm"
+              variant={batchMode ? 'secondary' : 'ghost'}
+            >
+              {batchMode ? <CheckSquare size={14} /> : <Square size={14} />}
+              {batchMode ? '退出多选' : '多选'}
+            </Button>
+          </div>
+        </header>
+        {batchMode ? (
+          <div className="scene-tree__batch" role="toolbar" aria-label="镜头批量操作">
+            <span>{selectedShotIds.length > 0 ? `已选 ${selectedShotIds.length} 个镜头` : '点选镜头或全选当前场景'}</span>
+            <div>
+              <Button disabled={sceneShots.length === 0} onClick={selectAllSceneShots} size="sm" variant="ghost">全选</Button>
+              <Button disabled={selectedShotIds.length === 0} onClick={() => moveSelectedShotsInScene('up')} size="sm" variant="ghost"><ArrowUp size={14} />上移</Button>
+              <Button disabled={selectedShotIds.length === 0} onClick={() => moveSelectedShotsInScene('down')} size="sm" variant="ghost"><ArrowDown size={14} />下移</Button>
+              {selectedReviewCount > 0 ? (
+                <Link className="button button--secondary button--sm" to="/reviews">
+                  <ShieldCheck size={14} />审核 {selectedReviewCount} 个
+                </Link>
+              ) : null}
+              {selectedShotIds.length > 0 ? (
+                <Button onClick={() => setSelectedShotIds([])} size="sm" variant="ghost"><X size={14} />清除</Button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
         <div className="scene-tree__list">
           {project.scenes.map((item) => {
             const open = item.id === scene.id
@@ -368,8 +489,19 @@ export function ShotWorkspacePage() {
                 {open ? (
                   <div>
                     {sceneShots.map((shot) => (
-                      <button className={shot.id === currentShot.id ? 'active' : ''} key={shot.id} onClick={() => selectShot(shot.id)}>
-                        <span className={`shot-status-dot shot-status-dot--${shot.status.toLowerCase()}`} />
+                      <button
+                        className={`${shot.id === currentShot.id ? 'active' : ''}${selectedShotIds.includes(shot.id) ? ' is-selected' : ''}`}
+                        key={shot.id}
+                        onClick={() => selectShot(shot.id)}
+                        type="button"
+                      >
+                        {batchMode ? (
+                          <span aria-hidden="true" className="scene-tree__checkbox">
+                            {selectedShotIds.includes(shot.id) ? <CheckSquare size={14} /> : <Square size={14} />}
+                          </span>
+                        ) : (
+                          <span className={`shot-status-dot shot-status-dot--${shot.status.toLowerCase()}`} />
+                        )}
                         <span><small>{shot.code}</small><strong>{shot.title}</strong></span>
                         <StatusBadge status={shot.status} />
                       </button>
@@ -537,6 +669,15 @@ export function ShotWorkspacePage() {
           </section>
         </div>
       </Modal>
+
+      <ConfirmModal
+        confirmLabel="切换镜头"
+        description="未保存的画面描述和对白将丢失；当前版本不会受影响。"
+        onClose={() => setPendingNavigate(null)}
+        onConfirm={confirmNavigate}
+        open={pendingNavigate !== null}
+        title="放弃未保存修改？"
+      />
 
       <Modal open={compareOpen} onClose={() => setCompareOpen(false)} title="版本比较" description={`${currentShot.code} · 当前第 ${currentShot.currentTake} 版与候选第 ${currentShot.candidateTake ?? currentShot.currentTake} 版`} footer={<Button onClick={() => setCompareOpen(false)}>完成比较</Button>}>
         <div className="compare-grid">

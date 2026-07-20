@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ArrowRight, Ban, Clock3, Filter, LoaderCircle, RotateCcw, X } from 'lucide-react'
-import { Link, useSearchParams } from 'react-router'
+import { Link, useNavigate, useSearchParams } from 'react-router'
 import {
   cancelPersistedJob,
   fetchJobs,
@@ -8,7 +8,7 @@ import {
   recoverPersistedJob,
 } from '../api/client'
 import { JobRecoveryPanel } from '../components/JobRecoveryPanel'
-import { Button, PageHeader, ProgressBar, StatusBadge, Tab, TabList, Toolbar } from '../components/ui'
+import { Button, PageHeader, ProgressBar, SelectControl, StatusBadge, Tab, TabList, Toolbar } from '../components/ui'
 import { useStudio } from '../store/StudioContext'
 import { useToast } from '../store/ToastContext'
 import type { Job, JobRecoveryAction, JobRecoveryRequest, JobStatus } from '../types'
@@ -78,8 +78,9 @@ function taskDisplayLabel(job: Job) {
 }
 
 export function TasksPage() {
+  const navigate = useNavigate()
   const { notify } = useToast()
-  const { project, jobs: contextJobs, apiStatus } = useStudio()
+  const { project, projectSummaries, jobs: contextJobs, apiStatus } = useStudio()
   const [searchParams] = useSearchParams()
   const projectId = searchParams.get('project')
   const requestedJobType = searchParams.get('jobType')
@@ -153,6 +154,20 @@ export function TasksPage() {
     [filter, focusedJobType, jobs],
   )
   const hasActiveJobs = jobs.some((job) => ACTIVE_JOB_STATUSES.has(job.status))
+  const projectFilterOptions = useMemo(() => {
+    const options = new Map<string, string>()
+    projectSummaries.forEach((item) => options.set(item.id, item.name))
+    jobs.forEach((job) => options.set(job.projectId, job.projectName))
+    return [...options.entries()].sort((left, right) => left[1].localeCompare(right[1], 'zh-CN'))
+  }, [jobs, projectSummaries])
+
+  function navigateTasksScope(nextProjectId: string) {
+    const params = new URLSearchParams()
+    if (nextProjectId) params.set('project', nextProjectId)
+    if (focusedJobType) params.set('jobType', focusedJobType)
+    const query = params.toString()
+    navigate(query ? `/tasks?${query}` : '/tasks')
+  }
 
   useEffect(() => {
     if (!hasActiveJobs) return
@@ -163,7 +178,9 @@ export function TasksPage() {
 
   const completedCtaFor = useCallback((job: Job) => {
     const relatedShot = project.id === job.projectId
-      ? project.shots.find((shot) => shot.id === job.entityId || job.entity.endsWith(shot.id))
+      ? project.shots.find((shot) => (
+        shot.id === job.entityId || job.entity?.endsWith(shot.id)
+      ))
       : undefined
     return getCompletedJobCta(job, job.projectId, relatedShot
       ? {
@@ -179,7 +196,6 @@ export function TasksPage() {
     : '/projects'
   const allTasksHref = projectId ? `/tasks?project=${projectId}` : '/tasks'
   const focusedJobTypeQuery = focusedJobType ? `jobType=${focusedJobType}` : ''
-  const currentProjectTasksHref = `/tasks?project=${projectId ?? project.id}${focusedJobTypeQuery ? `&${focusedJobTypeQuery}` : ''}`
   const globalTasksHref = focusedJobTypeQuery ? `/tasks?${focusedJobTypeQuery}` : '/tasks'
 
   async function cancel(jobId: string) {
@@ -234,16 +250,29 @@ export function TasksPage() {
       GENERATE_SCRIPT_PACKAGE: '分集大纲与剧本生成',
       GENERATE_STORY_PACKAGE: '故事资料生成',
     }[focusedJobType]}</strong><small>{projectId ? '已定位到当前项目的对应任务' : '正在查看所有项目的对应任务'}</small></span></div><Link to={allTasksHref}><X size={14} />查看全部任务</Link></div> : null}
-    <div className="task-project-scope"><span>任务范围</span><nav aria-label="任务范围"><Link aria-current={projectId ? 'page' : undefined} className={projectId ? 'active' : ''} to={currentProjectTasksHref}>当前项目</Link><Link aria-current={!projectId ? 'page' : undefined} className={!projectId ? 'active' : ''} to={globalTasksHref}>所有项目</Link></nav></div>
+    <div className="task-project-scope">
+      <span>任务范围</span>
+      <div className="task-project-scope__controls">
+        <SelectControl
+          aria-label="按项目筛选"
+          onChange={(event) => navigateTasksScope(event.target.value)}
+          value={projectId ?? ''}
+        >
+          <option value="">所有项目</option>
+          {projectFilterOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+        </SelectControl>
+        {projectId ? <Link to={globalTasksHref}>查看全部项目</Link> : null}
+      </div>
+    </div>
     <Toolbar className="task-toolbar" label="任务筛选"><TabList aria-label="按状态筛选"><Filter size={16} />{(['ALL', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED'] as const).map((item) => <Tab className={filter === item ? 'active' : ''} key={item} onClick={() => setFilter(item)} selected={filter === item}>{item === 'ALL' ? '全部状态' : item === 'RUNNING' ? '运行中' : item === 'SUCCEEDED' ? '已完成' : item === 'FAILED' ? '失败' : '已取消'}</Tab>)}</TabList><span>{filtered.length} 个任务 · {projectId ? '当前项目' : '所有项目'}</span></Toolbar>
     {error ? <div className="brief-save-message brief-save-message--error" role="alert">{error}<Button onClick={refresh} size="sm" variant="ghost"><RotateCcw size={14} />重试读取</Button></div> : null}
     {loading ? <div className="brief-page-state"><LoaderCircle className="spin" size={20} />正在读取持久化任务…</div> : null}
     <section className={`task-list${projectId ? ' task-list--project-scoped' : ''}`}>
       <div className="task-list__header" aria-hidden="true">
-        <span>任务</span>{projectId ? null : <span>项目</span>}<span>创建时间</span><span>任务 ID</span>
-        <span>任务状态</span><span>用时</span><span />
+        <span>任务</span>{projectId ? null : <span>项目</span>}<span>创建时间</span>
+        <span>任务状态</span><span>用时</span><span>操作</span>
       </div>
-      {filtered.map((job) => {
+      {filtered.map((job, index) => {
       const active = ACTIVE_JOB_STATUSES.has(job.status)
       const elapsedSeconds = elapsedJobSeconds(job, nowMs)
       const completedCta = completedCtaFor(job)
@@ -254,11 +283,10 @@ export function TasksPage() {
       const visibleErrorCode = job.status === 'FAILED' && job.errorCode
         ? ` · 错误码：${job.errorCode}`
         : ''
-      return <article data-active={active || undefined} data-focused={focusedJobType === job.jobType || undefined} key={job.id}>
-        <div className="task-list__lead"><span className={`activity-dot activity-dot--${job.status.toLowerCase()}`} /><div><strong>{taskDisplayLabel(job)}</strong></div></div>
+      return <article data-active={active || undefined} data-focused={focusedJobType === job.jobType || undefined} key={job.id} title={`任务编号 ${job.id}`}>
+        <div className="task-list__lead"><span className={`activity-dot activity-dot--${job.status.toLowerCase()}`} /><div><strong>{taskDisplayLabel(job)}</strong><small>任务 #{String(filtered.length - index).padStart(2, '0')}</small></div></div>
         {projectId ? null : <Link className="task-list__project" title={`打开项目：${job.projectName}`} to={`/projects/${job.projectId}`}>{job.projectName}</Link>}
         <span className="task-list__created">{createdLabel(job.createdAt)}</span>
-        <code className="task-list__id" title={job.id}>{job.id.slice(0, 8)}</code>
         <div className="task-list__state">
           <div className="task-list__state-summary">
             <StatusBadge status={job.status} />

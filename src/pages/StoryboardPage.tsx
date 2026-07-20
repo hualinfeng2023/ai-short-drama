@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ArrowLeft, Check, GitBranch, LoaderCircle, RefreshCw } from 'lucide-react'
+import { ArrowLeft, Check, Film, GitBranch, LoaderCircle, LockKeyhole, RefreshCw, Sparkles } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router'
 import {
   approveStoryboardVersion,
@@ -8,7 +8,10 @@ import {
   type StoryboardWorkspace,
 } from '../api/client'
 import { Button, EmptyState, PageHeader, StatusBadge, Surface } from '../components/ui'
+import { ImpactConfirmModal } from '../components/ConfirmModal'
+import { PageLoadingSkeleton } from '../components/PageLoadingSkeleton'
 import { ServiceRequiredState } from '../components/ServiceRequiredState'
+import { useToast } from '../store/ToastContext'
 import type { ProjectRecord } from '../types'
 import { localizeDisplayText } from '../utils/localizeDisplayText'
 
@@ -29,10 +32,12 @@ function workflowNodeLabel(value: string): string {
 export function StoryboardPage() {
   const { projectId } = useParams()
   const navigate = useNavigate()
+  const { notify } = useToast()
   const [project, setProject] = useState<ProjectRecord | null>(null)
   const [workspace, setWorkspace] = useState<StoryboardWorkspace | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
+  const [approveOpen, setApproveOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
@@ -68,6 +73,8 @@ export function StoryboardPage() {
     setError(null)
     try {
       await approveStoryboardVersion(workspace.storyboard.id, project.lockVersion)
+      setApproveOpen(false)
+      notify('第 4 阶段已批准，正式制作任务已入队。')
       navigate(`/tasks?project=${project.id}`)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '第 4 阶段批准失败')
@@ -80,7 +87,7 @@ export function StoryboardPage() {
     return <ServiceRequiredState feature="动态分镜" projectId={projectId} />
   }
   if (loading || !project || !workspace || !projectId) {
-    return <div className="page brief-page-state"><LoaderCircle className="spin" size={22} /><strong>正在读取动态分镜与节奏样片…</strong></div>
+    return <PageLoadingSkeleton label="正在读取动态分镜" stage="镜头序列与节奏样片" />
   }
   if (!workspace.storyboard) {
     return <div className="page page--storyboard"><PageHeader eyebrow="第 4 阶段 · 分镜与节奏样片" title="动态分镜审核" description="批准前期资产后，系统会在这里装配镜头序列、节奏样片与任务依赖。" actions={<Link className="button button--secondary button--md" to={`/projects/${projectId}/preproduction`}><ArrowLeft size={16} />返回第 3 阶段</Link>} /><EmptyState title="分镜尚未生成" description="先完成第 3 阶段的前期资产锁定；任务启动后，本页会自动显示动态拆镜进度。" action={<div className="empty-state__actions"><Link className="button button--primary button--md" to={`/projects/${projectId}/preproduction`}>检查前期资产</Link><Link className="button button--secondary button--md" to={`/tasks?project=${projectId}`}>查看生成任务</Link></div>} /></div>
@@ -95,8 +102,24 @@ export function StoryboardPage() {
       <aside>
         <Surface className="approval-card"><p className="eyebrow">节奏样片</p><h2>低成本节奏样片</h2>{workspace.storyboard.animaticUrl ? <video controls preload="metadata" src={workspace.storyboard.animaticUrl} /> : <div className="preview-media-wait"><LoaderCircle className="spin" size={20} />正在装配</div>}<p>包含分镜、临时音轨、字幕与逐镜头时长。</p></Surface>
         <Surface className="approval-card"><p className="eyebrow">任务依赖图</p><h2><GitBranch size={18} />持久化依赖</h2><div className="workflow-node-list">{workspace.workflow?.nodes.map((node) => <div key={node.id}><span>{workflowNodeLabel(node.nodeKey)}</span><StatusBadge status={node.status} /><small>{node.dependencies.map(workflowNodeLabel).join(' → ') || '根节点'}</small></div>)}</div></Surface>
-        <section className="character-lock-bar"><div><Check size={18} /><span><strong>第 4 阶段 · 分镜锁定</strong><small>批准后启动关键帧、视频、对白、背景音乐、环境音和音效的正式任务。</small></span></div><Button disabled={busy || project.status !== 'STORYBOARD_READY'} onClick={() => void approve()}>{busy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}批准第 4 阶段</Button></section>
+        <section className="character-lock-bar"><div><Check size={18} /><span><strong>第 4 阶段 · 分镜锁定</strong><small>批准后启动关键帧、视频、对白、背景音乐、环境音和音效的正式任务。</small></span></div><Button disabled={busy || project.status !== 'STORYBOARD_READY'} onClick={() => setApproveOpen(true)}>{busy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}批准第 4 阶段</Button></section>
       </aside>
     </div>
+
+    <ImpactConfirmModal
+      confirmLabel="批准第 4 阶段"
+      description="分镜版本冻结后，修改需通过局部变更或创建修改版。"
+      items={[
+        { icon: <LockKeyhole size={16} />, title: '锁定分镜版本', detail: `第 ${workspace.storyboard.version} 版 · ${workspace.shots.length} 个镜头序列将冻结。` },
+        { icon: <Film size={16} />, title: '启动正式制作任务', detail: '关键帧、视频、对白、背景音乐、环境音和音效任务将依次入队。' },
+        { icon: <Sparkles size={16} />, title: '进入第 5 阶段', detail: '批准后会跳转到任务页，等待正式媒体生成。' },
+      ]}
+      loading={busy}
+      onClose={() => { if (!busy) setApproveOpen(false) }}
+      onConfirm={() => void approve()}
+      open={approveOpen}
+      subtitle="确认节奏样片与镜头序列符合预期后再继续。"
+      title="批准第 4 阶段？"
+    />
   </div>
 }

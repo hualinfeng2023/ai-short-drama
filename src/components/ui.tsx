@@ -808,11 +808,13 @@ export function StatusBadge({
 export function Toast({
   message,
   onDismiss,
+  onUndo,
   tone = 'success',
   className = '',
 }: {
   message: string
   onDismiss: () => void
+  onUndo?: () => void
   tone?: 'success' | 'error' | 'info'
   className?: string
 }) {
@@ -831,6 +833,9 @@ export function Toast({
         <strong>{title}</strong>
         <p>{message}</p>
       </div>
+      {onUndo ? (
+        <button className="toast__undo" onClick={onUndo} type="button">撤销</button>
+      ) : null}
       <IconButton className="toast__close" label="关闭通知" onClick={onDismiss} size="sm" variant="ghost">
         <X size={15} />
       </IconButton>

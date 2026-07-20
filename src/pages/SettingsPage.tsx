@@ -29,14 +29,15 @@ import {
   type RuntimeConfig,
 } from '../api/client'
 import { Button, Modal, PageHeader, SelectControl, StatusBadge, Surface } from '../components/ui'
+import { ConfirmModal } from '../components/ConfirmModal'
 import { useStudio } from '../store/StudioContext'
 import { useToast } from '../store/ToastContext'
 import type { VisualMode } from '../types'
 
-const modes: Array<{ id: VisualMode; title: string; description: string; tone: string }> = [
-  { id: 'standard', title: '标准工作台', description: '规范基线：浅灰画布、白色面板、蓝色单主色。', tone: '适合完整流程' },
-  { id: 'focus', title: '专注模式', description: '更紧凑的间距与更少的辅助说明，优先信息密度。', tone: '适合高频审核' },
-  { id: 'cinema', title: '暗房模式', description: '深色工作区与更强画面层级，突出小样和版本比较。', tone: '适合媒体审阅' },
+const modes: Array<{ id: VisualMode; title: string; description: string; tone: string; previewHint: string }> = [
+  { id: 'standard', title: '标准工作台', description: '规范基线：浅灰画布、白色面板、蓝色单主色。', tone: '适合完整流程', previewHint: '侧栏 + 内容区 + 操作栏' },
+  { id: 'focus', title: '专注模式', description: '更紧凑的间距与更少的辅助说明，优先信息密度。', tone: '适合高频审核', previewHint: '窄侧栏 + 高密度列表' },
+  { id: 'cinema', title: '暗房模式', description: '深色工作区与更强画面层级，突出小样和版本比较。', tone: '适合媒体审阅', previewHint: '深色画布 + 突出预览区' },
 ]
 
 const PROMPT_MODEL_OPTIONS = [
@@ -150,6 +151,7 @@ export function SettingsPage() {
   const [notice, setNotice] = useState<{ tone: 'success' | 'error'; message: string } | null>(null)
   const [activeProvider, setActiveProvider] = useState<'ark' | 'tos'>('ark')
   const [recoveryOpen, setRecoveryOpen] = useState(false)
+  const [pendingResetDemo, setPendingResetDemo] = useState(false)
   const [recovering, setRecovering] = useState(false)
   const [recoveryNotice, setRecoveryNotice] = useState<{ tone: 'success' | 'error'; message: string } | null>(null)
   const apiConnected = apiStatus === 'connected'
@@ -352,7 +354,7 @@ export function SettingsPage() {
           <section>
             <div className="section-heading"><div><h2>界面模式</h2></div></div>
             <p className="settings-copy">三种模式共享同一信息架构与交互规则，切换只影响信息密度和画面层级。</p>
-            <div className="mode-grid">{modes.map((mode) => <button className={visualMode === mode.id ? 'active' : ''} key={mode.id} onClick={() => { if (visualMode !== mode.id) { setVisualMode(mode.id); notify(`已切换到「${mode.title}」，界面密度与层级已更新。`, 'info') } }}><span className={`mode-preview mode-preview--${mode.id}`}><i /><i /><i /></span><div><strong>{mode.title}</strong><p>{mode.description}</p><small>{mode.tone}</small></div>{visualMode === mode.id ? <em><Check size={14} />当前</em> : null}</button>)}</div>
+            <div className="mode-grid">{modes.map((mode) => <button className={visualMode === mode.id ? 'active' : ''} key={mode.id} onClick={() => { if (visualMode !== mode.id) { setVisualMode(mode.id); notify(`已切换到「${mode.title}」，界面密度与层级已更新。`, 'info') } }}><span className={`mode-preview mode-preview--${mode.id}`} aria-hidden="true"><i /><i /><i /><span className="mode-preview__hint">{mode.previewHint}</span></span><div><strong>{mode.title}</strong><p>{mode.description}</p><small>{mode.tone}</small></div>{visualMode === mode.id ? <em><Check size={14} />当前</em> : null}</button>)}</div>
           </section>
         ) : null}
 
@@ -376,7 +378,7 @@ export function SettingsPage() {
               <p className="eyebrow">离线演示</p>
               <h2>恢复演示项目</h2>
               <p>恢复浏览器中的内置演示场景；此模式没有连接 SQLite。</p>
-              <Button onClick={() => { resetDemo(); notify('已恢复内置演示项目。') }} variant="secondary"><RotateCcw size={16} />恢复演示项目</Button>
+              <Button onClick={() => setPendingResetDemo(true)} variant="secondary"><RotateCcw size={16} />恢复演示项目</Button>
             </Surface> : null}
             <Surface className="reset-card">
               <p className="eyebrow">浏览器本地数据</p>
@@ -533,5 +535,18 @@ export function SettingsPage() {
         <div><strong>{project.name}</strong><p>如页面状态异常或与服务端不一致，可使用此操作恢复到 SQLite 中的最新状态。</p></div>
       </div>
     </Modal>
+
+    <ConfirmModal
+      confirmLabel="恢复演示项目"
+      description="当前浏览器中的演示数据将被重置为内置样片，未保存的本地修改会丢失。"
+      onClose={() => setPendingResetDemo(false)}
+      onConfirm={() => {
+        resetDemo()
+        setPendingResetDemo(false)
+        notify('已恢复内置演示项目。')
+      }}
+      open={pendingResetDemo}
+      title="恢复演示项目？"
+    />
   </div>
 }

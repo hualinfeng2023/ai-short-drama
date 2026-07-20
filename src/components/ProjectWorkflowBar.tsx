@@ -137,6 +137,32 @@ export function ProjectWorkflowBar() {
           </Link>
         )}
       </header>
+      <div
+        aria-label={`制作进度：第 ${activeStageIndex + 1}/${readiness.stages.length} 阶段`}
+        className="project-workflow__mobile-progress"
+      >
+        <span>{activeStage?.label ?? '项目概览'}</span>
+        <div
+          className="project-workflow__mobile-track"
+          style={{ gridTemplateColumns: `repeat(${readiness.stages.length}, minmax(0, 1fr))` }}
+        >
+          {readiness.stages.map((stage) => (
+            <i
+              className={
+                stage.status === 'COMPLETE'
+                  ? 'is-complete'
+                  : stage.key === readiness.activeStageKey
+                    ? 'is-current'
+                    : stage.status === 'IN_PROGRESS'
+                      ? 'is-progress'
+                      : undefined
+              }
+              key={stage.key}
+            />
+          ))}
+        </div>
+        <small>第 {activeStageIndex + 1}/{readiness.stages.length} 阶段</small>
+      </div>
       <nav aria-label="制作阶段" ref={stageNavRef}>
         <ol className="project-workflow__stages">
           {readiness.stages.map((stage) => {

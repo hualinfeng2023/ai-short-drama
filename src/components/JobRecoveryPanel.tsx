@@ -13,6 +13,7 @@ import {
 
 import type { Job, JobRecoveryAction, JobRecoveryRequest } from '../types'
 import { getJobRecoveryPlan } from '../utils/jobRecovery'
+import { ConfirmModal } from './ConfirmModal'
 import { Button } from './ui'
 
 interface JobRecoveryPanelProps {
@@ -33,6 +34,7 @@ export function JobRecoveryPanel({
   const [expanded, setExpanded] = useState(job.status === 'FAILED')
   const [showInput, setShowInput] = useState(false)
   const [additionalInput, setAdditionalInput] = useState('')
+  const [pendingAction, setPendingAction] = useState<JobRecoveryAction | null>(null)
 
   if (!plan) return null
   const degraded = plan.completionState === 'DEGRADED_SUCCEEDED'
@@ -87,13 +89,13 @@ export function JobRecoveryPanel({
         ><ListRestart size={15} />只重试失败部分</Button> : null}
         {can('SWITCH_MODEL') ? <Button
           disabled={busy}
-          onClick={() => onRecover('SWITCH_MODEL', { strategy: 'auto-alternate' })}
+          onClick={() => setPendingAction('SWITCH_MODEL')}
           size="sm"
           variant="secondary"
         ><ArrowLeftRight size={15} />切换模型或方案</Button> : null}
         {can('FALLBACK_EXECUTION') ? <Button
           disabled={busy}
-          onClick={() => onRecover('FALLBACK_EXECUTION', { strategy: 'stability-first' })}
+          onClick={() => setPendingAction('FALLBACK_EXECUTION')}
           size="sm"
           variant="ghost"
         ><Gauge size={15} />降级执行</Button> : null}
@@ -130,5 +132,28 @@ export function JobRecoveryPanel({
         <div><Button disabled={busy || !additionalInput.trim()} size="sm" type="submit"><Play size={15} />补充并继续</Button></div>
       </form> : null}
     </div> : null}
+
+    <ConfirmModal
+      confirmLabel={pendingAction === 'FALLBACK_EXECUTION' ? '降级执行' : '切换并继续'}
+      confirmVariant={pendingAction === 'FALLBACK_EXECUTION' ? 'danger' : 'primary'}
+      description={pendingAction === 'FALLBACK_EXECUTION'
+        ? '任务将采用降级方案执行，完成后仍需人工复核结果。'
+        : '任务将切换备用模型或方案继续，输出质量可能与原计划不同。'}
+      loading={busy}
+      onClose={() => setPendingAction(null)}
+      onConfirm={() => {
+        if (!pendingAction) return
+        const action = pendingAction
+        setPendingAction(null)
+        void onRecover(
+          action,
+          action === 'FALLBACK_EXECUTION'
+            ? { strategy: 'stability-first' }
+            : { strategy: 'auto-alternate' },
+        )
+      }}
+      open={pendingAction !== null}
+      title={pendingAction === 'FALLBACK_EXECUTION' ? '确认降级执行？' : '确认切换模型或方案？'}
+    />
   </section>
 }

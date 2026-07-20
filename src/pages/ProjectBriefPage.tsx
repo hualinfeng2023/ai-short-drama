@@ -34,6 +34,7 @@ import {
   updateProjectDraft,
 } from '../api/client'
 import { Button, PageHeader, SelectControl, StatusBadge } from '../components/ui'
+import { PageLoadingSkeleton } from '../components/PageLoadingSkeleton'
 import { ServiceRequiredState } from '../components/ServiceRequiredState'
 import { useStudio } from '../store/StudioContext'
 import type {
@@ -125,6 +126,13 @@ const IDEA_GENERATION_STAGES = [
 ] as const
 type IdeaGenerationPhase = 'idle' | 'thinking' | 'writing'
 type BriefSectionKey = 'audience' | 'delivery' | 'guardrails'
+type BriefWizardStep = 'core' | 'audience' | 'constraints'
+
+const BRIEF_WIZARD_STEPS: { id: BriefWizardStep; label: string; detail: string }[] = [
+  { id: 'core', label: '故事与规格', detail: '名称、想法、题材与时长' },
+  { id: 'audience', label: '受众与发行', detail: '情绪回报与平台设置' },
+  { id: 'constraints', label: '生成边界', detail: '要求、规避与生成' },
+]
 
 interface BriefForm {
   name: string
@@ -263,6 +271,7 @@ export function ProjectBriefPage() {
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [openBriefSection, setOpenBriefSection] = useState<BriefSectionKey | null>(null)
+  const [briefWizardStep, setBriefWizardStep] = useState<BriefWizardStep>('core')
   const storyIdeaRef = useRef<HTMLTextAreaElement>(null)
 
   useLayoutEffect(() => {
@@ -417,6 +426,17 @@ export function ProjectBriefPage() {
   function toggleBriefSection(section: BriefSectionKey) {
     setOpenBriefSection((current) => current === section ? null : section)
   }
+
+  function goToBriefWizardStep(step: BriefWizardStep) {
+    setBriefWizardStep(step)
+    if (step === 'audience') {
+      setOpenBriefSection((current) => current ?? 'audience')
+    } else if (step === 'constraints') {
+      setOpenBriefSection('guardrails')
+    }
+  }
+
+  const briefWizardStepIndex = BRIEF_WIZARD_STEPS.findIndex((item) => item.id === briefWizardStep)
 
   async function save() {
     if (!projectId || !project || !form || !editable || !dirty || saving || rewritingIdea || draftingRequirements || draftingAvoidances || draftingQuestions) return
@@ -842,7 +862,7 @@ export function ProjectBriefPage() {
   }
 
   if (loading) {
-    return <div className="page brief-page-state"><LoaderCircle className="spin" size={22} /><strong>正在读取项目与项目简报…</strong></div>
+    return <PageLoadingSkeleton label="正在读取项目与项目简报" stage="加载项目设定" />
   }
 
   if (!project || !form) {
@@ -924,7 +944,25 @@ export function ProjectBriefPage() {
               <p>先确认故事与核心规格；受众细节、发行设置和生成边界按当前任务展开。</p>
             </div>
           </div>
+          <nav aria-label="项目简报步骤" className="brief-wizard">
+            {BRIEF_WIZARD_STEPS.map((step, index) => (
+              <button
+                aria-current={briefWizardStep === step.id ? 'step' : undefined}
+                className={`brief-wizard__step${briefWizardStep === step.id ? ' brief-wizard__step--active' : ''}${index < briefWizardStepIndex ? ' brief-wizard__step--done' : ''}`}
+                key={step.id}
+                onClick={() => goToBriefWizardStep(step.id)}
+                type="button"
+              >
+                <span className="brief-wizard__index">{index + 1}</span>
+                <span className="brief-wizard__copy">
+                  <strong>{step.label}</strong>
+                  <small>{step.detail}</small>
+                </span>
+              </button>
+            ))}
+          </nav>
           <div className="brief-form-grid">
+            {briefWizardStep === 'core' ? <>
             <div className="brief-field brief-field--wide brief-name-field">
               <div className="brief-field__heading">
                 <label htmlFor="brief-project-name">短剧名称</label>
@@ -1058,13 +1096,16 @@ export function ProjectBriefPage() {
             <label className="brief-field"><span>目标时长</span><SelectControl aria-label="目标时长" disabled={!editable} onChange={(event) => updateField('targetDurationSec', Number(event.target.value))} value={form.targetDurationSec}><option value={45}>45 秒</option><option value={60}>60 秒</option><option value={90}>90 秒</option></SelectControl></label>
             <label className="brief-field"><span>画幅</span><SelectControl aria-label="画幅" disabled={!editable} onChange={(event) => updateField('aspectRatio', event.target.value as BriefForm['aspectRatio'])} value={form.aspectRatio}><option value="9:16">9:16 竖屏</option><option value="16:9">16:9 横屏</option></SelectControl></label>
             <label className="brief-field"><span>内容形态</span><SelectControl aria-label="内容形态" disabled={!editable} onChange={(event) => updateField('productionFormat', event.target.value as ProductionFormat)} value={form.productionFormat}>{PRODUCTION_FORMAT_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
+            </> : null}
+
+            {briefWizardStep === 'audience' ? <>
             <label className="brief-field"><span>叙事主角</span><SelectControl aria-label="叙事主角" disabled={!editable} onChange={(event) => updateField('narrativeProtagonist', event.target.value as NarrativeProtagonist)} value={form.narrativeProtagonist}>{NARRATIVE_PROTAGONIST_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
             <label className="brief-field"><span>目标受众</span><SelectControl aria-label="目标受众" disabled={!editable} onChange={(event) => updateField('targetAudience', event.target.value as TargetAudience)} value={form.targetAudience}>{TARGET_AUDIENCE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
             <label className="brief-field"><span>主市场</span><SelectControl aria-label="主市场" disabled={!editable} onChange={(event) => setForm((current) => current ? { ...current, primaryMarket: event.target.value, secondaryMarkets: current.secondaryMarkets.filter((item) => item !== event.target.value) } : current)} value={form.primaryMarket}>{MARKET_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
 
             <BriefDisclosure
               description="补充项目画像和希望观众获得的情绪结果。"
-              meta={targetingMissing.length ? `待确认 ${targetingMissing.length} 项` : `${form.emotionalRewards.length} 项情绪回报`}
+              meta={targetingMissing.length ? `还需确认：${targetingMissing.join('、')}` : `${form.emotionalRewards.length} 项情绪回报`}
               onToggle={() => toggleBriefSection('audience')}
               open={openBriefSection === 'audience'}
               title="受众与情绪"
@@ -1087,7 +1128,9 @@ export function ProjectBriefPage() {
               <label className="brief-field"><span>主平台</span><SelectControl aria-label="主平台" disabled={!editable} onChange={(event) => setForm((current) => current ? { ...current, targetPlatform: event.target.value, secondaryPlatforms: current.secondaryPlatforms.filter((item) => item !== event.target.value) } : current)} value={form.targetPlatform}>{PLATFORM_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
               <fieldset className="brief-choice-field" disabled={!editable}><legend>同步平台（可多选）</legend><div className="brief-choice-grid">{PLATFORM_OPTIONS.filter(([value]) => value !== form.targetPlatform).map(([value, label]) => <label key={value}><input checked={form.secondaryPlatforms.includes(value)} onChange={() => toggleSelection('secondaryPlatforms', value)} type="checkbox" /><span>{label}</span></label>)}</div></fieldset>
             </BriefDisclosure>
+            </> : null}
 
+            {briefWizardStep === 'constraints' ? <>
             <BriefDisclosure
               description="把必须满足、必须避免和阻断问题集中在一起。"
               meta={`${splitLines(form.contentRequirements).length} 条要求 · ${splitLines(form.contentAvoidances).length} 条规避`}
@@ -1196,9 +1239,29 @@ export function ProjectBriefPage() {
                 {questionsDraftNote ? <small aria-live="polite" className="brief-field__note">{questionsDraftNote}</small> : null}
               </div>
             </BriefDisclosure>
+            </> : null}
+          </div>
+          <div className="brief-wizard-footer">
+            {briefWizardStep !== 'core' ? (
+              <Button
+                onClick={() => goToBriefWizardStep(BRIEF_WIZARD_STEPS[briefWizardStepIndex - 1].id)}
+                variant="ghost"
+              >
+                上一步
+              </Button>
+            ) : <span />}
+            {briefWizardStep !== 'constraints' ? (
+              <Button
+                onClick={() => goToBriefWizardStep(BRIEF_WIZARD_STEPS[briefWizardStepIndex + 1].id)}
+                variant="secondary"
+              >
+                下一步
+              </Button>
+            ) : null}
           </div>
           {error ? <div className="brief-save-message brief-save-message--error" role="alert">{error}<Button onClick={() => window.location.reload()} size="sm" variant="ghost"><RefreshCw size={14} />重新载入</Button></div> : null}
           {notice ? <div className="brief-save-message brief-save-message--success">{notice}</div> : null}
+          {briefWizardStep === 'constraints' ? (
           <div className="brief-editor-actions">
             <span>{dirty
               ? '有尚未保存的修改；生成前请先保存'
@@ -1238,6 +1301,7 @@ export function ProjectBriefPage() {
               )}
             </div>
           </div>
+          ) : null}
         </section>
 
         <aside className="brief-fact-card">

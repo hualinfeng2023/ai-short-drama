@@ -217,6 +217,26 @@ describe('global jobs client', () => {
     })
   })
 
+  it('repairs a missing legacy job entity instead of crashing task rendering', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: [{
+        id: 'job-legacy', project_id: 'project-other', project_name: '旧项目',
+        job_type: 'DEMO_RENDER', entity_type: 'shot', entity_id: 'shot-legacy',
+        label: '旧任务', status: 'SUCCEEDED', progress: 100, stage: '完成',
+        attempt: 1, max_attempts: 3, available_at: '2026-07-17T00:00:00Z',
+        heartbeat_at: null, created_at: '2026-07-17T00:00:00Z',
+        updated_at: '2026-07-17T00:01:00Z', completed_at: '2026-07-17T00:01:00Z',
+        estimated_seconds: null, retryable: false, error_code: null, error_message: null,
+      }],
+      trace_id: 'trace-legacy-job',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const jobs = await fetchJobs()
+
+    expect(jobs[0].entity).toBe('shot:shot-legacy')
+  })
+
   it('sends a structured recovery action without losing partial progress', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       data: {

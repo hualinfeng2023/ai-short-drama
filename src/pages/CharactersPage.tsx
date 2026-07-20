@@ -40,6 +40,8 @@ import {
   type CharacterVisualRecord,
   type CharacterVisualWorkspace,
 } from '../api/client'
+import { ConfirmModal } from '../components/ConfirmModal'
+import { PageLoadingSkeleton } from '../components/PageLoadingSkeleton'
 import { Button, getStatusLabel, Modal, PageHeader, StatusBadge } from '../components/ui'
 import { ServiceRequiredState } from '../components/ServiceRequiredState'
 import { buildCandidateGenerationSlots } from '../utils/candidateGenerationSlots'
@@ -402,6 +404,11 @@ export function CharactersPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [activeCharacterId, setActiveCharacterId] = useState('')
+  const [pendingDeleteCandidate, setPendingDeleteCandidate] = useState<{
+    character: CharacterVisualRecord
+    candidate: CharacterVisualRecord['candidates'][number]
+    selectedLocally: boolean
+  } | null>(null)
   const characterIdKey = workspace?.characters.map((character) => character.id).join('|') ?? ''
 
   const refresh = useCallback(async () => {
@@ -656,13 +663,16 @@ export function CharactersPage() {
     candidate: CharacterVisualRecord['candidates'][number],
   ) {
     if (!projectId || busy !== null || !candidate.deletable) return
-    const selectedLocally = selected[character.id] === candidate.id
-    const confirmed = window.confirm(
-      selectedLocally
-        ? `确认删除“${candidate.variantLabel ?? `候选 ${candidate.ordinal}`}”？该图片将被永久删除，并清除当前选择。`
-        : `确认删除“${candidate.variantLabel ?? `候选 ${candidate.ordinal}`}”？该历史图片将被永久删除。`,
-    )
-    if (!confirmed) return
+    setPendingDeleteCandidate({
+      character,
+      candidate,
+      selectedLocally: selected[character.id] === candidate.id,
+    })
+  }
+
+  async function confirmDeleteHistoricalCandidate() {
+    if (!projectId || !pendingDeleteCandidate || busy !== null) return
+    const { character, candidate, selectedLocally } = pendingDeleteCandidate
     await run(`delete-candidate-${candidate.id}`, async () => {
       await deleteCharacterVisualCandidate(
         projectId,
@@ -673,6 +683,7 @@ export function CharactersPage() {
       if (selectedLocally) {
         setSelected((current) => ({ ...current, [character.id]: '' }))
       }
+      setPendingDeleteCandidate(null)
     })
   }
 
@@ -800,7 +811,7 @@ export function CharactersPage() {
   }
 
   if (loading || !projectId || !workspace) {
-    return <div className="page brief-page-state"><LoaderCircle className="spin" size={22} /><strong>正在准备角色结构化视觉档案…</strong></div>
+    return <PageLoadingSkeleton label="正在准备角色结构化视觉档案" stage="读取角色与候选图" />
   }
 
   const activeCharacterIndex = Math.max(
@@ -1420,5 +1431,26 @@ export function CharactersPage() {
         <small>使用放大按钮查看面部、服装和全身细节；放大后可滚动画布。</small>
       </div> : null}
     </Modal>
+
+    <ConfirmModal
+      confirmLabel="删除"
+      confirmVariant="danger"
+      description={pendingDeleteCandidate?.selectedLocally
+        ? '该图片将被永久删除，并清除当前选择。'
+        : '该历史图片将被永久删除。'}
+      loading={pendingDeleteCandidate ? busy === `delete-candidate-${pendingDeleteCandidate.candidate.id}` : false}
+      onClose={() => setPendingDeleteCandidate(null)}
+      onConfirm={() => void confirmDeleteHistoricalCandidate()}
+      open={pendingDeleteCandidate !== null}
+      title={`删除「${pendingDeleteCandidate?.candidate.variantLabel ?? `候选 ${pendingDeleteCandidate?.candidate.ordinal ?? ''}`}」？`}
+    >
+      {pendingDeleteCandidate ? <div className="confirm-delete-candidate">
+        <img
+          alt={`${pendingDeleteCandidate.character.name} ${pendingDeleteCandidate.candidate.variantLabel ?? `候选 ${pendingDeleteCandidate.candidate.ordinal}`}`}
+          src={pendingDeleteCandidate.candidate.assetUrl}
+        />
+        <p>{pendingDeleteCandidate.character.name} · {pendingDeleteCandidate.candidate.variantLabel ?? `候选 ${pendingDeleteCandidate.candidate.ordinal}`}</p>
+      </div> : null}
+    </ConfirmModal>
   </div>
 }

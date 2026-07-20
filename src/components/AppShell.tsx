@@ -5,14 +5,13 @@ import {
   Boxes,
   ChevronDown,
   CircleUserRound,
-  Clapperboard,
   CloudOff,
   Film,
   FolderKanban,
   Images,
   ListChecks,
-  LoaderCircle,
   LockKeyhole,
+  Menu,
   PanelLeftClose,
   PanelLeftOpen,
   Rocket,
@@ -33,11 +32,13 @@ import { Button, getStatusLabel } from './ui'
 import { ErrorBoundary } from './ErrorBoundary'
 import { GlossaryTip } from './GlossaryTip'
 import { OnboardingDialog, markOnboardingDone, shouldShowOnboarding } from './OnboardingDialog'
+import { PageLoadingSkeleton } from './PageLoadingSkeleton'
 import { ProjectWorkflowBar } from './ProjectWorkflowBar'
 
 const ACTIVE_JOB_STATUSES: JobStatus[] = ['PENDING', 'RETRY_WAIT', 'RUNNING', 'CANCEL_REQUESTED']
 const DATA_REFRESH_INTERVAL_MS = 3_000
 const DATA_REQUEST_TIMEOUT_MS = 5_000
+const ROUTE_ERROR_BOUNDARY_VERSION = '2'
 
 async function requestWithTimeout<T>(
   request: (signal: AbortSignal) => Promise<T>,
@@ -51,11 +52,14 @@ async function requestWithTimeout<T>(
   }
 }
 
+const SIDEBAR_COLLAPSED_KEY = 'studio-sidebar-collapsed'
+const MOBILE_NAV_HINTS_KEY = 'studio-mobile-nav-hints-v1'
+
 const navigation = [
-  { to: '/projects', label: '项目', icon: FolderKanban },
-  { to: '/tasks', label: '生成任务', icon: ListChecks },
-  { to: '/reviews', label: '审核中心', icon: ShieldCheck },
-  { to: '/settings', label: '设置', icon: Settings },
+  { to: '/projects', label: '项目', hint: '浏览、创建与管理短剧项目', icon: FolderKanban },
+  { to: '/tasks', label: '生成任务', hint: '跟踪 AI 生成进度与历史记录', icon: ListChecks },
+  { to: '/reviews', label: '审核中心', hint: '比对并批准镜头候选版本', icon: ShieldCheck },
+  { to: '/settings', label: '设置', hint: '外观模式与演示数据管理', icon: Settings },
 ]
 
 interface Crumb {
@@ -79,7 +83,23 @@ function breadcrumb(pathname: string, projectName: string, projectHref: string):
   return [{ label: '项目' }]
 }
 
-const SIDEBAR_COLLAPSED_KEY = 'studio-sidebar-collapsed'
+function projectSubnavItems(
+  routeProjectId: string,
+  currentProjectLink: string,
+  apiStatus: string,
+) {
+  return ([
+    { label: '样片工作台', to: currentProjectLink, icon: Film, offlineReady: true },
+    { label: '故事与剧本', to: `/projects/${routeProjectId}/story`, icon: BookOpenText, offlineReady: false },
+    { label: '角色', to: `/projects/${routeProjectId}/characters`, icon: Users, offlineReady: false },
+    { label: '前期资产', to: `/projects/${routeProjectId}/preproduction`, icon: Boxes, offlineReady: false },
+    { label: '动态分镜', to: `/projects/${routeProjectId}/storyboard`, icon: Images, offlineReady: false },
+    { label: '正式制作', to: `/projects/${routeProjectId}/production`, icon: Rocket, offlineReady: false },
+  ] as const).map((item) => ({
+    ...item,
+    locked: apiStatus !== 'connected' && !item.offlineReady,
+  }))
+}
 
 export function AppShell() {
   const [collapsed, setCollapsed] = useState(() => {
@@ -92,6 +112,23 @@ export function AppShell() {
   const [accountOpen, setAccountOpen] = useState(false)
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [onboardingOpen, setOnboardingOpen] = useState(false)
+  const [mobileProjectNavOpen, setMobileProjectNavOpen] = useState(false)
+  const [showMobileNavHints, setShowMobileNavHints] = useState(() => {
+    try {
+      return window.localStorage.getItem(MOBILE_NAV_HINTS_KEY) !== 'done'
+    } catch {
+      return true
+    }
+  })
+
+  const dismissMobileNavHints = () => {
+    setShowMobileNavHints(false)
+    try {
+      window.localStorage.setItem(MOBILE_NAV_HINTS_KEY, 'done')
+    } catch {
+      // 本地存储不可用时仅在本次会话内生效。
+    }
+  }
 
   useEffect(() => {
     if (!shouldShowOnboarding()) return
@@ -236,8 +273,18 @@ export function AppShell() {
   useEffect(() => {
     setAccountOpen(false)
     setNotificationsOpen(false)
+    setMobileProjectNavOpen(false)
     window.scrollTo({ top: 0, left: 0, behavior: 'instant' as ScrollBehavior })
   }, [location.pathname])
+
+  useEffect(() => {
+    if (!mobileProjectNavOpen) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMobileProjectNavOpen(false)
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [mobileProjectNavOpen])
 
   useEffect(() => {
     try {
@@ -292,7 +339,9 @@ export function AppShell() {
       <a className="skip-link" href="#main-content">跳到主要内容</a>
       <aside className="sidebar" aria-label="主导航">
         <Link className="brand" to="/projects" aria-label="剧创 AI 首页">
-          <span className="brand__mark"><Clapperboard size={20} /></span>
+          <span className="brand__mark">
+            <img alt="" className="brand__logo" src="/assets/juchuang-ai-logo.png" />
+          </span>
           <span className="brand__text">
             <strong>剧创 AI</strong>
             <small>创作工作台</small>
@@ -301,18 +350,26 @@ export function AppShell() {
         </Link>
 
         <nav className="sidebar__nav">
+          {showMobileNavHints ? (
+            <div className="mobile-nav-hints">
+              <p>底部导航可快速切换工作区</p>
+              <button onClick={dismissMobileNavHints} type="button">知道了</button>
+            </div>
+          ) : null}
           <p className="sidebar__label">工作区</p>
-          {navigation.map(({ to, label, icon: Icon }) => {
+          {navigation.map(({ to, label, hint, icon: Icon }) => {
             const href = label === '生成任务' ? taskHref : to
             return (
             <NavLink
               className={({ isActive }) => `nav-item ${isActive ? 'nav-item--active' : ''}`}
               key={to}
+              onClick={dismissMobileNavHints}
+              title={hint}
               to={href}
-              title={collapsed ? label : undefined}
             >
               <Icon size={18} strokeWidth={1.8} />
               <span>{label}</span>
+              {showMobileNavHints ? <span className="nav-item__hint">{hint}</span> : null}
               {label === '生成任务' && activeJobCount > 0 ? <em>{activeJobCount}</em> : null}
             </NavLink>
             )
@@ -330,29 +387,19 @@ export function AppShell() {
           </Link>
           {routeProjectId ? (
             <nav aria-label="项目内导航" className="sidebar__subnav">
-              {([
-                { label: '样片工作台', to: currentProjectLink, icon: Film, offlineReady: true },
-                { label: '故事与剧本', to: `/projects/${routeProjectId}/story`, icon: BookOpenText, offlineReady: false },
-                { label: '角色', to: `/projects/${routeProjectId}/characters`, icon: Users, offlineReady: false },
-                { label: '前期资产', to: `/projects/${routeProjectId}/preproduction`, icon: Boxes, offlineReady: false },
-                { label: '动态分镜', to: `/projects/${routeProjectId}/storyboard`, icon: Images, offlineReady: false },
-                { label: '正式制作', to: `/projects/${routeProjectId}/production`, icon: Rocket, offlineReady: false },
-              ]).map(({ label, to, icon: Icon, offlineReady }) => {
-                const locked = apiStatus !== 'connected' && !offlineReady
-                return (
-                  <NavLink
-                    className={({ isActive }) => `sidebar__subnav-item ${isActive ? 'sidebar__subnav-item--active' : ''}`}
-                    end={label === '样片工作台'}
-                    key={to}
-                    title={locked ? `${label} · 连接服务端后可用` : label}
-                    to={to}
-                  >
-                    <Icon size={15} strokeWidth={1.8} />
-                    <span>{label}</span>
-                    {locked ? <LockKeyhole aria-label="连接服务端后可用" className="sidebar__subnav-lock" size={12} /> : null}
-                  </NavLink>
-                )
-              })}
+              {projectSubnavItems(routeProjectId, currentProjectLink, apiStatus).map(({ label, to, icon: Icon, locked }) => (
+                <NavLink
+                  className={({ isActive }) => `sidebar__subnav-item ${isActive ? 'sidebar__subnav-item--active' : ''}`}
+                  end={label === '样片工作台'}
+                  key={to}
+                  title={locked ? `${label} · 连接服务端后可用` : label}
+                  to={to}
+                >
+                  <Icon size={15} strokeWidth={1.8} />
+                  <span>{label}</span>
+                  {locked ? <LockKeyhole aria-label="连接服务端后可用" className="sidebar__subnav-lock" size={12} /> : null}
+                </NavLink>
+              ))}
             </nav>
           ) : null}
         </div>
@@ -372,8 +419,23 @@ export function AppShell() {
       <div className="app-main">
         <header className="topbar">
           <div className="topbar__leading">
+            {routeProjectId ? (
+              <Button
+                aria-controls="mobile-project-nav"
+                aria-expanded={mobileProjectNavOpen}
+                aria-label="打开项目菜单"
+                className="mobile-project-nav-trigger"
+                onClick={() => setMobileProjectNavOpen((value) => !value)}
+                size="sm"
+                variant="ghost"
+              >
+                <Menu size={18} strokeWidth={1.8} />
+              </Button>
+            ) : null}
             <Link className="mobile-brand" to="/projects" aria-label="剧创 AI 首页">
-              <span><Clapperboard size={17} /></span>
+              <span>
+                <img alt="" className="brand__logo" src="/assets/juchuang-ai-logo.png" />
+              </span>
               <strong>剧创 AI</strong>
             </Link>
             <nav className="breadcrumbs" aria-label="面包屑">
@@ -477,19 +539,66 @@ export function AppShell() {
         }}>
           <main className="content-area" id="main-content" tabIndex={-1}>
             {pathProjectId && pathProjectId !== 'new' ? <ProjectWorkflowBar /> : null}
-            <ErrorBoundary key={location.pathname}>
-              <Suspense fallback={
-                <div className="route-loading" role="status">
-                  <LoaderCircle className="spin" size={20} />
-                  <span>正在打开工作区…</span>
-                </div>
-              }>
+            <ErrorBoundary
+              key={`${location.pathname}:${ROUTE_ERROR_BOUNDARY_VERSION}`}
+              resetKey={`${location.pathname}${location.search}`}
+            >
+              <Suspense fallback={<PageLoadingSkeleton label="正在打开工作区" stage="加载页面模块" />}>
                 <Outlet />
               </Suspense>
             </ErrorBoundary>
           </main>
         </ProjectReadinessContext.Provider>
       </div>
+      {routeProjectId && mobileProjectNavOpen ? (
+        <>
+          <button
+            aria-label="关闭项目菜单"
+            className="mobile-project-nav__backdrop"
+            onClick={() => setMobileProjectNavOpen(false)}
+            type="button"
+          />
+          <aside
+            aria-label="项目内导航"
+            className="mobile-project-nav"
+            id="mobile-project-nav"
+          >
+            <header className="mobile-project-nav__header">
+              <Link className="mobile-project-nav__project" onClick={() => setMobileProjectNavOpen(false)} to={currentProjectLink}>
+                <span className="project-monogram">{currentProjectName.slice(0, 1)}</span>
+                <span>
+                  <strong>{currentProjectName}</strong>
+                  <small>{currentProjectMeta}</small>
+                </span>
+              </Link>
+              <Button
+                aria-label="关闭"
+                onClick={() => setMobileProjectNavOpen(false)}
+                size="sm"
+                variant="ghost"
+              >
+                ×
+              </Button>
+            </header>
+            <nav className="mobile-project-nav__links">
+              {projectSubnavItems(routeProjectId, currentProjectLink, apiStatus).map(({ label, to, icon: Icon, locked }) => (
+                <NavLink
+                  className={({ isActive }) => `mobile-project-nav__link ${isActive ? 'mobile-project-nav__link--active' : ''}`}
+                  end={label === '样片工作台'}
+                  key={to}
+                  onClick={() => setMobileProjectNavOpen(false)}
+                  title={locked ? `${label} · 连接服务端后可用` : label}
+                  to={to}
+                >
+                  <Icon size={18} strokeWidth={1.8} />
+                  <span>{label}</span>
+                  {locked ? <LockKeyhole aria-label="连接服务端后可用" size={14} /> : null}
+                </NavLink>
+              ))}
+            </nav>
+          </aside>
+        </>
+      ) : null}
       <OnboardingDialog open={onboardingOpen} onFinish={finishOnboarding} />
     </div>
   )

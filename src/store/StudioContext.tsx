@@ -51,6 +51,7 @@ interface StudioContextValue extends AppState {
   deleteProject: (projectId: string) => Promise<void>
   activateProject: (projectId: string) => Promise<void>
   updateShot: (shotId: string, patch: Partial<Shot>) => void
+  reorderSceneShots: (sceneId: string, orderedShotIds: string[]) => void
   generateTake: (shotId: string, options: ImageGenerationOptions) => void
   generateVideo: (shotId: string, prompt?: string, imageUrl?: string) => void
   applyCandidateTake: (shotId: string) => void
@@ -77,6 +78,60 @@ interface StudioContextValue extends AppState {
 
 const StudioContext = createContext<StudioContextValue | null>(null)
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function nonEmptyString(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.trim() ? value : fallback
+}
+
+export function normalizeCachedStudioState(value: unknown): AppState {
+  const fallback = structuredClone(initialAppState)
+  if (!isRecord(value)) return fallback
+
+  const cachedProject = isRecord(value.project) ? value.project : {}
+  const project = {
+    ...fallback.project,
+    ...cachedProject,
+    id: nonEmptyString(cachedProject.id, fallback.project.id),
+    name: nonEmptyString(cachedProject.name, fallback.project.name),
+    idea: nonEmptyString(cachedProject.idea, fallback.project.idea),
+    style: nonEmptyString(cachedProject.style, fallback.project.style),
+    aspectRatio: cachedProject.aspectRatio === '16:9' ? '16:9' : fallback.project.aspectRatio,
+    episodeId: nonEmptyString(cachedProject.episodeId, fallback.project.episodeId),
+    updatedAt: nonEmptyString(cachedProject.updatedAt, fallback.project.updatedAt),
+    scenes: Array.isArray(cachedProject.scenes)
+      ? cachedProject.scenes
+      : fallback.project.scenes,
+    shots: Array.isArray(cachedProject.shots)
+      ? cachedProject.shots
+      : fallback.project.shots,
+  } as AppState['project']
+
+  const jobs = Array.isArray(value.jobs)
+    ? value.jobs.flatMap((item, index) => {
+      if (!isRecord(item)) return []
+      const entityType = nonEmptyString(item.entityType, 'legacy')
+      const entityId = nonEmptyString(item.entityId, `job-${index + 1}`)
+      return [{
+        ...item,
+        entityType,
+        entityId,
+        entity: nonEmptyString(item.entity, `${entityType}:${entityId}`),
+      } as unknown as Job]
+    })
+    : fallback.jobs
+
+  return {
+    ...fallback,
+    ...value,
+    project,
+    jobs,
+    visualMode: value.visualMode === 'cinema' ? 'cinema' : fallback.visualMode,
+  } as AppState
+}
+
 function summarizeCurrentProject(state: AppState): ProjectSummary {
   return {
     ...state.project,
@@ -90,15 +145,7 @@ function loadInitialState(): AppState {
   try {
     const saved = localStorage.getItem(STORAGE_KEY)
     if (saved) {
-      const parsed = JSON.parse(saved) as Partial<AppState>
-      return {
-        ...structuredClone(initialAppState),
-        ...parsed,
-        project: {
-          ...structuredClone(initialAppState.project),
-          ...parsed.project,
-        },
-      }
+      return normalizeCachedStudioState(JSON.parse(saved))
     }
   } catch {
     localStorage.removeItem(STORAGE_KEY)
@@ -289,6 +336,36 @@ export function StudioProvider({ children }: { children: ReactNode }) {
         updatedAt: new Date().toISOString(),
       },
     }))
+  }, [])
+
+  const reorderSceneShots = useCallback((sceneId: string, orderedShotIds: string[]) => {
+    setState((current) => {
+      const scene = current.project.scenes.find((item) => item.id === sceneId)
+      if (!scene) return current
+      const validIds = new Set(scene.shotIds)
+      if (
+        orderedShotIds.length !== scene.shotIds.length
+        || !orderedShotIds.every((id) => validIds.has(id))
+      ) {
+        return current
+      }
+      const ordinalById = new Map(orderedShotIds.map((id, index) => [id, index + 1]))
+      return {
+        ...current,
+        project: {
+          ...current.project,
+          scenes: current.project.scenes.map((item) => (
+            item.id === sceneId ? { ...item, shotIds: orderedShotIds } : item
+          )),
+          shots: current.project.shots.map((shot) => (
+            shot.sceneId === sceneId && ordinalById.has(shot.id)
+              ? { ...shot, ordinal: ordinalById.get(shot.id)! }
+              : shot
+          )),
+          updatedAt: new Date().toISOString(),
+        },
+      }
+    })
   }, [])
 
   const generateTake = useCallback((shotId: string, options: ImageGenerationOptions) => {
@@ -631,6 +708,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
       deleteProject,
       activateProject,
       updateShot,
+      reorderSceneShots,
       generateTake,
       generateVideo,
       applyCandidateTake,
@@ -655,6 +733,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
       deleteProject,
       activateProject,
       updateShot,
+      reorderSceneShots,
       generateTake,
       generateVideo,
       applyCandidateTake,

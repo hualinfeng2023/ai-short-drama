@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ArrowLeft, Check, LoaderCircle, LockKeyhole, Mic2, RefreshCw } from 'lucide-react'
+import { ArrowLeft, Check, LoaderCircle, LockKeyhole, Mic2, RefreshCw, Sparkles, UsersRound } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router'
 import {
   approvePreproduction,
@@ -9,8 +9,11 @@ import {
   type PreproductionWorkspace,
 } from '../api/client'
 import { Button, PageHeader, StatusBadge, Surface, getStatusLabel } from '../components/ui'
+import { ImpactConfirmModal } from '../components/ConfirmModal'
+import { PageLoadingSkeleton } from '../components/PageLoadingSkeleton'
 import { ServiceRequiredState } from '../components/ServiceRequiredState'
 import { useStudio } from '../store/StudioContext'
+import { useToast } from '../store/ToastContext'
 import { localizeDisplayText } from '../utils/localizeDisplayText'
 import type { ProjectRecord } from '../types'
 
@@ -18,11 +21,13 @@ export function PreproductionPage() {
   const { projectId } = useParams()
   const { project: activeProject } = useStudio()
   const navigate = useNavigate()
+  const { notify } = useToast()
   const [project, setProject] = useState<ProjectRecord | null>(null)
   const [workspace, setWorkspace] = useState<PreproductionWorkspace | null>(null)
   const [selected, setSelected] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<string | null>(null)
+  const [approveOpen, setApproveOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
@@ -87,6 +92,8 @@ export function PreproductionPage() {
     setError(null)
     try {
       await approvePreproduction(projectId, project.lockVersion)
+      setApproveOpen(false)
+      notify('第 3 阶段已批准，分镜生成任务已入队。')
       navigate(`/tasks?project=${projectId}`)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '第 3 阶段批准失败')
@@ -99,7 +106,7 @@ export function PreproductionPage() {
     return <ServiceRequiredState feature="前期资产" projectId={projectId} />
   }
   if (loading || !project || !workspace || !projectId) {
-    return <div className="page brief-page-state"><LoaderCircle className="spin" size={22} /><strong>正在读取角色、造型、场景与声音资产…</strong></div>
+    return <PageLoadingSkeleton label="正在读取前期资产" stage="角色、造型、场景与声音" />
   }
 
   const allLocked = workspace.characters.length > 0
@@ -151,6 +158,22 @@ export function PreproductionPage() {
       <article><p className="eyebrow">世界资产</p><h2>场景与道具</h2>{workspace.locations.map((location) => <div key={location.id}><strong>{location.name}</strong><span>场景第 {location.version} 版</span></div>)}{workspace.props.map((prop) => <div key={prop.id}><strong>{prop.name}</strong><span>道具第 {prop.version} 版</span></div>)}</article>
     </section>
 
-    <section className="character-lock-bar"><div><LockKeyhole size={18} /><span><strong>第 3 阶段 · 视觉设定</strong><small>批准后，所有分镜镜头都会绑定稳定的角色造型、场景、道具和声音编号。</small></span></div><Button disabled={!canApprove || busy !== null} onClick={() => void approve()}>{busy === 'approve' ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}批准第 3 阶段并生成分镜</Button></section>
+    <section className="character-lock-bar"><div><LockKeyhole size={18} /><span><strong>第 3 阶段 · 视觉设定</strong><small>批准后，所有分镜镜头都会绑定稳定的角色造型、场景、道具和声音编号。</small></span></div><Button disabled={!canApprove || busy !== null} onClick={() => setApproveOpen(true)}>{busy === 'approve' ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}批准第 3 阶段并生成分镜</Button></section>
+
+    <ImpactConfirmModal
+      confirmLabel="批准并生成分镜"
+      description="批准后无法直接回退，只能通过创建修改版重新走流程。"
+      items={[
+        { icon: <LockKeyhole size={16} />, title: '锁定视觉资产引用', detail: `${workspace.characters.length} 个角色、${workspace.looks.length} 个造型与场景道具编号将绑定到分镜。` },
+        { icon: <Sparkles size={16} />, title: '启动分镜生成', detail: '系统将依据已批准剧本自动拆镜并装配节奏样片。' },
+        { icon: <UsersRound size={16} />, title: '进入第 4 阶段', detail: '批准后会跳转到任务页，等待分镜与节奏样片就绪。' },
+      ]}
+      loading={busy === 'approve'}
+      onClose={() => { if (busy !== 'approve') setApproveOpen(false) }}
+      onConfirm={() => void approve()}
+      open={approveOpen}
+      subtitle="确认前期资产已完整锁定后再继续。"
+      title="批准第 3 阶段？"
+    />
   </div>
 }

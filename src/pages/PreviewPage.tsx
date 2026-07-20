@@ -27,8 +27,10 @@ import {
   rollbackPreviewTimeline,
 } from '../api/client'
 import { Button, EmptyState, Modal, PageHeader, ProgressBar, StatusBadge, getStatusLabel } from '../components/ui'
+import { ImpactConfirmModal } from '../components/ConfirmModal'
 import { useStudio } from '../store/StudioContext'
 import { useProjectReadiness } from '../store/ProjectReadinessContext'
+import { useToast } from '../store/ToastContext'
 import { localizeDisplayText } from '../utils/localizeDisplayText'
 import type {
   ExportEstimate,
@@ -42,6 +44,7 @@ export function PreviewPage() {
   const { projectId: routeProjectId } = useParams()
   const { project, jobs, activateProject } = useStudio()
   const { readiness } = useProjectReadiness()
+  const { notify } = useToast()
   const projectId = routeProjectId ?? project.id
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const [timelines, setTimelines] = useState<TimelineRecord[]>([])
@@ -52,6 +55,7 @@ export function PreviewPage() {
   const [comparison, setComparison] = useState<PreviewComparison | null>(null)
   const [exportEstimate, setExportEstimate] = useState<ExportEstimate | null>(null)
   const [rightsConfirmed, setRightsConfirmed] = useState(false)
+  const [approveOpen, setApproveOpen] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -126,6 +130,21 @@ export function PreviewPage() {
     }))
   }, [project.shots])
 
+  const rulerMarks = useMemo(() => {
+    const total = Math.max(totalDuration, 15)
+    const step = total <= 30 ? 5 : total <= 60 ? 15 : 30
+    const marks = [0]
+    for (let sec = step; sec < total; sec += step) marks.push(sec)
+    if (marks[marks.length - 1] !== total) marks.push(total)
+    return marks
+  }, [totalDuration])
+
+  function formatTimelineTime(sec: number) {
+    const minutes = Math.floor(sec / 60)
+    const seconds = Math.floor(sec % 60)
+    return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+  }
+
   useEffect(() => {
     if (currentTimeline?.status !== 'APPROVED') {
       setExportEstimate(null)
@@ -176,6 +195,8 @@ export function PreviewPage() {
     setError(null)
     try {
       await approvePreviewTimeline(currentTimeline.id, project.lockVersion)
+      setApproveOpen(false)
+      notify(`时间线第 ${currentTimeline.version} 版已批准，导出已解锁。`)
       await activateProject(projectId)
       await refresh()
     } catch (reason) {
@@ -259,7 +280,7 @@ export function PreviewPage() {
         </div>
 
         <div className="preview-timeline">
-          <div className="preview-timeline__ruler"><span>00:00</span><span>00:15</span><span>00:30</span><span>00:45</span><span>01:00</span></div>
+          <div className="preview-timeline__ruler">{rulerMarks.map((sec) => <span key={sec}>{formatTimelineTime(sec)}</span>)}</div>
           <div className="preview-timeline__track">{project.shots.map((shot) => <button className={selectedShot.id === shot.id ? 'active' : ''} key={shot.id} onClick={() => selectShot(shot.id)} style={{ flex: shot.durationSec }}><strong>{shot.code}</strong><small>{shot.durationSec} 秒</small></button>)}</div>
           <div className="preview-timeline__legend"><span><i />模拟分镜</span><span><i className="selected" />已选修改范围</span></div>
         </div>
@@ -280,7 +301,7 @@ export function PreviewPage() {
           <h2>{currentTimeline?.status === 'APPROVED' ? '当前小样已批准' : '确认故事与节奏后再批准'}</h2>
           <p>{currentTimeline?.status === 'APPROVED' ? `时间线第 ${currentTimeline.version} 版与基线哈希已冻结。` : '批准会记录操作者、时间戳与基线哈希；历史版本不会删除。'}</p>
           <ul><li><Check size={14} />{Math.round((currentTimeline?.durationMs ?? 0) / 1000)} 秒时间线无缺口</li><li><Check size={14} />真实 MP4 / SRT / VTT 已登记</li><li><AlertTriangle size={14} />模拟生成与临时资产已明确标识</li></ul>
-          <Button disabled={!currentTimeline || currentTimeline.status === 'APPROVED' || Boolean(activeRevision) || busy === 'approve'} onClick={approve}>{busy === 'approve' ? <LoaderCircle className="spin" size={16} /> : currentTimeline?.status === 'APPROVED' ? <CheckCircle2 size={16} /> : <Lock size={16} />}{currentTimeline?.status === 'APPROVED' ? '已批准当前基线' : `批准时间线第 ${currentTimeline?.version ?? 1} 版`}</Button>
+          <Button disabled={!currentTimeline || currentTimeline.status === 'APPROVED' || Boolean(activeRevision) || busy === 'approve'} onClick={() => setApproveOpen(true)}>{busy === 'approve' ? <LoaderCircle className="spin" size={16} /> : currentTimeline?.status === 'APPROVED' ? <CheckCircle2 size={16} /> : <Lock size={16} />}{currentTimeline?.status === 'APPROVED' ? '已批准当前基线' : `批准时间线第 ${currentTimeline?.version ?? 1} 版`}</Button>
           <Button disabled={!previousTimeline || busy === 'compare'} onClick={compare} variant="ghost"><ArrowLeftRight size={16} />{previousTimeline ? `比较第 ${previousTimeline.version} 版 / 第 ${currentTimeline?.version} 版` : '暂无历史版本'}</Button>
         </section>
 
@@ -300,5 +321,21 @@ export function PreviewPage() {
     <Modal open={impact !== null} onClose={() => setImpact(null)} title="局部修改影响范围" description="只有确认后才会创建持久化变更集。" footer={<><Button onClick={() => setImpact(null)} variant="secondary">返回修改</Button><Button disabled={busy === 'revision'} onClick={confirmRevision}>{busy === 'revision' ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}确认并执行</Button></>}><div className="impact-list"><div><span>解析意图</span><strong>{localizeDisplayText(impact?.intent.type ?? '')}</strong><small>{impact?.intent.instruction}</small></div><div><span>影响范围</span><strong>{impact?.affected.shots.length} 个镜头</strong><small>{impact?.affected.assetTypes.map(localizeDisplayText).join(' · ')}</small></div><div><span>预计消耗</span><strong>{impact?.estimatedPoints} 积分 · {impact?.estimatedSeconds} 秒</strong><small>保留 {impact?.affected.preservedHashes.length} 个未影响资产哈希</small></div></div></Modal>
 
     <Modal open={comparison !== null} onClose={() => setComparison(null)} title="时间线版本比较" description={localizeDisplayText(comparison?.summary ?? '')} footer={<><Button onClick={() => setComparison(null)} variant="secondary">保留当前版本</Button><Button disabled={busy === 'rollback'} onClick={rollback}>{busy === 'rollback' ? <LoaderCircle className="spin" size={16} /> : <RotateCcw size={16} />}回退到第 {previousTimeline?.version} 版</Button></>}><div className="timeline-compare"><div><span>第 {comparison?.left.version} 版</span><strong>历史基线</strong><p>状态：{getStatusLabel(comparison?.left.status ?? '')} · 基线 {comparison?.left.baselineHash.slice(0, 12)}</p></div><ArrowLeftRight size={20} /><div><span>第 {comparison?.right.version} 版</span><strong>当前小样</strong><p>变化媒体：{comparison?.changedAssets.map(localizeDisplayText).join('、') || '无'}；不变：{comparison?.unchangedAssets.map(localizeDisplayText).join('、') || '无'}</p></div></div></Modal>
+
+    <ImpactConfirmModal
+      confirmLabel={`批准时间线第 ${currentTimeline?.version ?? 1} 版`}
+      description="批准会记录操作者、时间戳与基线哈希；历史版本不会删除。"
+      items={[
+        { icon: <Lock size={16} />, title: '冻结时间线基线', detail: `${Math.round((currentTimeline?.durationMs ?? 0) / 1000)} 秒 · 基线哈希将写入审计记录。` },
+        { icon: <ShieldCheck size={16} />, title: '解锁导出四件套', detail: '批准后可导出 MP4、SRT、VTT 与 Manifest。' },
+        { icon: <AlertTriangle size={16} />, title: '模拟资产已标识', detail: '临时分镜与模拟声音仍保留标识，不影响基线追溯。' },
+      ]}
+      loading={busy === 'approve'}
+      onClose={() => { if (busy !== 'approve') setApproveOpen(false) }}
+      onConfirm={() => void approve()}
+      open={approveOpen}
+      subtitle="确认故事节奏与镜头推进符合预期后再批准。"
+      title="批准当前小样基线？"
+    />
   </div>
 }
