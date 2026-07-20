@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.db.models import Job
 from app.jobs.contracts import JobExecutionContext, JobExecutionError
 from app.jobs.registry import register_job_handler
+from app.services.character_image_qc import evaluate_character_image_quality
 from app.services.character_visuals import (
     CHARACTER_CLEAN_FRAME_CONSTRAINT,
     IDENTITY_DOSSIER_MAX_WAIT_SECONDS,
@@ -57,7 +58,7 @@ async def _generate_character_image(
         session,
         context.settings,
         reference_asset_ids,
-        mask_character_watermark=True,
+        detect_and_mask_character_watermark=True,
     )
     prompt = (
         f"{payload['prompt']}\n"
@@ -171,12 +172,15 @@ async def generate_character_candidate(
     finally:
         if not generation.done():
             generation.cancel()
+    await context.checkpoint(session, job, 74, "检查水印、前景遮挡、身体连续性与纯白背景")
+    quality_report = await evaluate_character_image_quality(context.settings, image)
     await context.checkpoint(session, job, 82, "登记角色候选资产")
     asset, candidate = materialize_character_candidate(
         session,
         context.settings,
         job,
         image,
+        quality_report=quality_report,
     )
     return {
         "character_id": candidate.character_id,
@@ -185,6 +189,7 @@ async def generate_character_candidate(
         "provider": "volcengine-ark" if context.settings.ark_api_key else "mock",
         "model": image.model,
         "request_id": image.request_id,
+        "generation_quality": quality_report.as_dict(),
     }
 
 
@@ -207,12 +212,15 @@ async def generate_character_visual_candidate(
             if isinstance(item, str)
         ],
     )
+    await context.checkpoint(session, job, 74, "检查水印、前景遮挡、身体连续性与纯白背景")
+    quality_report = await evaluate_character_image_quality(context.settings, image)
     await context.checkpoint(session, job, 82, "登记角色形象候选与提示词快照")
     asset, candidate = materialize_visual_candidate(
         session,
         context.settings,
         job,
         image,
+        quality_report=quality_report,
     )
     return {
         "character_id": candidate.character_id,
@@ -221,6 +229,7 @@ async def generate_character_visual_candidate(
         "batch_id": candidate.batch_id,
         "provider": "volcengine-ark" if context.settings.ark_api_key else "mock",
         "model": image.model,
+        "generation_quality": quality_report.as_dict(),
     }
 
 
@@ -240,12 +249,15 @@ async def generate_character_identity_dossier(
         reference_asset_ids=[str(payload["reference_asset_id"])],
         max_wait_seconds=IDENTITY_DOSSIER_MAX_WAIT_SECONDS,
     )
+    await context.checkpoint(session, job, 74, "检查水印、前景遮挡、身体连续性与纯白背景")
+    quality_report = await evaluate_character_image_quality(context.settings, image)
     await context.checkpoint(session, job, 82, "登记角色身份档案视图")
     asset, record = materialize_identity_asset(
         session,
         context.settings,
         job,
         image,
+        quality_report=quality_report,
     )
     return {
         "character_id": record.character_id,
@@ -254,6 +266,7 @@ async def generate_character_identity_dossier(
         "asset_id": asset.id,
         "provider": "volcengine-ark" if context.settings.ark_api_key else "mock",
         "model": image.model,
+        "generation_quality": quality_report.as_dict(),
     }
 
 

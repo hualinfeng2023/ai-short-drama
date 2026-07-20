@@ -26,9 +26,7 @@ describe('getJobRecoveryPlan', () => {
         'FALLBACK_EXECUTION',
         'SAVE_INTERMEDIATE',
         'PROVIDE_INPUT',
-        'ESCALATE_HUMAN',
       ],
-      handoffStatus: 'NOT_REQUESTED',
     })
   })
 
@@ -44,10 +42,9 @@ describe('getJobRecoveryPlan', () => {
           failed_parts: ['shot-03'],
           intermediate_result_saved: true,
           intermediate_result_keys: ['completed_shot_ids'],
-          available_actions: ['RETRY_FAILED_PARTS', 'ESCALATE_HUMAN'],
+          available_actions: ['RETRY_FAILED_PARTS'],
           unreliable_outputs: ['shot-03 之后的时间线'],
           reliability_note: '已完成镜头可信，失败镜头及其下游结果不可信。',
-          handoff_status: 'REQUESTED',
         },
       },
     })
@@ -57,9 +54,8 @@ describe('getJobRecoveryPlan', () => {
       completedSteps: ['脚本解析', '关键帧生成'],
       failedParts: ['shot-03'],
       intermediateResultSaved: true,
-      availableActions: ['RETRY_FAILED_PARTS', 'ESCALATE_HUMAN'],
+      availableActions: ['RETRY_FAILED_PARTS'],
       unreliableOutputs: ['镜头-03 之后的时间线'],
-      handoffStatus: 'REQUESTED',
     })
   })
 

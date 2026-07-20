@@ -35,7 +35,7 @@ from app.services.relationship_graphs import validate_relationship_graph
 from app.services.text_provider import ScriptPackageOutput, StoryStructure, TextGenerationResult
 from app.services.workspace import project_or_404
 
-DIRECTION_CONFIG_VERSION = "story-directions-v4-independent-targeting"
+DIRECTION_CONFIG_VERSION = "story-directions-v5-resumable-routes"
 STORY_PACKAGE_CONFIG_VERSION = "story-package-v5-independent-targeting"
 SCRIPT_SCHEMA_VERSION = "script-v3-breakout-engine"
 SCRIPT_CONFIG_VERSION = "script-v4-independent-targeting"
@@ -129,6 +129,7 @@ def request_story_directions(
 ) -> tuple[JobRead, bool]:
     project = project_or_404(session, project_id)
     brief = _latest_brief(session, project_id)
+    settings = get_settings()
     business_key = (
         f"{project_id}:GENERATE_STORY_DIRECTIONS:{brief.version}:{DIRECTION_CONFIG_VERSION}"
     )
@@ -156,7 +157,11 @@ def request_story_directions(
         label=f"{project.name} · 3 个故事方向",
         stage="等待生成差异化故事方向",
         trace_id=trace_id,
-        estimated_seconds=120 if get_settings().ark_api_key else 5,
+        estimated_seconds=(
+            max(5, round(settings.ark_request_timeout_seconds))
+            if settings.ark_api_key
+            else 5
+        ),
         max_attempts=2,
         retryable=True,
     )

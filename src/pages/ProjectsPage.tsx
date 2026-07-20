@@ -1,10 +1,11 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { AlertTriangle, ArrowRight, CalendarDays, Clapperboard, Clock3, LoaderCircle, Plus, RotateCcw, Trash2 } from 'lucide-react'
 import { Link, useNavigate } from 'react-router'
 import { calculateProgress } from '../data/demo'
 import { useStudio } from '../store/StudioContext'
 import { useToast } from '../store/ToastContext'
-import { Button, Modal, PageHeader, ProgressBar, StatusBadge } from '../components/ui'
+import { Button, getStatusLabel, Modal, PageHeader, ProgressBar, SelectControl, StatusBadge } from '../components/ui'
+import { ConfirmModal } from '../components/ConfirmModal'
 import type { ProjectSummary } from '../types'
 import { localizeDisplayText } from '../utils/localizeDisplayText'
 
@@ -12,11 +13,36 @@ export function ProjectsPage() {
   const { apiStatus, deleteProject, project, projectSummaries, resetDemo } = useStudio()
   const progress = calculateProgress(project.shots)
   const featureImage = project.shots.find((shot) => shot.currentImageUrl)?.currentImageUrl
+  const featureShot = project.shots.find((shot) => shot.currentImageUrl) ?? project.shots[0]
+  const featureScene = featureShot
+    ? project.scenes.find((scene) => scene.id === featureShot.sceneId)
+    : project.scenes[0]
   const { notify } = useToast()
   const navigate = useNavigate()
   const [pendingDelete, setPendingDelete] = useState<ProjectSummary | null>(null)
+  const [pendingResetDemo, setPendingResetDemo] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [statusFilter, setStatusFilter] = useState<string>('all')
+  const [sortBy, setSortBy] = useState<'updated' | 'name'>('updated')
+
+  const statusOptions = useMemo(
+    () => Array.from(new Set(projectSummaries.map((item) => item.status))),
+    [projectSummaries],
+  )
+
+  const visibleSummaries = useMemo(() => {
+    let items = [...projectSummaries]
+    if (statusFilter !== 'all') {
+      items = items.filter((item) => item.status === statusFilter)
+    }
+    items.sort((left, right) => (
+      sortBy === 'name'
+        ? left.name.localeCompare(right.name, 'zh-CN')
+        : new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()
+    ))
+    return items
+  }, [projectSummaries, sortBy, statusFilter])
 
   async function confirmDelete() {
     if (!pendingDelete || deleting) return
@@ -49,8 +75,7 @@ export function ProjectsPage() {
   return (
     <div className="page page--projects">
       <PageHeader
-        eyebrow="创作空间"
-        title="项目"
+        title="短剧库"
         description="继续上次创作，或从一句故事想法开始新的验证样片。"
         actions={
           <Link className="button button--primary button--md" to="/projects/new">
@@ -65,9 +90,9 @@ export function ProjectsPage() {
           {featureImage ? <img alt={`${project.name} 当前镜头`} className="project-feature__image" src={featureImage} /> : null}
           <span className="frame-label">演示生成 · 混合小样</span>
           <div className="frame-copy">
-            <small>场景 02 · 镜头 S05</small>
-            <strong>把决定变成一个动作。</strong>
-            <span>{localizeDisplayText(project.style)} / {project.aspectRatio} / {project.targetDurationSec} 秒</span>
+            <small>{featureScene ? `场景 ${featureScene.code}` : '第 1 集'}{featureShot ? ` · ${featureShot.code}` : ''}</small>
+            <strong>{featureShot?.title ?? project.name}</strong>
+            <span>{localizeDisplayText(project.style)} · {project.aspectRatio}</span>
           </div>
         </div>
         <div className="project-feature__body">
@@ -79,10 +104,10 @@ export function ProjectsPage() {
             <StatusBadge status={project.status} />
           </div>
           <p>{project.idea}</p>
-          <div className="project-meta-row">
-            <span><Clapperboard size={15} />第 1 集 · 验证样片</span>
+          <div className="project-feature__stats">
+            <span><Clapperboard size={15} />{project.scenes.length} 场景 · {project.shots.length} 镜头</span>
             <span><Clock3 size={15} />{project.targetDurationSec} 秒 · {project.aspectRatio}</span>
-            <span><CalendarDays size={15} />今天 19:42 更新</span>
+            <span><CalendarDays size={15} />{updatedLabel(project.updatedAt)} 更新</span>
           </div>
           <ProgressBar label="镜头制作进度" value={progress} />
           <div className="project-feature__actions">
@@ -104,19 +129,43 @@ export function ProjectsPage() {
 
       <section className="project-library" aria-labelledby="project-library-title">
         <div className="section-heading">
-          <div>
-            <p className="eyebrow">项目库</p>
-            <h2 id="project-library-title">全部项目</h2>
-          </div>
-          {apiStatus === 'mock_fallback' ? <Button onClick={() => { resetDemo(); notify('已恢复内置演示项目。') }} size="sm" variant="ghost">
+          <h2 id="project-library-title">全部项目</h2>
+          {apiStatus === 'mock_fallback' ? <Button onClick={() => setPendingResetDemo(true)} size="sm" variant="ghost">
             <RotateCcw size={15} /> 恢复演示项目
           </Button> : null}
+        </div>
+        <div className="project-library-toolbar">
+          <label className="project-library-toolbar__field">
+            <span>状态</span>
+            <SelectControl
+              aria-label="按状态筛选"
+              onChange={(event) => setStatusFilter(event.target.value)}
+              value={statusFilter}
+            >
+              <option value="all">全部状态</option>
+              {statusOptions.map((status) => (
+                <option key={status} value={status}>{getStatusLabel(status)}</option>
+              ))}
+            </SelectControl>
+          </label>
+          <label className="project-library-toolbar__field">
+            <span>排序</span>
+            <SelectControl
+              aria-label="排序方式"
+              onChange={(event) => setSortBy(event.target.value as 'updated' | 'name')}
+              value={sortBy}
+            >
+              <option value="updated">最近更新</option>
+              <option value="name">名称</option>
+            </SelectControl>
+          </label>
+          <span className="project-library-toolbar__count">{visibleSummaries.length} 个项目</span>
         </div>
         <div className="project-table" role="table" aria-label="项目列表">
           <div className="project-table__head" role="row">
             <span>项目</span><span>状态</span><span>规格</span><span>进度</span><span>更新时间</span><span>操作</span>
           </div>
-          {projectSummaries.map((item) => {
+          {visibleSummaries.map((item) => {
             const itemProgress = item.id === project.id ? progress : 0
             const itemHref = item.id === project.id
               ? `/projects/${item.id}/episodes/${project.episodeId}`
@@ -129,7 +178,6 @@ export function ProjectsPage() {
               title={`打开${item.name}`}
             >
               <span className="project-table__name">
-                <span className="project-monogram">{item.name.slice(0, 1)}</span>
                 <span><strong>{item.name}</strong><small>{localizeDisplayText(item.genre)}</small></span>
               </span>
               <span><StatusBadge status={item.status} /></span>
@@ -182,6 +230,19 @@ export function ProjectsPage() {
         </div>
         {deleteError ? <p className="project-delete-dialog-error" role="alert">{deleteError}</p> : null}
       </Modal>
+
+      <ConfirmModal
+        confirmLabel="恢复演示项目"
+        description="当前浏览器中的演示数据将被重置为内置样片，未保存的本地修改会丢失。"
+        onClose={() => setPendingResetDemo(false)}
+        onConfirm={() => {
+          resetDemo()
+          setPendingResetDemo(false)
+          notify('已恢复内置演示项目。')
+        }}
+        open={pendingResetDemo}
+        title="恢复演示项目？"
+      />
     </div>
   )
 }

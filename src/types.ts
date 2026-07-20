@@ -145,6 +145,7 @@ export interface Scene {
 export interface Job {
   id: string
   projectId: string
+  projectName: string
   jobType: string
   entityType: string
   entityId: string
@@ -174,7 +175,6 @@ export type JobRecoveryAction =
   | 'FALLBACK_EXECUTION'
   | 'SAVE_INTERMEDIATE'
   | 'PROVIDE_INPUT'
-  | 'ESCALATE_HUMAN'
 
 export interface JobRecoveryRequest {
   action: JobRecoveryAction
@@ -182,7 +182,6 @@ export interface JobRecoveryRequest {
   model?: string
   strategy?: string
   additionalInput?: string
-  note?: string
 }
 
 export interface ProjectRecord {

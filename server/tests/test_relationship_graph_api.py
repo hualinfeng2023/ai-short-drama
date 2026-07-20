@@ -2,6 +2,10 @@ import json
 from datetime import UTC, datetime
 
 import pytest
+from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.orm import sessionmaker
+
 from app.config import get_settings
 from app.db.models import (
     Asset,
@@ -26,8 +30,10 @@ from app.jobs.worker import PersistentJobWorker
 from app.seed import PROJECT_ID
 from app.services.character_visuals import (
     CANDIDATE_VARIANTS,
+    _apply_candidate_casting_policy,
     _extract_age,
     _profile_audit,
+    _visualize_personality,
     is_biological_kinship,
     kinship_similarity_level,
     materialize_identity_asset,
@@ -35,9 +41,6 @@ from app.services.character_visuals import (
 )
 from app.services.image_provider import GeneratedImage
 from app.services.projects import canonical_json, content_hash
-from httpx import AsyncClient
-from sqlalchemy import select
-from sqlalchemy.orm import sessionmaker
 
 STORY_ID = "91000000-0000-4000-8000-000000000001"
 STORY_BIBLE_ID = "91000000-0000-4000-8000-000000000002"
@@ -71,6 +74,57 @@ def test_character_profile_audit_blocks_conflicting_ages() -> None:
     )
 
     assert any(issue["code"] == "AGE_CONFLICT" for issue in issues)
+
+
+def test_character_personality_visualization_preserves_traits_and_supports_english() -> None:
+    visualization = _visualize_personality(
+        ["Introverted", "Principled", "Obsessive", "Self-aware"],
+    )
+
+    assert visualization["traits"] == "内向、有原则、执着、自省"
+    assert "细微眉眼" in visualization["expression"]
+    assert "核对关键细节" in visualization["movement"]
+
+
+def test_candidate_casting_policy_respects_explicit_user_setting() -> None:
+    variants = _apply_candidate_casting_policy(
+        CANDIDATE_VARIANTS[:3],
+        explicit_region="爱尔兰裔美国人",
+        preserve_reference_identity=False,
+        preserve_family_background=False,
+    )
+
+    assert {
+        item["casting_direction"]["key"]  # type: ignore[index]
+        for item in variants
+    } == {"user_specified"}
+    assert all("爱尔兰裔美国人" in str(item["instruction"]) for item in variants)
+    assert all("选角背景：爱尔兰裔美国人" in str(item["description"]) for item in variants)
+
+
+def test_candidate_casting_policy_distinguishes_family_from_same_person_reference() -> None:
+    family_variants = _apply_candidate_casting_policy(
+        CANDIDATE_VARIANTS[:3],
+        explicit_region=None,
+        preserve_reference_identity=False,
+        preserve_family_background=True,
+    )
+    refinement_variants = _apply_candidate_casting_policy(
+        CANDIDATE_VARIANTS[:3],
+        explicit_region=None,
+        preserve_reference_identity=True,
+        preserve_family_background=False,
+    )
+
+    assert {
+        item["casting_direction"]["key"]  # type: ignore[index]
+        for item in family_variants
+    } == {"family_reference"}
+    assert all("必须生成独立人物" in str(item["instruction"]) for item in family_variants)
+    assert {
+        item["casting_direction"]["key"]  # type: ignore[index]
+        for item in refinement_variants
+    } == {"reference_identity"}
 
 
 def relationship_state(
@@ -508,6 +562,7 @@ async def test_character_visual_flow_requires_manual_generation_and_lock(
     assert all(not item["candidates"] for item in workspace["characters"])
     protagonist = next(item for item in workspace["characters"] if item["name"] == "林岚")
     assert protagonist["profile"]["identity_fields"]["age"] == "26岁"
+    assert protagonist["profile"]["appearance_fields"]["height"].startswith("未指定")
     assert protagonist["profile"]["summary"].startswith(
         "26岁 · 待明确职业 · 留齐肩碎发"
     )
@@ -603,6 +658,10 @@ async def test_character_visual_flow_requires_manual_generation_and_lock(
                 ).all()
             )
             assert len(jobs) == 5
+            assert all(
+                "RGB 255,255,255，#FFFFFF" in json.loads(job.input_json)["prompt"]
+                for job in jobs
+            )
             failed_job_id = jobs[0].id
             jobs[0].status = "FAILED"
             jobs[0].completed_at = datetime.now(UTC)
@@ -709,6 +768,8 @@ async def test_character_visual_flow_requires_manual_generation_and_lock(
                 assert adjustment_payload["generation_mode"] == "REFINE"
                 assert adjustment_payload["reference_asset_id"] == current_view["asset_id"]
                 assert "保留五官，让视线更坚定" in adjustment_payload["prompt"]
+                assert "RGB 255,255,255，#FFFFFF" in adjustment_payload["prompt"]
+                assert "新生成、微调和重新生成都必须遵守" in adjustment_payload["prompt"]
                 replacement = materialize_identity_asset(
                     session,
                     get_settings(),
@@ -814,6 +875,59 @@ async def test_character_visual_flow_requires_manual_generation_and_lock(
     assert look_changed.status_code == 200
     assert look_changed.json()["data"]["action"] == "LOOK_VERSION_CREATED"
 
+    refreshed = (await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")).json()[
+        "data"
+    ]
+    first = next(item for item in refreshed["characters"] if item["id"] == first["id"])
+    locked_identity_id = first["locked_identity_version_id"]
+    locked_identity = next(
+        item for item in first["identities"] if item["id"] == locked_identity_id
+    )
+    locked_front = next(
+        asset for asset in locked_identity["assets"] if asset["view_type"] == "FRONT"
+    )
+    regenerate_locked_view = await client.post(
+        (
+            f"/api/v1/projects/{PROJECT_ID}/characters/{first['id']}"
+            f"/identity/{locked_identity_id}/views"
+        ),
+        json={
+            "expected_version": first["lock_version"],
+            "view_type": "FRONT",
+            "actor": "tester",
+        },
+    )
+    assert regenerate_locked_view.status_code == 202, regenerate_locked_view.text
+
+    revision_workspace = (
+        await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")
+    ).json()["data"]
+    revised_character = next(
+        item for item in revision_workspace["characters"] if item["id"] == first["id"]
+    )
+    assert revised_character["locked_identity_version_id"] == locked_identity_id
+    pending_revision = max(
+        (
+            item
+            for item in revised_character["identities"]
+            if item["locked_at"] is None
+        ),
+        key=lambda item: item["version"],
+    )
+    assert pending_revision["status"] == "GENERATING_DOSSIER"
+    assert len(pending_revision["assets"]) == len(locked_identity["assets"])
+    pending_front = next(
+        asset for asset in pending_revision["assets"] if asset["view_type"] == "FRONT"
+    )
+    assert pending_front["asset_id"] == locked_front["asset_id"]
+    regeneration_job = regenerate_locked_view.json()["data"]["job"]
+    with factory() as session:
+        queued_job = session.get(Job, regeneration_job["id"])
+        assert queued_job is not None
+        queued_payload = json.loads(queued_job.input_json)
+        assert queued_payload["identity_version_id"] == pending_revision["id"]
+        assert queued_payload["replace_identity_asset_id"] == pending_front["id"]
+
 
 @pytest.mark.anyio
 async def test_character_generation_auto_confirms_summary_and_creates_distinct_refinements(
@@ -870,7 +984,22 @@ async def test_character_generation_auto_confirms_summary_and_creates_distinct_r
         item["key"]
         for item in batch_prompt["candidate_variants"]
     } == variant_keys
+    assert "视觉方向：" not in batch_prompt["prompt"]
+    assert "不得依据提示词语言、规范语言、主市场、角色姓名、职业" in batch_prompt["prompt"]
+    assert "RGB 255,255,255，#FFFFFF" in batch_prompt["prompt"]
+    assert "人物轮廓外的全部背景像素保持纯白" in batch_prompt["prompt"]
+    assert all("候选方向：" in item["prompt"] for item in payloads)
+    assert all("RGB 255,255,255，#FFFFFF" in item["prompt"] for item in payloads)
     assert len({item["prompt"] for item in payloads}) == 3
+    casting_directions = [
+        item["prompt_snapshot"]["candidate_variant"]["casting_direction"] for item in payloads
+    ]
+    assert len({item["key"] for item in casting_directions}) == 3
+    assert all(item["key"] != "user_specified" for item in casting_directions)
+    assert all(
+        "选角背景：" in item["prompt_snapshot"]["candidate_variant"]["description"]
+        for item in payloads
+    )
 
     worker = PersistentJobWorker(get_settings())
     for _ in range(3):
@@ -916,6 +1045,217 @@ async def test_character_generation_auto_confirms_summary_and_creates_distinct_r
     assert all(item["source_candidate_id"] == source["id"] for item in refined_payloads)
     assert all(source["asset_id"] in item["reference_asset_ids"] for item in refined_payloads)
     assert all("眼神更警觉" in item["prompt"] for item in refined_payloads)
+    assert {
+        item["prompt_snapshot"]["candidate_variant"]["casting_direction"]["key"]
+        for item in refined_payloads
+    } == {"reference_identity"}
+
+
+@pytest.mark.anyio
+async def test_candidate_prompt_is_visible_and_can_generate_an_edited_version(
+    client: AsyncClient,
+) -> None:
+    prepare_relationship_project()
+    graph = await create_graph(client)
+    approved = await client.post(
+        f"/api/v1/relationship-graphs/{graph['id']}/approve",
+        json={"expected_project_version": 2, "expected_graph_version": 1, "actor": "reviewer"},
+    )
+    assert approved.status_code == 200, approved.text
+    workspace = (await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")).json()[
+        "data"
+    ]
+    character = workspace["characters"][0]
+    generated = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/characters/{character['id']}/visual-candidates",
+        json={
+            "expected_version": character["lock_version"],
+            "profile_version_id": character["profile"]["id"],
+            "count": 1,
+            "actor": "tester",
+        },
+    )
+    assert generated.status_code == 202, generated.text
+    worker = PersistentJobWorker(get_settings())
+    assert await worker.run_once() is True
+
+    workspace = (await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")).json()[
+        "data"
+    ]
+    character = next(item for item in workspace["characters"] if item["id"] == character["id"])
+    source = character["candidates"][0]
+    assert "候选方向：" in source["generation_prompt"]
+
+    edited_prompt = (
+        "保持同一角色身份、五官和年龄感，改为克制而坚定的神情，"
+        "服装保持不变，使用均匀纯白背景，正面胸像构图"
+    )
+    regenerated = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/characters/{character['id']}/visual-candidates",
+        json={
+            "expected_version": character["lock_version"],
+            "profile_version_id": character["profile"]["id"],
+            "count": 1,
+            "source_candidate_id": source["id"],
+            "custom_prompt": edited_prompt,
+            "actor": "tester",
+        },
+    )
+    assert regenerated.status_code == 202, regenerated.text
+    custom_job_id = regenerated.json()["data"]["jobs"][0]["id"]
+    factory = sessionmaker(bind=get_engine(get_settings().database_url), expire_on_commit=False)
+    with factory() as session:
+        custom_job = session.get(Job, custom_job_id)
+        assert custom_job is not None
+        payload = json.loads(custom_job.input_json)
+        assert payload["custom_prompt"] == edited_prompt
+        assert edited_prompt in payload["prompt"]
+        assert source["asset_id"] in payload["reference_asset_ids"]
+        assert "RGB 255,255,255，#FFFFFF" in payload["prompt"]
+        assert payload["prompt_snapshot"]["effective_prompt"] == payload["prompt"]
+
+    assert await worker.run_once() is True
+    refreshed = (await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")).json()[
+        "data"
+    ]
+    character = next(item for item in refreshed["characters"] if item["id"] == character["id"])
+    edited_candidate = max(character["candidates"], key=lambda item: item["ordinal"])
+    assert edited_prompt in edited_candidate["generation_prompt"]
+    assert edited_candidate["source_candidate_id"] == source["id"]
+    assert edited_candidate["deletable"] is True
+
+    deleted = await client.request(
+        "DELETE",
+        (
+            f"/api/v1/projects/{PROJECT_ID}/characters/{character['id']}"
+            f"/visual-candidates/{edited_candidate['id']}"
+        ),
+        json={"expected_version": character["lock_version"], "actor": "tester"},
+    )
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["data"]["deleted"] is True
+    assert (
+        await client.get(f"/api/v1/assets/{edited_candidate['asset_id']}/content")
+    ).status_code == 404
+
+    refreshed = (await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")).json()[
+        "data"
+    ]
+    character = next(item for item in refreshed["characters"] if item["id"] == character["id"])
+    assert edited_candidate["id"] not in {item["id"] for item in character["candidates"]}
+
+    selected = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/characters/{character['id']}/visual-candidates/select",
+        json={
+            "expected_version": character["lock_version"],
+            "candidate_id": source["id"],
+            "actor": "tester",
+        },
+    )
+    assert selected.status_code == 202, selected.text
+    refreshed = (await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")).json()[
+        "data"
+    ]
+    character = next(item for item in refreshed["characters"] if item["id"] == character["id"])
+    protected_source = next(
+        item for item in character["candidates"] if item["id"] == source["id"]
+    )
+    assert protected_source["deletable"] is False
+    assert protected_source["delete_block_reason"] == "该形象已经用于角色基准，不能删除"
+    refused = await client.request(
+        "DELETE",
+        (
+            f"/api/v1/projects/{PROJECT_ID}/characters/{character['id']}"
+            f"/visual-candidates/{source['id']}"
+        ),
+        json={"expected_version": character["lock_version"], "actor": "tester"},
+    )
+    assert refused.status_code == 409
+    assert refused.json()["error"]["code"] == "CANDIDATE_IN_USE"
+
+
+@pytest.mark.anyio
+async def test_character_generation_blocks_when_newer_story_identity_is_pending(
+    client: AsyncClient,
+) -> None:
+    prepare_relationship_project()
+    graph = await create_graph(client)
+    approved = await client.post(
+        f"/api/v1/relationship-graphs/{graph['id']}/approve",
+        json={"expected_project_version": 2, "expected_graph_version": 1, "actor": "reviewer"},
+    )
+    assert approved.status_code == 200, approved.text
+    workspace = (await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")).json()[
+        "data"
+    ]
+    character = next(
+        item for item in workspace["characters"] if item["character_key"] == "protagonist"
+    )
+
+    factory = sessionmaker(bind=get_engine(get_settings().database_url), expire_on_commit=False)
+    with factory() as session:
+        source_bible = session.get(StoryBibleVersion, STORY_BIBLE_ID)
+        assert source_bible is not None
+        payload = json.loads(source_bible.payload_json)
+        protagonist = next(
+            item for item in payload["characters"] if item["key"] == "protagonist"
+        )
+        protagonist["ethnicity"] = "亚裔美国人"
+        pending_bible = StoryBibleVersion(
+            id="91000000-0000-4000-8000-000000000099",
+            project_id=PROJECT_ID,
+            story_version_id=STORY_ID,
+            version=2,
+            status="DRAFT",
+            payload_json=canonical_json(payload),
+            critic_json="{}",
+            content_hash=content_hash(payload),
+            parent_version_id=source_bible.id,
+            schema_version="story-bible-v2",
+            provider="manual",
+            model="character-revision-v1",
+            config_version="test",
+            approved_at=None,
+            approved_by=None,
+            created_at=datetime.now(UTC),
+        )
+        session.add(pending_bible)
+        session.commit()
+
+    stale_workspace = (
+        await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")
+    ).json()["data"]
+    stale_character = next(
+        item
+        for item in stale_workspace["characters"]
+        if item["character_key"] == "protagonist"
+    )
+    assert stale_character["source_stale"] is True
+    assert stale_character["pending_source_changes"]["changed_fields"] == ["ethnicity"]
+
+    generated = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/characters/{character['id']}/visual-candidates",
+        json={
+            "expected_version": character["lock_version"],
+            "profile_version_id": character["profile"]["id"],
+            "count": 1,
+            "actor": "tester",
+        },
+    )
+    assert generated.status_code == 409
+    detail = generated.json()["error"]
+    assert detail["code"] == "CHARACTER_VISUAL_SOURCE_STALE"
+    assert detail["details"]["changed_fields"] == ["ethnicity"]
+    with factory() as session:
+        assert (
+            session.scalar(
+                select(Job.id).where(
+                    Job.job_type == "GENERATE_CHARACTER_VISUAL_CANDIDATE",
+                    Job.entity_id == character["id"],
+                )
+            )
+            is None
+        )
 
 
 @pytest.mark.anyio
@@ -1066,7 +1406,7 @@ async def test_locked_biological_relative_creates_versioned_family_constraint_an
             "mouth_corner": "静止时左侧嘴角略高",
             "face_shape": "偏长的鹅蛋形脸部轮廓",
             "skin_tone": "自然偏暖肤色",
-            "hair_texture": "偏硬的自然直发",
+            "hair_color": "深棕偏黑的自然发色",
         },
     )
     refreshed = (await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")).json()[
@@ -1484,12 +1824,33 @@ async def test_character_revision_requires_review_and_creates_synchronized_draft
         "character_key": "protagonist",
         "changes": {
             "role": "母女旧案的共同追查者",
+            "gender": "female",
+            "ethnicity": "爱尔兰裔美国人",
             "age": "31岁",
+            "height": "170 cm",
             "occupation": "调查记者",
             "personality": ["敏锐", "克制"],
+            "visual_notes": "短发，佩戴细框眼镜。族裔／文化背景为“爱尔兰裔美国人”；具体外貌应与该身份一致，同时保留自然个体差异，不添加刻板五官、服饰或文化符号。",
         },
         "expected_version": 2,
     }
+
+    unsynchronized = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/character-revision-review",
+        json={
+            **request,
+            "changes": {
+                key: value
+                for key, value in request["changes"].items()
+                if key != "visual_notes"
+            },
+        },
+    )
+    assert unsynchronized.status_code == 422
+    assert (
+        unsynchronized.json()["error"]["code"]
+        == "CHARACTER_ETHNICITY_VISUAL_SYNC_REQUIRED"
+    )
 
     reviewed = await client.post(
         f"/api/v1/projects/{PROJECT_ID}/character-revision-review",
@@ -1501,6 +1862,13 @@ async def test_character_revision_requires_review_and_creates_synchronized_draft
     assert review["provider"] == "rules"
     assert review["affected"]["relationship_count"] == 1
     assert "role" in review["changed_fields"]
+    assert {"gender", "ethnicity"} <= set(review["changed_fields"])
+    assert "height" in review["changed_fields"]
+    assert "visual_notes" in review["changed_fields"]
+    assert any(
+        issue["code"] == "CHARACTER_ETHNICITY_VISUALS_SYNCED"
+        for issue in review["review"]["issues"]
+    )
 
     stale = await client.post(
         f"/api/v1/projects/{PROJECT_ID}/character-revisions",
@@ -1527,6 +1895,9 @@ async def test_character_revision_requires_review_and_creates_synchronized_draft
     revision = confirmed.json()["data"]
     assert revision["story_bible"]["status"] == "DRAFT"
     assert revision["story_bible"]["payload"]["characters"][0]["role"] == "母女旧案的共同追查者"
+    assert revision["story_bible"]["payload"]["characters"][0]["gender"] == "female"
+    assert revision["story_bible"]["payload"]["characters"][0]["ethnicity"] == "爱尔兰裔美国人"
+    assert revision["story_bible"]["payload"]["characters"][0]["height"] == "170 cm"
     assert revision["relationship_graph"]["status"] == "DRAFT"
     assert revision["relationship_graph"]["project_lock_version"] == 3
     assert revision["relationship_graph"]["graph"]["edges"][0]["locked"] is False

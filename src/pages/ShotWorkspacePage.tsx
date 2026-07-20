@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   AlertTriangle,
+  ArrowDown,
   ArrowLeftRight,
+  ArrowUp,
   Check,
+  CheckSquare,
   ChevronDown,
   ChevronRight,
   Clock3,
@@ -15,7 +18,9 @@ import {
   RotateCcw,
   Save,
   ShieldCheck,
+  Square,
   UserRound,
+  X,
 } from 'lucide-react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import {
@@ -24,13 +29,14 @@ import {
   fetchRuntimeConfig,
   type RuntimeConfig,
 } from '../api/client'
-import { Button, Modal, ProgressBar, SelectControl, StatusBadge } from '../components/ui'
+import { ConfirmModal } from '../components/ConfirmModal'
+import { Button, FormField, Modal, ProgressBar, SelectControl, StatusBadge, Tab, TabList, Tabs } from '../components/ui'
 import { useStudio } from '../store/StudioContext'
 import { useToast } from '../store/ToastContext'
 import { GlossaryTip } from '../components/GlossaryTip'
 import type { CharacterRecord, IdentityReviewDecision, IdentityReviewIssue } from '../types'
 import { resolveCharacterReferencePreview } from '../utils/characterReferencePreview'
-import { localizeDisplayText } from '../utils/localizeDisplayText'
+import { localizeCharacterRole, localizeDisplayText } from '../utils/localizeDisplayText'
 
 const DEFAULT_IMAGE_MODELS = [
   { id: 'doubao-seedream-5-0-260128', label: 'Seedream 5.0 Pro' },
@@ -84,6 +90,39 @@ function displayActor(value: string): string {
   return value === 'demo-user' ? '演示用户' : value
 }
 
+function moveSelectedShots(
+  shotIds: string[],
+  selectedIds: string[],
+  direction: 'up' | 'down',
+): string[] {
+  const selected = new Set(selectedIds)
+  const block = shotIds.filter((id) => selected.has(id))
+  if (block.length === 0) return shotIds
+
+  const firstIndex = shotIds.indexOf(block[0])
+  const lastIndex = shotIds.indexOf(block[block.length - 1])
+
+  if (direction === 'up') {
+    if (firstIndex === 0) return shotIds
+    const swapItem = shotIds[firstIndex - 1]
+    return [
+      ...shotIds.slice(0, firstIndex - 1),
+      ...block,
+      swapItem,
+      ...shotIds.slice(lastIndex + 1),
+    ]
+  }
+
+  if (lastIndex >= shotIds.length - 1) return shotIds
+  const swapItem = shotIds[lastIndex + 1]
+  return [
+    ...shotIds.slice(0, firstIndex),
+    swapItem,
+    ...block,
+    ...shotIds.slice(lastIndex + 2),
+  ]
+}
+
 export function ShotWorkspacePage() {
   const { notify } = useToast()
   const { sceneId } = useParams()
@@ -94,6 +133,7 @@ export function ShotWorkspacePage() {
     project,
     jobs,
     updateShot,
+    reorderSceneShots,
     generateTake,
     generateVideo,
     reviewCandidateIdentity,
@@ -135,6 +175,9 @@ export function ShotWorkspacePage() {
   const [showIdentityOverride, setShowIdentityOverride] = useState(false)
   const [identityReviewError, setIdentityReviewError] = useState<string | null>(null)
   const [bindingNote, setBindingNote] = useState<string | null>(null)
+  const [pendingNavigate, setPendingNavigate] = useState<{ sceneId: string; shotId: string } | null>(null)
+  const [batchMode, setBatchMode] = useState(false)
+  const [selectedShotIds, setSelectedShotIds] = useState<string[]>([])
   const runningJob = jobs.find((job) => job.entity.includes(currentShot.id) && job.status === 'RUNNING')
   const activeImageJob = jobs.find((job) =>
     job.entity.includes(currentShot.id)
@@ -267,9 +310,55 @@ export function ShotWorkspacePage() {
   })
 
   function selectShot(shotId: string, targetSceneId = scene.id) {
-    if (dirty && !window.confirm('当前镜头有未保存修改，确定切换吗？')) return
+    if (batchMode && targetSceneId === scene.id) {
+      setSelectedShotIds((current) => (
+        current.includes(shotId)
+          ? current.filter((id) => id !== shotId)
+          : [...current, shotId]
+      ))
+      return
+    }
+    if (shotId === currentShot.id && targetSceneId === scene.id) return
+    if (dirty) {
+      setPendingNavigate({ sceneId: targetSceneId, shotId })
+      return
+    }
     navigate(`/projects/${project.id}/episodes/${project.episodeId}/scenes/${targetSceneId}?shot=${shotId}`)
   }
+
+  function confirmNavigate() {
+    if (!pendingNavigate) return
+    setDirty(false)
+    navigate(`/projects/${project.id}/episodes/${project.episodeId}/scenes/${pendingNavigate.sceneId}?shot=${pendingNavigate.shotId}`)
+    setPendingNavigate(null)
+  }
+
+  function toggleBatchMode() {
+    setBatchMode((current) => {
+      if (current) setSelectedShotIds([])
+      return !current
+    })
+  }
+
+  function selectAllSceneShots() {
+    setSelectedShotIds(sceneShots.map((shot) => shot.id))
+  }
+
+  function moveSelectedShotsInScene(direction: 'up' | 'down') {
+    if (selectedShotIds.length === 0) return
+    const nextOrder = moveSelectedShots(scene.shotIds, selectedShotIds, direction)
+    if (nextOrder.join('|') === scene.shotIds.join('|')) {
+      notify(direction === 'up' ? '已在当前场景最前，无法继续上移。' : '已在当前场景最后，无法继续下移。', 'info')
+      return
+    }
+    reorderSceneShots(scene.id, nextOrder)
+    notify(`已${direction === 'up' ? '上移' : '下移'} ${selectedShotIds.length} 个镜头。`)
+  }
+
+  const selectedReviewCount = selectedShotIds.filter((shotId) => {
+    const shot = project.shots.find((item) => item.id === shotId)
+    return shot?.status === 'PENDING_REVIEW'
+  }).length
 
   function saveShot() {
     updateShot(currentShot.id, { description, dialogue })
@@ -354,7 +443,39 @@ export function ShotWorkspacePage() {
   return (
     <div className="shot-workspace">
       <aside className="scene-tree">
-        <header><p className="eyebrow">第 1 集 · 验证样片</p><h2>场景与镜头</h2></header>
+        <header>
+          <p className="eyebrow">第 1 集 · 验证样片</p>
+          <div className="scene-tree__heading">
+            <h2>场景与镜头</h2>
+            <Button
+              aria-pressed={batchMode}
+              onClick={toggleBatchMode}
+              size="sm"
+              variant={batchMode ? 'secondary' : 'ghost'}
+            >
+              {batchMode ? <CheckSquare size={14} /> : <Square size={14} />}
+              {batchMode ? '退出多选' : '多选'}
+            </Button>
+          </div>
+        </header>
+        {batchMode ? (
+          <div className="scene-tree__batch" role="toolbar" aria-label="镜头批量操作">
+            <span>{selectedShotIds.length > 0 ? `已选 ${selectedShotIds.length} 个镜头` : '点选镜头或全选当前场景'}</span>
+            <div>
+              <Button disabled={sceneShots.length === 0} onClick={selectAllSceneShots} size="sm" variant="ghost">全选</Button>
+              <Button disabled={selectedShotIds.length === 0} onClick={() => moveSelectedShotsInScene('up')} size="sm" variant="ghost"><ArrowUp size={14} />上移</Button>
+              <Button disabled={selectedShotIds.length === 0} onClick={() => moveSelectedShotsInScene('down')} size="sm" variant="ghost"><ArrowDown size={14} />下移</Button>
+              {selectedReviewCount > 0 ? (
+                <Link className="button button--secondary button--sm" to="/reviews">
+                  <ShieldCheck size={14} />审核 {selectedReviewCount} 个
+                </Link>
+              ) : null}
+              {selectedShotIds.length > 0 ? (
+                <Button onClick={() => setSelectedShotIds([])} size="sm" variant="ghost"><X size={14} />清除</Button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
         <div className="scene-tree__list">
           {project.scenes.map((item) => {
             const open = item.id === scene.id
@@ -368,8 +489,19 @@ export function ShotWorkspacePage() {
                 {open ? (
                   <div>
                     {sceneShots.map((shot) => (
-                      <button className={shot.id === currentShot.id ? 'active' : ''} key={shot.id} onClick={() => selectShot(shot.id)}>
-                        <span className={`shot-status-dot shot-status-dot--${shot.status.toLowerCase()}`} />
+                      <button
+                        className={`${shot.id === currentShot.id ? 'active' : ''}${selectedShotIds.includes(shot.id) ? ' is-selected' : ''}`}
+                        key={shot.id}
+                        onClick={() => selectShot(shot.id)}
+                        type="button"
+                      >
+                        {batchMode ? (
+                          <span aria-hidden="true" className="scene-tree__checkbox">
+                            {selectedShotIds.includes(shot.id) ? <CheckSquare size={14} /> : <Square size={14} />}
+                          </span>
+                        ) : (
+                          <span className={`shot-status-dot shot-status-dot--${shot.status.toLowerCase()}`} />
+                        )}
                         <span><small>{shot.code}</small><strong>{shot.title}</strong></span>
                         <StatusBadge status={shot.status} />
                       </button>
@@ -422,17 +554,19 @@ export function ShotWorkspacePage() {
       </section>
 
       <aside className="inspector">
-        <div className="inspector__tabs">
-          <button className={inspectorTab === 'shot' ? 'active' : ''} onClick={() => setInspectorTab('shot')}>镜头</button>
-          <button className={inspectorTab === 'continuity' ? 'active' : ''} onClick={() => setInspectorTab('continuity')}>
+        <Tabs>
+          <TabList aria-label="镜头检查器" className="inspector__tabs">
+          <Tab className={inspectorTab === 'shot' ? 'active' : ''} onClick={() => setInspectorTab('shot')} selected={inspectorTab === 'shot'}>镜头</Tab>
+          <Tab className={inspectorTab === 'continuity' ? 'active' : ''} onClick={() => setInspectorTab('continuity')} selected={inspectorTab === 'continuity'}>
             <GlossaryTip label="连续性" tip="角色与场景的一致性检查：管理出场角色、造型版本与光线等连续性规则，避免镜头之间「穿帮」。" />
             {boundCharacterCount > 0 ? <em className="inspector__tab-badge">{boundCharacterCount}</em> : null}
-          </button>
-          <button className={inspectorTab === 'versions' ? 'active' : ''} onClick={() => setInspectorTab('versions')}>
+          </Tab>
+          <Tab className={inspectorTab === 'versions' ? 'active' : ''} onClick={() => setInspectorTab('versions')} selected={inspectorTab === 'versions'}>
             <GlossaryTip label="版本" tip="当前版本始终可播放；新生成的画面先作为候选版本，复核通过后才会应用，失败不会覆盖当前版本。" />
             <em className="inspector__tab-badge">{1 + (currentShot.candidateTake ? 1 : 0)}</em>
-          </button>
-        </div>
+          </Tab>
+          </TabList>
+        </Tabs>
         <div className="inspector__body">
           {inspectorTab === 'shot' ? <section>
             <p className="eyebrow">镜头参数</p>
@@ -442,22 +576,22 @@ export function ShotWorkspacePage() {
                 <small>{modelLabel(selectedImageModel)} · {selectedImageResolution} · {selectedImageAspectRatio}</small>
                 <ChevronDown className="params-fold__chevron" size={14} />
               </summary>
-              <label className="field"><span>生图模型</span><SelectControl aria-label="生图模型" onChange={(event) => selectImageModel(event.target.value)} value={selectedImageModel}>{imageModels.map((option) => <option key={option.id} value={option.id}>{option.label} · {option.id}</option>)}</SelectControl></label>
-              <div className="field-grid"><label>分辨率<SelectControl aria-label="分辨率" onChange={(event) => setSelectedImageResolution(event.target.value as ImageResolution)} value={selectedImageResolution}>{imageResolutions.map((resolution) => <option key={resolution} value={resolution}>{resolution}</option>)}</SelectControl></label><label>画面比例<SelectControl aria-label="画面比例" onChange={(event) => setSelectedImageAspectRatio(event.target.value as ImageAspectRatio)} value={selectedImageAspectRatio}>{IMAGE_ASPECT_RATIOS.map((option) => <option key={option.id} value={option.id}>{option.id} · {option.label}</option>)}</SelectControl></label></div>
+              <FormField className="field" label="生图模型"><SelectControl aria-label="生图模型" onChange={(event) => selectImageModel(event.target.value)} value={selectedImageModel}>{imageModels.map((option) => <option key={option.id} value={option.id}>{option.label} · {option.id}</option>)}</SelectControl></FormField>
+              <div className="field-grid"><FormField label="分辨率"><SelectControl aria-label="分辨率" onChange={(event) => setSelectedImageResolution(event.target.value as ImageResolution)} value={selectedImageResolution}>{imageResolutions.map((resolution) => <option key={resolution} value={resolution}>{resolution}</option>)}</SelectControl></FormField><FormField label="画面比例"><SelectControl aria-label="画面比例" onChange={(event) => setSelectedImageAspectRatio(event.target.value as ImageAspectRatio)} value={selectedImageAspectRatio}>{IMAGE_ASPECT_RATIOS.map((option) => <option key={option.id} value={option.id}>{option.id} · {option.label}</option>)}</SelectControl></FormField></div>
             </details>
             <div className="field-grid"><label>景别<SelectControl aria-label="景别" value={currentShot.shotSize} onChange={(event) => updateShot(currentShot.id, { shotSize: event.target.value as typeof currentShot.shotSize })}><option value="WS">全景（WS）</option><option value="MS">中景（MS）</option><option value="MCU">中近景（MCU）</option><option value="CU">近景（CU）</option></SelectControl></label><label>运动<SelectControl aria-label="镜头运动" value={currentShot.cameraMovement} onChange={(event) => updateShot(currentShot.id, { cameraMovement: event.target.value as typeof currentShot.cameraMovement })}><option value="STATIC">固定镜头</option><option value="PAN">摇镜</option><option value="DOLLY_IN">推镜</option><option value="TRACK">跟拍</option><option value="HANDHELD">手持</option></SelectControl></label></div>
             <label className="field"><span className="field__heading"><span>画面描述</span><span className="field__actions"><button disabled={apiStatus !== 'connected' || enhancingDescription || description.trim().length < 3} onClick={(event) => { event.preventDefault(); void intelligentlyEnhanceDescription() }} type="button">{enhancingDescription ? <LoaderCircle className="spin" size={12} /> : <Lightbulb size={12} />}{enhancingDescription ? '正在优化' : '优化画面描述'}</button>{descriptionBeforeEnhance !== null ? <button onClick={(event) => { event.preventDefault(); undoDescriptionEnhancement() }} type="button"><RotateCcw size={12} />撤销</button> : null}</span></span><textarea onChange={(event) => { setDescription(event.target.value); setDirty(true); setEnhanceNote(null) }} value={description} />{enhanceNote ? <small className="field__note">{enhanceNote}</small> : null}</label>
-            <label className="field"><span>对白</span><textarea onChange={(event) => { setDialogue(event.target.value); setDirty(true) }} placeholder="无对白" value={dialogue} /></label>
+            <FormField className="field" label="对白" optional><textarea onChange={(event) => { setDialogue(event.target.value); setDirty(true) }} placeholder="无对白" value={dialogue} /></FormField>
           </section> : null}
           {inspectorTab === 'continuity' ? <>
             <section className="continuity-box identity-lock-box">
               <div><ShieldCheck size={16} /><strong>角色参考与造型</strong><StatusBadge status={currentShot.candidateIdentityStatus ?? (boundCharacterCount > 0 ? 'LOCKED' : 'NOT_APPLICABLE')} label={currentShot.candidateIdentityStatus ? undefined : boundCharacterCount > 0 ? `已绑定 ${boundCharacterCount} 位角色` : '未绑定角色'} /></div>
-              {(currentShot.characterBindings ?? []).length > 0 ? <div className="identity-reference-list">{currentShot.characterBindings?.map((binding) => <div className="identity-reference" key={binding.id}><img alt={`${binding.name} 项目角色参考`} src={referencePreviewUrls.get(binding.id) ?? binding.referenceAssetUrl} /><span><strong>{binding.name} · {localizeDisplayText(binding.role)}</strong><small>{displayLookVersion(binding.lookVersion)} · 项目角色参考帧</small></span></div>)}</div> : <p className="identity-empty">当前分镜未绑定锁定角色；无人物镜头可保持为空。</p>}
+              {(currentShot.characterBindings ?? []).length > 0 ? <div className="identity-reference-list">{currentShot.characterBindings?.map((binding) => <div className="identity-reference" key={binding.id}><img alt={`${binding.name} 项目角色参考`} src={referencePreviewUrls.get(binding.id) ?? binding.referenceAssetUrl} /><span><strong>{binding.name} · {localizeCharacterRole(binding.role)}</strong><small>{displayLookVersion(binding.lookVersion)} · 项目角色参考帧</small></span></div>)}</div> : <p className="identity-empty">当前分镜未绑定锁定角色；无人物镜头可保持为空。</p>}
               <div className="identity-binding-heading"><strong>本镜头出场角色</strong><small>勾选画面内可见的所有角色</small></div>
               <div className="identity-binding-list">
-                {lockedCharacters.map((character) => <label key={character.id}><input checked={boundCharacterIds.includes(character.id)} onChange={(event) => setBoundCharacterIds((current) => event.target.checked ? [...current, character.id] : current.filter((id) => id !== character.id))} type="checkbox" /><UserRound size={14} /><span>{character.name}<small>{localizeDisplayText(character.role)} · 已锁定参考图</small></span></label>)}
+                {lockedCharacters.map((character) => <label key={character.id}><input checked={boundCharacterIds.includes(character.id)} onChange={(event) => setBoundCharacterIds((current) => event.target.checked ? [...current, character.id] : current.filter((id) => id !== character.id))} type="checkbox" /><UserRound size={14} /><span>{character.name}<small>{localizeCharacterRole(character.role)} · 已锁定参考图</small></span></label>)}
               </div>
-              <label className="field"><span><GlossaryTip label="本镜头使用的造型版本" tip="同一角色可登记多套服装与造型；生成画面时以所选版本为参考，避免角色形象在镜头之间漂移。" /></span><input onChange={(event) => setLookVersion(event.target.value)} value={lookVersion} /></label>
+              <FormField className="field" label={<GlossaryTip label="本镜头使用的造型版本" tip="同一角色可登记多套服装与造型；生成画面时以所选版本为参考，避免角色形象在镜头之间漂移。" />}><input onChange={(event) => setLookVersion(event.target.value)} value={lookVersion} /></FormField>
               <Button disabled={!bindingsDirty || bindingSaving || currentShot.status === 'GENERATING'} onClick={() => void saveCharacterBindings()} size="sm" variant="secondary">{bindingSaving ? <LoaderCircle className="spin" size={14} /> : <Save size={14} />}保存角色与造型</Button>
               {currentShot.candidateIdentityMessage ? <small className={currentShot.candidateIdentityStatus === 'REVIEW_REQUIRED' ? 'warning' : ''}>{currentShot.candidateIdentityScore === undefined ? '' : `角色相似度 ${Math.round(currentShot.candidateIdentityScore * 100)}% · `}{currentShot.candidateIdentityStatus === 'REVIEW_REQUIRED' ? '系统发现可能存在差异，请对照参考图确认。' : '系统未发现明显差异。'}</small> : <small>生成新画面时会自动参考已锁定的角色图和当前造型版本。</small>}
               {currentShot.latestIdentityReview ? <div className="identity-review-record" role="status"><Check size={14} /><span><strong>{REVIEW_DECISION_LABELS[currentShot.latestIdentityReview.decision]}</strong><small>{displayActor(currentShot.latestIdentityReview.actor)} · {new Date(currentShot.latestIdentityReview.reviewedAt).toLocaleString('zh-CN')}{currentShot.latestIdentityReview.lookVersion ? ` · ${displayLookVersion(currentShot.latestIdentityReview.lookVersion)}` : ''}</small>{currentShot.latestIdentityReview.issues.length > 0 ? <small>标记差异：{currentShot.latestIdentityReview.issues.map((id) => IDENTITY_ISSUES.find((issue) => issue.id === id)?.label ?? id).join('、')}</small> : null}{currentShot.latestIdentityReview.note ? <small>说明：{currentShot.latestIdentityReview.note}</small> : null}</span></div> : null}
@@ -535,6 +669,15 @@ export function ShotWorkspacePage() {
           </section>
         </div>
       </Modal>
+
+      <ConfirmModal
+        confirmLabel="切换镜头"
+        description="未保存的画面描述和对白将丢失；当前版本不会受影响。"
+        onClose={() => setPendingNavigate(null)}
+        onConfirm={confirmNavigate}
+        open={pendingNavigate !== null}
+        title="放弃未保存修改？"
+      />
 
       <Modal open={compareOpen} onClose={() => setCompareOpen(false)} title="版本比较" description={`${currentShot.code} · 当前第 ${currentShot.currentTake} 版与候选第 ${currentShot.candidateTake ?? currentShot.currentTake} 版`} footer={<Button onClick={() => setCompareOpen(false)}>完成比较</Button>}>
         <div className="compare-grid">

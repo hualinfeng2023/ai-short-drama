@@ -126,7 +126,7 @@ def _classic_stages(
     preview_complete = timeline is not None and timeline.status == "APPROVED"
 
     raw = [
-        ("BRIEF", "项目简报", brief_complete, project_root, "项目目标、受众与制作约束"),
+        ("BRIEF", "故事设定", brief_complete, project_root, "项目目标、受众与制作约束"),
         ("EPISODE", "分集与场景", episode_complete, episode_href, "分集结构、场景和镜头清单"),
         ("SHOTS", "镜头制作", shots_complete, shots_href, "逐镜头生成、复核与版本应用"),
         ("PREVIEW", "完整小样", preview_complete, preview_href, "时间线、小样审批与导出"),
@@ -151,8 +151,8 @@ def _classic_stages(
 def _pipeline_stages(project: Project, active_jobs: list[Job]) -> list[ProjectStageRead]:
     project_root = f"/projects/{project.id}"
     raw = [
-        ("BRIEF", "项目简报", project_root, "项目目标、受众与制作约束"),
-        ("STORY", "故事与剧本", f"{project_root}/story", "故事方向、关系、分集与剧本"),
+        ("BRIEF", "故事设定", project_root, "项目目标、受众与制作约束"),
+        ("STORY", "故事剧本", f"{project_root}/story", "故事方向、关系、分集与剧本"),
         (
             "PREPRODUCTION",
             "前期资产",

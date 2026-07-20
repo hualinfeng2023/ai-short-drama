@@ -12,7 +12,7 @@ describe('getCompletedJobCta', () => {
       jobType: 'GENERATE_STORY_DIRECTIONS',
     }, 'project-id')).toEqual({
       href: '/projects/project-id/story',
-      label: '查看 3 个方向',
+      label: '查看',
     })
   })
 
@@ -22,7 +22,7 @@ describe('getCompletedJobCta', () => {
       jobType: 'GENERATE_STORY_STRUCTURE',
     }, 'project-id')).toEqual({
       href: '/projects/project-id/story',
-      label: '审核角色关系',
+      label: '查看',
     })
     expect(getCompletedJobCta({
       ...succeededJob,
@@ -76,7 +76,7 @@ describe('getCompletedJobCta', () => {
       jobType: 'UNKNOWN_COMPLETED_JOB',
     }, 'project-id')).toEqual({
       href: '/projects/project-id',
-      label: '查看任务结果',
+      label: '查看',
     })
   })
 })

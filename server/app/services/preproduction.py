@@ -25,6 +25,7 @@ from app.db.models import (
 )
 from app.schemas import CharacterRead, JobRead
 from app.services.assets import register_file
+from app.services.character_image_qc import CharacterImageQualityReport
 from app.services.events import append_event
 from app.services.image_provider import GeneratedImage
 from app.services.jobs import enqueue_job, job_to_read
@@ -225,6 +226,8 @@ def materialize_character_candidate(
     settings: Settings,
     job: Job,
     image: GeneratedImage,
+    *,
+    quality_report: CharacterImageQualityReport | None = None,
 ) -> tuple[Asset, CharacterCandidate]:
     payload = json.loads(job.input_json)
     character = session.get(Character, str(payload["character_id"]))
@@ -261,15 +264,17 @@ def materialize_character_candidate(
         height=image.height,
     )
     asset.provider = "volcengine-ark" if settings.ark_api_key else "mock"
-    asset.metadata_json = canonical_json(
-        {
-            "model": image.model,
-            "provider_request_id": image.request_id,
-            "source_url": image.source_url,
-            "seed": payload["seed"],
-        }
-    )
+    metadata: dict[str, object] = {
+        "model": image.model,
+        "provider_request_id": image.request_id,
+        "source_url": image.source_url,
+        "seed": payload["seed"],
+    }
+    if quality_report is not None:
+        metadata["generation_quality"] = quality_report.as_dict()
+    asset.metadata_json = canonical_json(metadata)
     now = datetime.now(UTC)
+    quality_status = quality_report.status if quality_report is not None else "PASSED"
     candidate = CharacterCandidate(
         id=candidate_id,
         project_id=job.project_id,
@@ -277,19 +282,39 @@ def materialize_character_candidate(
         ordinal=ordinal,
         asset_id=asset.id,
         seed=str(payload["seed"]),
-        status="READY",
+        status=(
+            "READY"
+            if quality_status != "FAILED"
+            else "QC_FAILED"
+        ),
+        review_status=(
+            "PENDING_SELECTION"
+            if quality_status == "PASSED"
+            else "QC_REVIEW_REQUIRED"
+        ),
         selected=False,
         created_at=now,
     )
     session.add(candidate)
     session.flush()
-    ready_count = session.scalar(
+    materialized_count = session.scalar(
         select(func.count(CharacterCandidate.id)).where(
             CharacterCandidate.character_id == character.id
         )
     )
-    if ready_count >= int(payload["candidate_count"]):
-        character.status = "CANDIDATES_READY"
+    if materialized_count >= int(payload["candidate_count"]):
+        candidate_statuses = list(
+            session.scalars(
+                select(CharacterCandidate.status).where(
+                    CharacterCandidate.character_id == character.id
+                )
+            ).all()
+        )
+        character.status = (
+            "CANDIDATES_READY"
+            if candidate_statuses and all(status == "READY" for status in candidate_statuses)
+            else "REVIEW_REQUIRED"
+        )
         character.updated_at = now
     all_characters = list(
         session.scalars(select(Character).where(Character.project_id == job.project_id)).all()

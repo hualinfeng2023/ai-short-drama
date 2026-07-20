@@ -1,0 +1,222 @@
+/*
+ * 剧创 AI — canonical design tokens
+ *
+ * This is the only source allowed to contain literal design values.
+ * Components and pages consume semantic custom properties from this file.
+ */
+
+:root {
+  color-scheme: light;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+    "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+  color: #1d1d1f;
+  background: #f5f5f7;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+
+  /* Primitive colors */
+  --color-white: #ffffff;
+  --color-black: #000000;
+  --color-shadow-ink: #0f172a;
+
+  /* Semantic color roles */
+  --color-canvas: #f5f5f7;
+  --color-surface: #ffffff;
+  --color-surface-subtle: #f7f7f9;
+  --color-surface-muted: #ececf0;
+  --color-surface-elevated: #ffffff;
+  --color-text-primary: #1d1d1f;
+  --color-text-secondary: #515154;
+  --color-text-tertiary: #6e6e73;
+  --color-border: rgb(29 29 31 / 0.1);
+  --color-border-strong: rgb(29 29 31 / 0.17);
+  --color-action-primary: #0a66d9;
+  --color-action-primary-hover: #0058bd;
+  --color-action-primary-strong: #004eaa;
+  --color-action-primary-soft: #e7f1ff;
+  --color-on-action: #ffffff;
+  --color-state-success: #14804a;
+  --color-state-success-strong: #0d6b3f;
+  --color-state-success-soft: #eaf8f0;
+  --color-state-warning: #a15c00;
+  --color-state-warning-soft: #fff5df;
+  --color-state-danger: #d92d20;
+  --color-state-danger-soft: #fff0ef;
+  --color-sidebar: rgb(248 248 250 / 0.86);
+  --color-sidebar-surface: #ffffff;
+  --color-material-surface: rgb(255 255 255 / 0.78);
+  --color-material-navigation: rgb(255 255 255 / 0.66);
+  --color-material-control: rgb(255 255 255 / 0.58);
+  --color-material-control-hover: rgb(255 255 255 / 0.82);
+  --color-material-border: rgb(255 255 255 / 0.72);
+  --color-material-edge: rgb(29 29 31 / 0.13);
+  --color-overlay-scrim: rgb(0 0 0 / 0.55);
+  --color-overlay-media: rgb(0 0 0 / 0.72);
+  --color-overlay-media-soft: rgb(0 0 0 / 0.4);
+
+  /* Type roles */
+  --font-family-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+    "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+  --font-family-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --font-size-caption: 0.75rem;
+  --font-size-control: 0.8125rem;
+  --font-size-body: 0.875rem;
+  --font-size-body-lg: 1rem;
+  --font-size-card-title: 0.9375rem;
+  --font-size-section-title: 1.125rem;
+  --font-size-title-sm: 1.25rem;
+  --font-size-title-md: 1.375rem;
+  --font-size-title-lg: 1.5rem;
+  --font-size-title-xl: 1.75rem;
+  --font-size-page-title: clamp(1.875rem, 2.7vw, 2.5rem);
+  --line-height-tight: 1.08;
+  --line-height-heading: 1.25;
+  --line-height-copy: 1.58;
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 650;
+  --font-weight-bold: 700;
+
+  /* 4px spacing rhythm */
+  --space-0: 0;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+  --space-16: 4rem;
+
+  /* Shape */
+  --radius-control-sm: 0.625rem;
+  --radius-control: 0.75rem;
+  --radius-surface: 1rem;
+  --radius-panel: 1.375rem;
+  --radius-hero: 1.75rem;
+  --radius-round: 999px;
+  --radius-organic: 46% 54% 52% 48%;
+
+  /* Elevation */
+  --shadow-material-highlight: inset 0 1px 0 rgb(255 255 255 / 0.82);
+  --shadow-control: 0 4px 12px rgb(15 23 42 / 0.08);
+  --shadow-surface: 0 1px 2px rgb(15 23 42 / 0.03), 0 12px 32px rgb(15 23 42 / 0.055);
+  --shadow-floating: 0 12px 34px rgb(15 23 42 / 0.13), 0 2px 8px rgb(15 23 42 / 0.06);
+  --shadow-modal: 0 32px 90px rgb(15 23 42 / 0.22), 0 8px 24px rgb(15 23 42 / 0.09);
+  --shadow-material: 0 14px 36px rgb(15 23 42 / 0.08), 0 2px 8px rgb(15 23 42 / 0.04);
+  --shadow-focus: 0 0 0 4px rgb(10 102 217 / 0.12);
+  --shadow-selection-inset: inset 3px 0 0 rgb(10 102 217 / 0.72);
+  --shadow-glow: inset 0 0 24px rgb(10 102 217 / 0.08), 0 10px 30px rgb(10 102 217 / 0.16);
+  --shadow-text-on-media: 0 2px 10px rgb(0 0 0 / 0.55);
+  --filter-shadow-small: drop-shadow(0 6px 10px rgb(0 0 0 / 0.16));
+  --filter-glow: drop-shadow(0 0 5px rgb(10 102 217 / 0.52));
+
+  /* Motion */
+  --motion-ease-standard: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --motion-ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  --motion-ease-emphasis: cubic-bezier(0.26, 0.72, 0.52, 1);
+  --motion-ease-linear: linear;
+  --motion-duration-instant: 90ms;
+  --motion-duration-fast: 140ms;
+  --motion-duration-standard: 240ms;
+  --motion-duration-slow: 360ms;
+  --motion-duration-loop-fast: 1s;
+  --motion-duration-loop-standard: 1.8s;
+  --motion-duration-loop-slow: 4.8s;
+  --motion-press-scale: 0.975;
+
+  /* Control and layout metrics */
+  --control-height-sm: 2.375rem;
+  --control-height-md: 2.625rem;
+  --control-height-touch: 2.75rem;
+  --layout-sidebar-width: 14.75rem;
+  --layout-sidebar-width-collapsed: 4.75rem;
+  --layout-panel-padding: var(--space-6);
+  --layout-content-max: 92.5rem;
+  --layout-content-inline-padding: clamp(var(--space-6), 3.2vw, var(--space-12));
+  --layout-workflow-gap: var(--space-6);
+  --layout-sticky-header-clearance: 5.25rem;
+  --layout-mobile-navigation-clearance: 6.5rem;
+}
+
+:root[data-visual-mode="focus"] {
+  --layout-panel-padding: var(--space-5);
+  --radius-surface: var(--radius-control);
+  --radius-panel: var(--radius-surface);
+  --shadow-surface: 0 1px 2px rgb(15 23 42 / 0.035), 0 6px 18px rgb(15 23 42 / 0.045);
+}
+
+:root[data-visual-mode="cinema"] {
+  color-scheme: dark;
+  color: #f5f5f7;
+  background: #090b10;
+  --color-canvas: #090b10;
+  --color-surface: #171a21;
+  --color-surface-subtle: #1e222b;
+  --color-surface-muted: #282d38;
+  --color-surface-elevated: #20242d;
+  --color-text-primary: #f5f5f7;
+  --color-text-secondary: #b7bbc5;
+  --color-text-tertiary: #8b919d;
+  --color-border: rgb(255 255 255 / 0.1);
+  --color-border-strong: rgb(255 255 255 / 0.17);
+  --color-action-primary: #2997ff;
+  --color-action-primary-hover: #4aa8ff;
+  --color-action-primary-strong: #71baff;
+  --color-action-primary-soft: #122e4d;
+  --color-state-success: #32d583;
+  --color-state-success-strong: #0b5e38;
+  --color-state-success-soft: #123727;
+  --color-state-warning: #fdb022;
+  --color-state-warning-soft: #3b2d0f;
+  --color-state-danger: #ff6961;
+  --color-state-danger-soft: #421d20;
+  --color-sidebar: rgb(15 17 23 / 0.88);
+  --color-sidebar-surface: #1b1f27;
+  --color-material-surface: rgb(24 27 35 / 0.8);
+  --color-material-navigation: rgb(25 29 38 / 0.68);
+  --color-material-control: rgb(43 48 60 / 0.56);
+  --color-material-control-hover: rgb(54 60 74 / 0.74);
+  --color-material-border: rgb(255 255 255 / 0.13);
+  --color-material-edge: rgb(255 255 255 / 0.09);
+  --shadow-material-highlight: inset 0 1px 0 rgb(255 255 255 / 0.1);
+  --shadow-control: 0 4px 12px rgb(0 0 0 / 0.24);
+  --shadow-surface: 0 1px 2px rgb(0 0 0 / 0.2), 0 16px 38px rgb(0 0 0 / 0.24);
+  --shadow-floating: 0 18px 48px rgb(0 0 0 / 0.38), 0 2px 8px rgb(0 0 0 / 0.24);
+  --shadow-modal: 0 36px 100px rgb(0 0 0 / 0.58), 0 8px 24px rgb(0 0 0 / 0.32);
+  --shadow-material: 0 18px 44px rgb(0 0 0 / 0.28), 0 2px 8px rgb(0 0 0 / 0.18);
+  --shadow-focus: 0 0 0 4px rgb(41 151 255 / 0.16);
+  --shadow-selection-inset: inset 3px 0 0 rgb(41 151 255 / 0.78);
+  --shadow-glow: inset 0 0 24px rgb(41 151 255 / 0.1), 0 10px 30px rgb(0 0 0 / 0.3);
+  --filter-shadow-small: drop-shadow(0 6px 10px rgb(0 0 0 / 0.32));
+  --filter-glow: drop-shadow(0 0 5px rgb(41 151 255 / 0.58));
+}
+
+@media (pointer: coarse) {
+  :root {
+    --control-height-sm: var(--control-height-touch);
+    --control-height-md: var(--control-height-touch);
+  }
+}
+
+@media (prefers-contrast: more) {
+  :root {
+    --color-border: color-mix(in srgb, var(--color-text-primary) 25%, transparent);
+    --color-border-strong: color-mix(in srgb, var(--color-text-primary) 42%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-duration-instant: 1ms;
+    --motion-duration-fast: 1ms;
+    --motion-duration-standard: 1ms;
+    --motion-duration-slow: 1ms;
+    --motion-duration-loop-fast: 1ms;
+    --motion-duration-loop-standard: 1ms;
+    --motion-duration-loop-slow: 1ms;
+    --motion-press-scale: 1;
+  }
+}

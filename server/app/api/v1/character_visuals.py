@@ -2,8 +2,10 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
 from app.api.trace import get_trace_id, success
+from app.config import Settings, get_settings
 from app.db.session import get_session
 from app.schemas import (
+    CharacterCandidateDeleteRequest,
     CharacterCandidateGenerateRequest,
     CharacterCandidateSelectRequest,
     CharacterChangeApplyRequest,
@@ -17,6 +19,7 @@ from app.services.character_visuals import (
     apply_character_change,
     character_visual_workspace,
     confirm_visual_profile,
+    delete_character_candidate,
     generate_character_candidates,
     generate_character_identity_view,
     lock_character_identity,
@@ -94,10 +97,35 @@ def create_character_visual_candidates(
         count=payload.count,
         source_candidate_id=payload.source_candidate_id,
         refinement_note=payload.refinement_note,
+        custom_prompt=payload.custom_prompt,
         actor=payload.actor,
         trace_id=get_trace_id(),
     )
     return success({"batch": batch, "jobs": [item.model_dump(mode="json") for item in jobs]})
+
+
+@router.delete(
+    "/projects/{project_id}/characters/{character_id}/visual-candidates/{candidate_id}",
+)
+def delete_visual_candidate(
+    project_id: str,
+    character_id: str,
+    candidate_id: str,
+    payload: CharacterCandidateDeleteRequest,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    return success(
+        delete_character_candidate(
+            session,
+            settings,
+            project_id=project_id,
+            character_id=character_id,
+            candidate_id=candidate_id,
+            expected_version=payload.expected_version,
+            actor=payload.actor,
+        )
+    )
 
 
 @router.post(

@@ -4,6 +4,7 @@ import {
   analyzeRelationshipRevisionImpact,
   createRelationshipGraphRevision,
   createProjectDraft,
+  deleteCharacterVisualCandidate,
   deleteProjectRecord,
   enhanceShotPrompt,
   fetchJobs,
@@ -22,6 +23,7 @@ import {
   saveRelationshipGraph,
   suggestBriefRequirements,
   suggestBriefAvoidances,
+  suggestBriefBlockingQuestions,
   suggestProjectName,
   updateProjectDraft,
   type ApiWorkspace,
@@ -168,7 +170,7 @@ describe('mapWorkspace', () => {
         candidate_take: null, continuity: 'CLEAR', location: '室内', time_of_day: '日',
       }],
       jobs: [{
-        id: 'job-id', project_id: 'project-id', job_type: 'DEMO_RENDER',
+        id: 'job-id', project_id: 'project-id', project_name: '项目', job_type: 'DEMO_RENDER',
         entity_type: 'shot', entity_id: 'shot-id', label: '任务', entity: 'shot-id',
         status: 'SUCCEEDED', progress: 100, stage: '完成', attempt: 1, max_attempts: 3,
         available_at: '2026-07-13T12:00:00Z', heartbeat_at: null,
@@ -191,7 +193,7 @@ describe('global jobs client', () => {
   it('loads all jobs without silently scoping to the demo project', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       data: [{
-        id: 'job-global', project_id: 'project-other', job_type: 'DEMO_RENDER',
+        id: 'job-global', project_id: 'project-other', project_name: '另一个项目', job_type: 'DEMO_RENDER',
         entity_type: 'project', entity_id: 'project-other', label: '跨项目任务',
         entity: 'project:project-other', status: 'RUNNING', progress: 45,
         stage: '正在生成', attempt: 1, max_attempts: 3,
@@ -207,7 +209,32 @@ describe('global jobs client', () => {
     const jobs = await fetchJobs()
 
     expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/jobs')
-    expect(jobs[0]).toMatchObject({ id: 'job-global', projectId: 'project-other', status: 'RUNNING' })
+    expect(jobs[0]).toMatchObject({
+      id: 'job-global',
+      projectId: 'project-other',
+      projectName: '另一个项目',
+      status: 'RUNNING',
+    })
+  })
+
+  it('repairs a missing legacy job entity instead of crashing task rendering', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: [{
+        id: 'job-legacy', project_id: 'project-other', project_name: '旧项目',
+        job_type: 'DEMO_RENDER', entity_type: 'shot', entity_id: 'shot-legacy',
+        label: '旧任务', status: 'SUCCEEDED', progress: 100, stage: '完成',
+        attempt: 1, max_attempts: 3, available_at: '2026-07-17T00:00:00Z',
+        heartbeat_at: null, created_at: '2026-07-17T00:00:00Z',
+        updated_at: '2026-07-17T00:01:00Z', completed_at: '2026-07-17T00:01:00Z',
+        estimated_seconds: null, retryable: false, error_code: null, error_message: null,
+      }],
+      trace_id: 'trace-legacy-job',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const jobs = await fetchJobs()
+
+    expect(jobs[0].entity).toBe('shot:shot-legacy')
   })
 
   it('sends a structured recovery action without losing partial progress', async () => {
@@ -504,6 +531,38 @@ describe('project write client', () => {
   })
 })
 
+describe('character candidate write client', () => {
+  it('deletes one historical candidate with optimistic version data', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        character_id: 'character-id',
+        candidate_id: 'candidate-id',
+        deleted: true,
+        lock_version: 8,
+      },
+      trace_id: 'trace-delete-candidate',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await deleteCharacterVisualCandidate(
+      apiProject.id,
+      'character-id',
+      'candidate-id',
+      7,
+    )
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/v1/projects/${apiProject.id}/characters/character-id/visual-candidates/candidate-id`,
+      expect.objectContaining({ method: 'DELETE' }),
+    )
+    const request = fetchMock.mock.calls[0][1] as RequestInit
+    expect(JSON.parse(String(request.body))).toEqual({
+      expected_version: 7,
+      actor: '创作者',
+    })
+  })
+})
+
 describe('identity review client', () => {
   it('sends a structured regenerate decision with the current lock version', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
@@ -693,6 +752,43 @@ describe('project naming client', () => {
     expect(result.warning).toBe('ARK_API_KEY 未配置')
     expect(fetchMock.mock.calls[0][0]).toBe(
       '/api/v1/projects/project-id/brief-avoidance-suggestions',
+    )
+  })
+
+  it('sends the brief context and maps blocking question suggestions', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        items: ['主角最终是否公开能力来源？'],
+        provider: 'volcengine-ark',
+        model: 'doubao-seed-2-0-lite-260215',
+        warning: null,
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await suggestBriefBlockingQuestions('project-id', {
+      idea: '一对姐妹得到两颗神药，在末日中走向不同选择。',
+      genre: 'urban_drama',
+      style: 'realistic_cinematic',
+      target_duration_sec: 60,
+      aspect_ratio: '9:16',
+      target_platform: 'douyin',
+      narrative_protagonist: 'dual',
+      target_audience: 'general',
+      emotional_rewards: ['family'],
+      audience_profile: '',
+      production_format: 'live_action',
+      primary_market: 'CN',
+      canonical_language: 'zh-CN',
+      content_requirements: ['前三秒建立危机'],
+      content_avoidances: ['避免无铺垫反转'],
+      existing_questions: [],
+    })
+
+    expect(result.items).toEqual(['主角最终是否公开能力来源？'])
+    expect(result.warning).toBeUndefined()
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      '/api/v1/projects/project-id/brief-blocking-question-suggestions',
     )
   })
 

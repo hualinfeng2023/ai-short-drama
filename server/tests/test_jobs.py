@@ -5,6 +5,10 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
 from app.config import get_settings
 from app.db.models import (
     Asset,
@@ -18,7 +22,6 @@ from app.db.models import (
     Take,
 )
 from app.db.session import get_engine
-from app.jobs.contracts import JobExecutionError
 from app.jobs.handlers.proposal import (
     _await_with_progress,
     generate_story_directions,
@@ -35,11 +38,9 @@ from app.services.jobs import (
     reconcile_terminal_project_jobs,
     recover_expired_jobs,
     update_job_diagnostics,
+    update_job_intermediate_output,
     update_job_progress,
 )
-from httpx import AsyncClient
-from sqlalchemy import select
-from sqlalchemy.orm import Session
 
 pytestmark = pytest.mark.anyio
 
@@ -130,19 +131,27 @@ async def test_long_text_generation_emits_intermediate_progress() -> None:
     }
 
 
-async def test_story_direction_generation_has_a_hard_total_timeout(
+async def test_story_direction_generation_is_not_cut_off_by_handler_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def checkpoint(*_args: object) -> None:
         return None
 
-    async def slow_generation(*_args: object) -> object:
-        await asyncio.sleep(1)
-        raise AssertionError("the total timeout should cancel the provider call")
+    async def slow_generation(*_args: object, **_kwargs: object) -> object:
+        await asyncio.sleep(0.03)
+        return SimpleNamespace(provider="test", model="test")
 
     monkeypatch.setattr(
         "app.jobs.handlers.proposal.RoutedTextProvider.generate_directions",
         slow_generation,
+    )
+    monkeypatch.setattr(
+        "app.jobs.handlers.proposal.materialize_story_directions",
+        lambda *_args: [
+            SimpleNamespace(id="emotion"),
+            SimpleNamespace(id="plot"),
+            SimpleNamespace(id="market"),
+        ],
     )
     context = SimpleNamespace(
         settings=replace(
@@ -154,17 +163,15 @@ async def test_story_direction_generation_has_a_hard_total_timeout(
     )
     job = SimpleNamespace(attempt=1, max_attempts=2)
 
-    with pytest.raises(JobExecutionError) as caught:
-        await generate_story_directions(
-            context,
-            SimpleNamespace(),
-            job,
-            {"brief": {}},
-        )
+    result = await generate_story_directions(
+        context,
+        SimpleNamespace(),
+        job,
+        {"brief": {}},
+    )
 
-    assert caught.value.code == "ARK_TEXT_TIMEOUT"
-    assert caught.value.retryable is True
-    assert caught.value.details == {"timeout_seconds": 0.02}
+    assert result["batch_size"] == 3
+    assert result["provider"] == "test"
 
 
 async def test_story_structure_progress_enters_relationship_validation(
@@ -401,7 +408,13 @@ async def test_global_jobs_aggregates_multiple_projects(client: AsyncClient) -> 
 
     assert expected_ids <= {job["id"] for job in global_jobs}
     assert {job["project_id"] for job in global_jobs} >= {PROJECT_ID, project["id"]}
+    assert next(job for job in global_jobs if job["id"] == created_job_id)[
+        "project_name"
+    ] == project["name"]
     assert created_job_id in {job["id"] for job in scoped_jobs}
+    assert next(job for job in scoped_jobs if job["id"] == created_job_id)[
+        "project_name"
+    ] == project["name"]
     assert seeded_job_id not in {job["id"] for job in scoped_jobs}
 
 
@@ -1194,6 +1207,63 @@ async def test_running_job_diagnostics_are_persisted_before_terminal_failure(
     assert any(event.event_type == "job.diagnostics" for event in events)
 
 
+async def test_intermediate_output_survives_automatic_retry_claim(
+    client: AsyncClient,
+) -> None:
+    del client
+    with Session(get_engine(get_settings().database_url)) as session:
+        job, _ = enqueue_job(
+            session,
+            project_id=PROJECT_ID,
+            job_type="GENERATE_STORY_DIRECTIONS",
+            entity_type="project",
+            entity_id=PROJECT_ID,
+            idempotency_key="test:story-direction-intermediate-output",
+            input_payload={"brief": {}},
+            label="故事方向中间结果测试",
+            stage="等待生成故事方向",
+            trace_id="story-direction-intermediate-output-trace",
+            max_attempts=2,
+            priority=100,
+        )
+        session.commit()
+        first = claim_next_job(session, "intermediate-worker-1", 15)
+        assert first is not None and first.id == job.id
+        assert update_job_intermediate_output(
+            session,
+            job_id=job.id,
+            worker_id="intermediate-worker-1",
+            updates={
+                "story_direction_routes": {
+                    "emotion": {"request_id": "request-emotion"}
+                }
+            },
+            lease_seconds=15,
+        )
+        finish_job_failure(
+            session,
+            job_id=job.id,
+            worker_id="intermediate-worker-1",
+            code="ARK_TEXT_PARTIAL_FAILURE",
+            message="已有 1 个方向完成，2 个方向失败",
+            details={"completed_routes": ["emotion"]},
+            retryable=True,
+        )
+        queued = session.get(Job, job.id)
+        assert queued is not None
+        queued.available_at = datetime.now(UTC)
+        session.commit()
+
+        second = claim_next_job(session, "intermediate-worker-2", 15)
+        assert second is not None and second.id == job.id
+        assert second.output_json is not None
+        output = json.loads(second.output_json)
+
+    assert output["story_direction_routes"]["emotion"]["request_id"] == (
+        "request-emotion"
+    )
+
+
 async def test_cancel_retry_and_worker_completion(client: AsyncClient) -> None:
     now = datetime.now(UTC)
     with Session(get_engine(get_settings().database_url)) as session:
@@ -1293,15 +1363,6 @@ async def test_failed_job_exposes_and_executes_recovery_actions(client: AsyncCli
     assert saved.status_code == 200
     assert saved.json()["data"]["status"] == "FAILED"
     assert saved.json()["data"]["error_details"]["recovery"]["intermediate_result_saved"] is True
-
-    handoff = await client.post(
-        f"/api/v1/jobs/{job_id}/recovery",
-        json={"action": "ESCALATE_HUMAN", "note": "请检查主镜头连续性"},
-        headers={"Idempotency-Key": "handoff-job-v1"},
-    )
-    assert handoff.status_code == 200
-    assert handoff.json()["data"]["stage"] == "等待人工处理"
-    assert handoff.json()["data"]["error_details"]["recovery"]["handoff_status"] == "REQUESTED"
 
     resumed = await client.post(
         f"/api/v1/jobs/{job_id}/recovery",

@@ -8,6 +8,8 @@ from app.db.session import get_session
 from app.schemas import (
     BriefAvoidancesSuggestionRead,
     BriefAvoidancesSuggestionRequest,
+    BriefBlockingQuestionsSuggestionRead,
+    BriefBlockingQuestionsSuggestionRequest,
     BriefRequirementsSuggestionRead,
     BriefRequirementsSuggestionRequest,
     BriefStoryRewriteRead,
@@ -22,7 +24,11 @@ from app.schemas import (
     ProjectUpdate,
     SceneRead,
 )
-from app.services.brief_assistant import suggest_brief_avoidances, suggest_brief_requirements
+from app.services.brief_assistant import (
+    suggest_brief_avoidances,
+    suggest_brief_blocking_questions,
+    suggest_brief_requirements,
+)
 from app.services.project_naming import ProjectNamingError, suggest_project_name
 from app.services.project_readiness import get_project_readiness
 from app.services.projects import (
@@ -108,6 +114,19 @@ async def brief_avoidance_suggestion(
 ) -> dict[str, object]:
     project_or_404(session, project_id)
     result: BriefAvoidancesSuggestionRead = await suggest_brief_avoidances(
+        payload.model_dump(mode="json")
+    )
+    return success(result)
+
+
+@router.post("/projects/{project_id}/brief-blocking-question-suggestions")
+async def brief_blocking_question_suggestion(
+    project_id: str,
+    payload: BriefBlockingQuestionsSuggestionRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    project_or_404(session, project_id)
+    result: BriefBlockingQuestionsSuggestionRead = await suggest_brief_blocking_questions(
         payload.model_dump(mode="json")
     )
     return success(result)

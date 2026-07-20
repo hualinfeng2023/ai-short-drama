@@ -325,6 +325,43 @@ async def test_brief_avoidances_can_be_suggested_without_mutating_project(
     assert unchanged["lock_version"] == 1
 
 
+async def test_brief_blocking_questions_can_be_drafted_without_mutating_project(
+    client: AsyncClient,
+) -> None:
+    created = await client.post(
+        "/api/v1/projects",
+        json=CREATE_PAYLOAD,
+        headers={"Idempotency-Key": "create-brief-blocking-questions-v1"},
+    )
+    project = created.json()["data"]["project"]
+
+    suggestion = await client.post(
+        f"/api/v1/projects/{project['id']}/brief-blocking-question-suggestions",
+        json={
+            "idea": project["idea"],
+            "genre": project["genre"],
+            "style": project["style"],
+            "target_duration_sec": project["target_duration_sec"],
+            "aspect_ratio": project["aspect_ratio"],
+            "target_platform": project["target_platform"],
+            "narrative_protagonist": "unspecified",
+            "emotional_rewards": [],
+            "primary_market": "CN",
+            "canonical_language": "zh-CN",
+            "content_requirements": ["前三秒建立危机", "合伙人的秘密内容待确认"],
+            "content_avoidances": ["避免未授权品牌露出"],
+            "existing_questions": [],
+        },
+    )
+
+    assert suggestion.status_code == 200
+    result = suggestion.json()["data"]
+    assert result["provider"] == "local-fallback"
+    assert result["items"] == ["合伙人的秘密内容最终如何确定？"]
+    unchanged = (await client.get(f"/api/v1/projects/{project['id']}")).json()["data"]
+    assert unchanged["lock_version"] == 1
+
+
 async def test_story_rewrite_requires_seed_and_does_not_mutate_project(
     client: AsyncClient,
 ) -> None:

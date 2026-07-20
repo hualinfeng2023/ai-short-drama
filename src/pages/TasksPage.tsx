@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ArrowRight, Ban, Clock3, Filter, LoaderCircle, RotateCcw, X } from 'lucide-react'
-import { Link, useSearchParams } from 'react-router'
+import { ArrowRight, Ban, Clock3, LoaderCircle, RotateCcw, X } from 'lucide-react'
+import { Link, useNavigate, useSearchParams } from 'react-router'
 import {
   cancelPersistedJob,
   fetchJobs,
@@ -8,7 +8,7 @@ import {
   recoverPersistedJob,
 } from '../api/client'
 import { JobRecoveryPanel } from '../components/JobRecoveryPanel'
-import { Button, PageHeader, ProgressBar, StatusBadge } from '../components/ui'
+import { Button, PageHeader, ProgressBar, SelectControl, StatusBadge, Tab, TabList, Toolbar } from '../components/ui'
 import { useStudio } from '../store/StudioContext'
 import { useToast } from '../store/ToastContext'
 import type { Job, JobRecoveryAction, JobRecoveryRequest, JobStatus } from '../types'
@@ -23,6 +23,15 @@ const ACTIVE_JOB_STATUSES = new Set<JobStatus>([
   'CANCEL_REQUESTED',
 ])
 
+/** 将后端 stage 拆成主说明与次要元信息，便于分行展示 */
+function splitJobStage(stage: string): { message: string; meta: string[] } {
+  const localized = localizeDisplayText(stage).trim()
+  if (!localized) return { message: '', meta: [] }
+  const parts = localized.split(' · ').map((part) => part.trim()).filter(Boolean)
+  if (parts.length <= 1) return { message: localized, meta: [] }
+  return { message: parts[0], meta: parts.slice(1) }
+}
+
 const eventTypes = [
   'job.created',
   'job.running',
@@ -35,7 +44,6 @@ const eventTypes = [
   'job.succeeded',
   'job.recovery_requested',
   'job.intermediate_saved',
-  'job.handoff_requested',
   'proposal.ready',
   'story.approved',
   'characters.candidates_ready',
@@ -72,20 +80,16 @@ function createdLabel(value: string) {
     })
 }
 
-function taskSourceLabel(job: Job) {
-  const source = job.entity.split(':', 1)[0]
-  const labels: Record<string, string> = {
-    brief_version: '项目简报',
-    proposal_version: '已确认故事方向',
-    shot: '镜头任务',
-    story_version: '故事与剧本',
-  }
-  return labels[source] ?? '生成任务'
+function taskDisplayLabel(job: Job) {
+  const label = localizeDisplayText(job.label)
+  const projectPrefix = `${localizeDisplayText(job.projectName)} · `
+  return label.startsWith(projectPrefix) ? label.slice(projectPrefix.length) : label
 }
 
 export function TasksPage() {
+  const navigate = useNavigate()
   const { notify } = useToast()
-  const { project, jobs: contextJobs, apiStatus } = useStudio()
+  const { project, projectSummaries, jobs: contextJobs, apiStatus } = useStudio()
   const [searchParams] = useSearchParams()
   const projectId = searchParams.get('project')
   const requestedJobType = searchParams.get('jobType')
@@ -159,6 +163,20 @@ export function TasksPage() {
     [filter, focusedJobType, jobs],
   )
   const hasActiveJobs = jobs.some((job) => ACTIVE_JOB_STATUSES.has(job.status))
+  const projectFilterOptions = useMemo(() => {
+    const options = new Map<string, string>()
+    projectSummaries.forEach((item) => options.set(item.id, item.name))
+    jobs.forEach((job) => options.set(job.projectId, job.projectName))
+    return [...options.entries()].sort((left, right) => left[1].localeCompare(right[1], 'zh-CN'))
+  }, [jobs, projectSummaries])
+
+  function navigateTasksScope(nextProjectId: string) {
+    const params = new URLSearchParams()
+    if (nextProjectId) params.set('project', nextProjectId)
+    if (focusedJobType) params.set('jobType', focusedJobType)
+    const query = params.toString()
+    navigate(query ? `/tasks?${query}` : '/tasks')
+  }
 
   useEffect(() => {
     if (!hasActiveJobs) return
@@ -169,7 +187,9 @@ export function TasksPage() {
 
   const completedCtaFor = useCallback((job: Job) => {
     const relatedShot = project.id === job.projectId
-      ? project.shots.find((shot) => shot.id === job.entityId || job.entity.endsWith(shot.id))
+      ? project.shots.find((shot) => (
+        shot.id === job.entityId || job.entity?.endsWith(shot.id)
+      ))
       : undefined
     return getCompletedJobCta(job, job.projectId, relatedShot
       ? {
@@ -185,7 +205,6 @@ export function TasksPage() {
     : '/projects'
   const allTasksHref = projectId ? `/tasks?project=${projectId}` : '/tasks'
   const focusedJobTypeQuery = focusedJobType ? `jobType=${focusedJobType}` : ''
-  const currentProjectTasksHref = `/tasks?project=${projectId ?? project.id}${focusedJobTypeQuery ? `&${focusedJobTypeQuery}` : ''}`
   const globalTasksHref = focusedJobTypeQuery ? `/tasks?${focusedJobTypeQuery}` : '/tasks'
 
   async function cancel(jobId: string) {
@@ -219,8 +238,7 @@ export function TasksPage() {
         FALLBACK_EXECUTION: '任务将采用降级方案执行，完成后仍需人工复核。',
         SAVE_INTERMEDIATE: '中间结果已经保存。',
         PROVIDE_INPUT: '补充信息已保存，任务将从失败处继续。',
-        ESCALATE_HUMAN: '任务已经转入人工处理队列。',
-      }[action], action === 'ESCALATE_HUMAN' || action === 'FALLBACK_EXECUTION' ? 'info' : 'success')
+      }[action], action === 'FALLBACK_EXECUTION' ? 'info' : 'success')
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '任务恢复失败')
     } finally {
@@ -230,7 +248,6 @@ export function TasksPage() {
 
   return <div className="page page--tasks">
     <PageHeader
-      eyebrow="任务运行"
       title="生成任务"
       description={projectId ? '查看当前项目的生成进度与历史记录。' : '汇总查看所有项目的生成进度与历史记录。'}
       actions={<Link className="button button--primary button--md" to={nextWorkspace}>{projectId ? '打开当前工作区' : '返回项目列表'} <ArrowRight size={16} /></Link>}
@@ -241,13 +258,28 @@ export function TasksPage() {
       GENERATE_SCRIPT_PACKAGE: '分集大纲与剧本生成',
       GENERATE_STORY_PACKAGE: '故事资料生成',
     }[focusedJobType]}</strong><small>{projectId ? '已定位到当前项目的对应任务' : '正在查看所有项目的对应任务'}</small></span></div><Link to={allTasksHref}><X size={14} />查看全部任务</Link></div> : null}
-    <div className="task-project-scope"><span>任务范围</span><nav aria-label="任务范围"><Link aria-current={projectId ? 'page' : undefined} className={projectId ? 'active' : ''} to={currentProjectTasksHref}>当前项目</Link><Link aria-current={!projectId ? 'page' : undefined} className={!projectId ? 'active' : ''} to={globalTasksHref}>所有项目</Link></nav></div>
-    <div className="task-toolbar"><div><Filter size={16} />{(['ALL', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED'] as const).map((item) => <button className={filter === item ? 'active' : ''} key={item} onClick={() => setFilter(item)}>{item === 'ALL' ? '全部状态' : item === 'RUNNING' ? '运行中' : item === 'SUCCEEDED' ? '已完成' : item === 'FAILED' ? '失败' : '已取消'}</button>)}</div><span>{filtered.length} 个任务 · {projectId ? '当前项目' : '所有项目'}</span></div>
+    <div className="task-project-scope">
+      <div className="task-project-scope__controls">
+        <SelectControl
+          aria-label="按项目筛选"
+          onChange={(event) => navigateTasksScope(event.target.value)}
+          value={projectId ?? ''}
+        >
+          <option value="">所有项目</option>
+          {projectFilterOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+        </SelectControl>
+        {projectId ? <Link to={globalTasksHref}>查看全部项目</Link> : null}
+      </div>
+    </div>
+    <Toolbar className="task-toolbar" label="任务筛选"><TabList aria-label="按状态筛选">{(['ALL', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED'] as const).map((item) => <Tab className={filter === item ? 'active' : ''} key={item} onClick={() => setFilter(item)} selected={filter === item}>{item === 'ALL' ? '全部状态' : item === 'RUNNING' ? '运行中' : item === 'SUCCEEDED' ? '已完成' : item === 'FAILED' ? '失败' : '已取消'}</Tab>)}</TabList><span>{filtered.length} 个任务 · {projectId ? '当前项目' : '所有项目'}</span></Toolbar>
     {error ? <div className="brief-save-message brief-save-message--error" role="alert">{error}<Button onClick={refresh} size="sm" variant="ghost"><RotateCcw size={14} />重试读取</Button></div> : null}
     {loading ? <div className="brief-page-state"><LoaderCircle className="spin" size={20} />正在读取持久化任务…</div> : null}
-    <section className="task-list">
-      <div className="task-list__header" aria-hidden="true"><span>任务</span><span>进度</span><span>用时</span><span /></div>
-      {filtered.map((job) => {
+    <section className={`task-list${projectId ? ' task-list--project-scoped' : ''}`}>
+      <div className="task-list__header" aria-hidden="true">
+        <span className="task-list__col-lead">任务</span>{projectId ? null : <span className="task-list__col-project">项目</span>}<span className="task-list__col-created">创建时间</span>
+        <span className="task-list__col-state">任务状态</span><span className="task-list__col-timing">用时</span><span className="task-list__col-actions">操作</span>
+      </div>
+      {filtered.map((job, index) => {
       const active = ACTIVE_JOB_STATUSES.has(job.status)
       const elapsedSeconds = elapsedJobSeconds(job, nowMs)
       const completedCta = completedCtaFor(job)
@@ -258,11 +290,47 @@ export function TasksPage() {
       const visibleErrorCode = job.status === 'FAILED' && job.errorCode
         ? ` · 错误码：${job.errorCode}`
         : ''
-      return <article data-active={active || undefined} data-focused={focusedJobType === job.jobType || undefined} key={job.id}>
-        <div className="task-list__lead"><span className={`activity-dot activity-dot--${job.status.toLowerCase()}`} /><div><strong>{localizeDisplayText(job.label)}</strong><small>{taskSourceLabel(job)}{projectId ? '' : ` · 项目 ${job.projectId.slice(0, 8)}`} · {createdLabel(job.createdAt)}</small></div></div>
-        <div className="task-list__stage"><div className={!active ? 'task-list__stage-summary' : undefined}>{active ? <strong title={localizeDisplayText(job.stage)}>{localizeDisplayText(job.stage)}</strong> : null}<span className="task-list__stage-meta">{active ? <span className="task-list__stage-progress">{Math.round(job.progress)}%</span> : null}<StatusBadge status={job.status} /></span></div>{active ? <ProgressBar value={job.progress} /> : job.status === 'SUCCEEDED' ? null : <small>{taskDetail}{visibleErrorCode}</small>}</div>
-        <span className="task-list__timing"><span><Clock3 size={14} />{formatElapsedTime(elapsedSeconds)}</span></span>
-        <div className="task-list__actions">{active ? <Button disabled={actingJobId === job.id} onClick={() => void cancel(job.id)} size="sm" variant="ghost">{actingJobId === job.id ? <LoaderCircle className="spin" size={15} /> : <Ban size={15} />}取消</Button> : null}{failedGuidance?.secondaryCta ? <Link className="button button--secondary button--sm task-list__cta" to={failedGuidance.secondaryCta.href}>{failedGuidance.secondaryCta.label}<ArrowRight size={14} /></Link> : null}{completedCta ? <Link className="button button--secondary button--sm task-list__cta" to={completedCta.href}>{completedCta.label}<ArrowRight size={14} /></Link> : null}</div>
+      return <article data-active={active || undefined} data-focused={focusedJobType === job.jobType || undefined} key={job.id} title={`任务编号 ${job.id}`}>
+        <div className="task-list__lead"><span className={`activity-dot activity-dot--${job.status.toLowerCase()}`} /><div><strong>{taskDisplayLabel(job)}</strong><small>任务 #{String(filtered.length - index).padStart(2, '0')}</small></div></div>
+        {projectId ? null : <Link className="task-list__project" title={`打开项目：${job.projectName}`} to={`/projects/${job.projectId}`}>{job.projectName}</Link>}
+        <span className="task-list__created">{createdLabel(job.createdAt)}</span>
+        <div className="task-list__state">
+          {job.status === 'FAILED' ? (
+            <>
+              <StatusBadge status={job.status} />
+              <p className="task-list__state-message task-list__state-message--error">{taskDetail}{visibleErrorCode}</p>
+            </>
+          ) : active ? (
+            <>
+              <div className="task-list__state-track">
+                <StatusBadge status={job.status} />
+                <ProgressBar value={job.progress} />
+                <span className="task-list__stage-progress">{Math.round(job.progress)}%</span>
+              </div>
+              {(() => {
+                const { message, meta } = splitJobStage(job.stage)
+                return (
+                  <>
+                    {message ? (
+                      <p className="task-list__state-message" title={message}>{message}</p>
+                    ) : null}
+                    {meta.length ? (
+                      <div className="task-list__state-meta">
+                        {meta.map((item, index) => (
+                          <span key={`${item}-${index}`}>{item}</span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </>
+                )
+              })()}
+            </>
+          ) : (
+            <StatusBadge status={job.status} />
+          )}
+        </div>
+        <span className="task-list__timing"><span>{formatElapsedTime(elapsedSeconds)}</span></span>
+        <div className="task-list__actions">{active ? <Button className="task-list__cancel" disabled={actingJobId === job.id} onClick={() => void cancel(job.id)} size="sm" variant="ghost">{actingJobId === job.id ? <LoaderCircle className="spin" size={15} /> : <Ban size={15} />}取消</Button> : null}{failedGuidance?.secondaryCta ? <Link className="button button--secondary button--sm task-list__cta" to={failedGuidance.secondaryCta.href}>{failedGuidance.secondaryCta.label}<ArrowRight size={14} /></Link> : null}{completedCta ? <Link className="button button--secondary button--sm task-list__cta" to={completedCta.href}>{completedCta.label}<ArrowRight size={14} /></Link> : null}</div>
         <JobRecoveryPanel
           busy={actingJobId === job.id}
           job={job}

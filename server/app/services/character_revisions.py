@@ -36,7 +36,16 @@ class CharacterRevisionAIReview(BaseModel):
     relationship_sync_notes: list[str] = Field(default_factory=list, max_length=20)
 
 
-STRUCTURAL_FIELDS = {"name", "role", "dramatic_function", "desire", "fear", "secret"}
+STRUCTURAL_FIELDS = {
+    "name",
+    "role",
+    "gender",
+    "ethnicity",
+    "dramatic_function",
+    "desire",
+    "fear",
+    "secret",
+}
 
 
 def _error(status_code: int, code: str, message: str, **details: object) -> HTTPException:
@@ -73,6 +82,14 @@ def _revision_context(
     changed_fields = sorted(key for key, value in proposed.items() if character.get(key) != value)
     if not changed_fields:
         raise _error(422, "CHARACTER_REVISION_EMPTY", "角色信息没有发生变化。")
+    if "ethnicity" in changed_fields and "visual_notes" not in changed_fields:
+        raise _error(
+            422,
+            "CHARACTER_ETHNICITY_VISUAL_SYNC_REQUIRED",
+            "族裔／文化背景已改变，但视觉特征仍是旧版本。",
+            field="visual_notes",
+            suggestion="请同步调整或确认视觉特征，再检查修改影响。",
+        )
     graph_payload = _graph_payload(session, graph)
     related_edges = [edge for edge in graph_payload.edges if character_key in {edge.source_character_key, edge.target_character_key}]
     affected_outlines = session.scalar(select(func.count()).select_from(EpisodeOutlineVersion).where(EpisodeOutlineVersion.project_id == project_id)) or 0
@@ -122,6 +139,14 @@ def _rules_review(context: dict[str, Any]) -> CharacterRevisionAIReview:
             message="修改涉及角色动机或叙事功能，现有剧情推进不能继续原样使用。",
             suggestion="创建同步修改版，并重新确认相关人物关系后生成新剧本。",
         ))
+    if {"ethnicity", "visual_notes"} <= set(context["changed_fields"]):
+        issues.append(CharacterRevisionIssue(
+            severity="INFO",
+            code="CHARACTER_ETHNICITY_VISUALS_SYNCED",
+            field="ethnicity、visual_notes",
+            message="族裔／文化背景与视觉特征已作为同一组身份变化同步更新。",
+            suggestion="继续检查描述是否保留个体差异，并避免用外貌推断性格、职业或剧情功能。",
+        ))
     if context["affected"]["relationship_count"]:
         issues.append(CharacterRevisionIssue(
             severity="WARNING",
@@ -152,7 +177,8 @@ async def review_character_revision(
         prompt = (
             "你是短剧角色连续性审核员。判断角色修改是否与当前故事世界、角色动机和人物关系冲突。"
             "只返回 JSON，不要改写用户没有修改的事实。BLOCKER 表示必须同步修改故事或关系；"
-            "WARNING 表示需要人工核对；PASS 也必须给出同步说明。输出符合 JSON Schema：\n"
+            "WARNING 表示需要人工核对；PASS 也必须给出同步说明。若族裔／文化背景改变，必须同时检查视觉特征是否"
+            "保持身份一致与自然个体差异，不得用族裔推断性格、职业或剧情功能。输出符合 JSON Schema：\n"
             f"{json.dumps(CharacterRevisionAIReview.model_json_schema(), ensure_ascii=False)}\n"
             f"Story Bible:\n{json.dumps(context['story_bible'], ensure_ascii=False)}\n"
             f"Relationship Graph:\n{json.dumps(context['relationship_graph'], ensure_ascii=False)}\n"

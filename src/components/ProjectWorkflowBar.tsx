@@ -11,12 +11,6 @@ import { Link, useLocation } from 'react-router'
 import { useProjectReadiness } from '../store/ProjectReadinessContext'
 import type { ProjectStage, ProjectStageStatus } from '../types'
 
-const MODE_LABELS = {
-  CLASSIC: '经典镜头工作流',
-  PIPELINE: '五阶段制作流',
-  HYBRID: '迁移中的五阶段制作流',
-} as const
-
 const STAGE_STATUS_LABELS: Record<ProjectStageStatus, string> = {
   COMPLETE: '已完成',
   CURRENT: '当前阶段',
@@ -36,21 +30,6 @@ function StageIcon({ stage }: { stage: ProjectStage }) {
   if (stage.status === 'BLOCKED') return <AlertTriangle size={14} />
   if (stage.status === 'LOCKED') return <LockKeyhole size={13} />
   return <Circle size={12} />
-}
-
-function StageTip({ id, stage }: { id: string; stage: ProjectStage }) {
-  const statusClass = stage.status.toLowerCase()
-  return (
-    <span className="project-workflow__tip" id={id} role="tooltip">
-      <span className="project-workflow__tip-row">
-        <strong>{stage.label}</strong>
-        <em className={`project-workflow__tip-status project-workflow__tip-status--${statusClass}`}>
-          {STAGE_STATUS_LABELS[stage.status]}
-        </em>
-      </span>
-      <small>{stage.detail}</small>
-    </span>
-  )
 }
 
 export function ProjectWorkflowBar() {
@@ -122,7 +101,6 @@ export function ProjectWorkflowBar() {
     <section className="project-workflow" aria-label="项目制作阶段">
       <header>
         <div>
-          <span>{MODE_LABELS[readiness.workflowMode]}</span>
           <strong>
             {readiness.summaryStatus === 'IN_PROGRESS' && readiness.activeJobCount > 0
               ? <LoaderCircle aria-hidden="true" className="spin project-workflow__jobs-icon" size={12} />
@@ -137,18 +115,42 @@ export function ProjectWorkflowBar() {
           </Link>
         )}
       </header>
+      <div
+        aria-label={`制作进度：第 ${activeStageIndex + 1}/${readiness.stages.length} 阶段`}
+        className="project-workflow__mobile-progress"
+      >
+        <span>{activeStage?.label ?? '项目概览'}</span>
+        <div
+          className="project-workflow__mobile-track"
+          style={{ gridTemplateColumns: `repeat(${readiness.stages.length}, minmax(0, 1fr))` }}
+        >
+          {readiness.stages.map((stage) => (
+            <i
+              className={
+                stage.status === 'COMPLETE'
+                  ? 'is-complete'
+                  : stage.key === readiness.activeStageKey
+                    ? 'is-current'
+                    : stage.status === 'IN_PROGRESS'
+                      ? 'is-progress'
+                      : undefined
+              }
+              key={stage.key}
+            />
+          ))}
+        </div>
+        <small>第 {activeStageIndex + 1}/{readiness.stages.length} 阶段</small>
+      </div>
       <nav aria-label="制作阶段" ref={stageNavRef}>
         <ol className="project-workflow__stages">
           {readiness.stages.map((stage) => {
             const statusClass = stage.status.toLowerCase()
             const locked = stage.status === 'LOCKED'
             const statusLabel = STAGE_STATUS_LABELS[stage.status]
-            const tipId = `workflow-stage-tip-${stage.key.toLowerCase()}`
             return (
               <li className={`project-workflow__item project-workflow__item--${statusClass}`} key={stage.key}>
                 {locked ? (
                   <span
-                    aria-describedby={tipId}
                     aria-disabled="true"
                     aria-label={`${stage.label}，${statusLabel}`}
                     className={`project-workflow__stage project-workflow__stage--${statusClass}`}
@@ -160,7 +162,6 @@ export function ProjectWorkflowBar() {
                 ) : (
                   <Link
                     aria-current={stage.key === readiness.activeStageKey ? 'step' : undefined}
-                    aria-describedby={tipId}
                     aria-label={`${stage.label}，${statusLabel}`}
                     className={`project-workflow__stage project-workflow__stage--${statusClass}`}
                     to={stage.href}
@@ -169,7 +170,6 @@ export function ProjectWorkflowBar() {
                     <span>{stage.label}</span>
                   </Link>
                 )}
-                <StageTip id={tipId} stage={stage} />
               </li>
             )
           })}

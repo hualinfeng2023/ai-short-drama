@@ -5,10 +5,12 @@ import {
   Film,
   Layers3,
   LoaderCircle,
+  LockKeyhole,
   Music2,
   PackageCheck,
   RefreshCw,
   ShieldCheck,
+  Sparkles,
   Volume2,
 } from 'lucide-react'
 import { Link, useParams } from 'react-router'
@@ -25,8 +27,10 @@ import {
   type ExportProfileRecord,
   type TimelineWorkspace,
 } from '../api/client'
-import { Button, EmptyState, PageHeader, StatusBadge } from '../components/ui'
+import { Button, EmptyState, PageHeader, StatusBadge, Surface } from '../components/ui'
+import { ImpactConfirmModal } from '../components/ConfirmModal'
 import { ServiceRequiredState } from '../components/ServiceRequiredState'
+import { useToast } from '../store/ToastContext'
 import { useProjectReadiness } from '../store/ProjectReadinessContext'
 import type { ExportPackage, ProjectRecord } from '../types'
 import { localizeDisplayText } from '../utils/localizeDisplayText'
@@ -62,12 +66,14 @@ function displayLabel(value: string): string {
 export function ProductionPage() {
   const { projectId } = useParams()
   const { readiness } = useProjectReadiness()
+  const { notify } = useToast()
   const [project, setProject] = useState<ProjectRecord | null>(null)
   const [audio, setAudio] = useState<AudioWorkspace | null>(null)
   const [timeline, setTimeline] = useState<TimelineWorkspace | null>(null)
   const [profiles, setProfiles] = useState<ExportProfileRecord[]>([])
   const [exports, setExports] = useState<ExportPackage[]>([])
   const [busy, setBusy] = useState<string | null>(null)
+  const [approveOpen, setApproveOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const productionPollingActive = readiness === null
@@ -115,6 +121,8 @@ export function ProductionPage() {
     setError(null)
     try {
       await approvePreviewTimeline(timeline.timeline.id, project.lockVersion)
+      setApproveOpen(false)
+      notify('第 5 阶段已批准，画面基线已锁定。')
       await refresh()
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '第 5 阶段批准失败')
@@ -203,15 +211,31 @@ export function ProductionPage() {
     <section className="story-gate-summary"><div><span>项目阶段</span><StatusBadge status={project.status} /></div><div><span>音频节点</span><strong>{audio.cues.length}</strong></div><div><span>时间线轨道</span><strong>{timeline.tracks.length}</strong></div><div><span>交付项</span><strong>{matrixExports.filter((item) => item.status === 'READY').length} / {matrixExports.length || 4}</strong></div></section>
 
     <div className="production-grid">
-      <section className="story-section"><div className="section-heading"><div><p className="eyebrow">音频流程</p><h2><Music2 size={19} />对白、背景音乐、环境音与音效</h2><p>权利状态：{displayLabel(audio.soundBrief?.rightsStatus ?? '等待声音简报')}</p></div><StatusBadge status={audio.soundBrief?.status ?? 'PRODUCING'} /></div><div className="audio-cue-list">{audio.cues.map((cue) => <div key={cue.id}><span className={`audio-cue-type audio-cue-type--${cue.type.toLowerCase()}`}><Volume2 size={14} />{displayLabel(cue.type)}</span><strong>{(cue.startMs / 1000).toFixed(1)} 秒 → {((cue.startMs + cue.durationMs) / 1000).toFixed(1)} 秒</strong><small>{String(cue.payload.text ?? '')}</small><StatusBadge status={cue.take?.qualityStatus ?? cue.status} /></div>)}</div>{audio.lipSync.length ? <p className="production-note">口型同步：{audio.lipSync.length} 个镜头；{audio.lipSync.filter((item) => item.fallbackStrategy).length} 个显式降级，源视频版本全部保留。</p> : null}</section>
+      <Surface className="story-section"><div className="section-heading"><div><p className="eyebrow">音频流程</p><h2><Music2 size={19} />对白、背景音乐、环境音与音效</h2><p>权利状态：{displayLabel(audio.soundBrief?.rightsStatus ?? '等待声音简报')}</p></div><StatusBadge status={audio.soundBrief?.status ?? 'PRODUCING'} /></div><div className="audio-cue-list">{audio.cues.map((cue) => <div key={cue.id}><span className={`audio-cue-type audio-cue-type--${cue.type.toLowerCase()}`}><Volume2 size={14} />{displayLabel(cue.type)}</span><strong>{(cue.startMs / 1000).toFixed(1)} 秒 → {((cue.startMs + cue.durationMs) / 1000).toFixed(1)} 秒</strong><small>{String(cue.payload.text ?? '')}</small><StatusBadge status={cue.take?.qualityStatus ?? cue.status} /></div>)}</div>{audio.lipSync.length ? <p className="production-note">口型同步：{audio.lipSync.length} 个镜头；{audio.lipSync.filter((item) => item.fallbackStrategy).length} 个显式降级，源视频版本全部保留。</p> : null}</Surface>
 
-      <section className="story-section"><div className="section-heading"><div><p className="eyebrow">多轨时间线</p><h2><Layers3 size={19} />六类轨道</h2></div>{timeline.timeline ? <StatusBadge status={timeline.timeline.status} /> : null}</div>{timeline.timeline ? <><video controls preload="metadata" src={`/api/v1/assets/${timeline.timeline.assets.mp4}/content`} /><div className="timeline-track-list">{timeline.tracks.map((track) => <div key={track.id}><strong>{displayLabel(track.type)}</strong><span>{track.clips.length} 个片段</span><small>{track.gainDb} 分贝</small><div>{track.clips.map((clip) => <i className={clip.degraded ? 'degraded' : ''} key={clip.id} style={{ flex: Math.max(1, clip.endMs - clip.startMs) }} title={`${(clip.startMs / 1000).toFixed(1)}–${(clip.endMs / 1000).toFixed(1)} 秒`} />)}</div></div>)}</div></> : productionInProgress ? <div className="preview-media-wait"><LoaderCircle className="spin" size={20} />正式媒体正在生成</div> : <EmptyState title="尚未创建正式时间线" description="当前没有时间线装配任务。请先完成并批准动态分镜，再启动正式制作。" action={<Link className="button button--secondary button--md" to={readiness?.nextActionHref ?? `/projects/${projectId}/storyboard`}>{readiness?.nextActionLabel ?? '检查前置阶段'}</Link>} />}</section>
+      <Surface className="story-section"><div className="section-heading"><div><p className="eyebrow">多轨时间线</p><h2><Layers3 size={19} />六类轨道</h2></div>{timeline.timeline ? <StatusBadge status={timeline.timeline.status} /> : null}</div>{timeline.timeline ? <><video controls preload="metadata" src={`/api/v1/assets/${timeline.timeline.assets.mp4}/content`} /><div className="timeline-track-list">{timeline.tracks.map((track) => <div key={track.id}><strong>{displayLabel(track.type)}</strong><span>{track.clips.length} 个片段</span><small>{track.gainDb} 分贝</small><div>{track.clips.map((clip) => <i className={clip.degraded ? 'degraded' : ''} key={clip.id} style={{ flex: Math.max(1, clip.endMs - clip.startMs) }} title={`${(clip.startMs / 1000).toFixed(1)}–${(clip.endMs / 1000).toFixed(1)} 秒`} />)}</div></div>)}</div></> : productionInProgress ? <div className="preview-media-wait"><LoaderCircle className="spin" size={20} />正式媒体正在生成</div> : <EmptyState title="尚未创建正式时间线" description="当前没有时间线装配任务。请先完成并批准动态分镜，再启动正式制作。" action={<Link className="button button--secondary button--md" to={readiness?.nextActionHref ?? `/projects/${projectId}/storyboard`}>{readiness?.nextActionLabel ?? '检查前置阶段'}</Link>} />}</Surface>
     </div>
 
-    <section className="story-section"><div className="section-heading"><div><p className="eyebrow">整片质量检查</p><h2>第 5 阶段 · 画面锁定</h2><p>检查黑帧、空片段、音画同步、字幕边界、总时长、响度、连续性、临时资产和权利状态。</p></div><Button disabled={!timeline.timeline || !allQcPassed || timeline.timeline.status === 'APPROVED' || busy !== null} onClick={() => void approveG5()}>{busy === 'g5' ? <LoaderCircle className="spin" size={16} /> : <ShieldCheck size={16} />}{timeline.timeline?.status === 'APPROVED' ? '第 5 阶段已批准' : '批准第 5 阶段'}</Button></div><div className="qc-grid">{timeline.qualityChecks.map((check) => <article key={check.type}><Check size={15} /><strong>{displayLabel(check.type)}</strong><span>{check.score?.toFixed(2) ?? '—'}</span><StatusBadge status={check.status} /></article>)}</div></section>
+    <Surface className="story-section"><div className="section-heading"><div><p className="eyebrow">整片质量检查</p><h2>第 5 阶段 · 画面锁定</h2><p>检查黑帧、空片段、音画同步、字幕边界、总时长、响度、连续性、临时资产和权利状态。</p></div><Button disabled={!timeline.timeline || !allQcPassed || timeline.timeline.status === 'APPROVED' || busy !== null} onClick={() => setApproveOpen(true)}>{busy === 'g5' ? <LoaderCircle className="spin" size={16} /> : <ShieldCheck size={16} />}{timeline.timeline?.status === 'APPROVED' ? '第 5 阶段已批准' : '批准第 5 阶段'}</Button></div><div className="qc-grid">{timeline.qualityChecks.map((check) => <article key={check.type}><Check size={15} /><strong>{displayLabel(check.type)}</strong><span>{check.score?.toFixed(2) ?? '—'}</span><StatusBadge status={check.status} /></article>)}</div></Surface>
 
-    <section className="story-section"><div className="section-heading"><div><p className="eyebrow">交付矩阵</p><h2><PackageCheck size={19} />多平台 × 多语言</h2><p>画面母版在不同语言版本间复用，字幕和来源清单独立登记；默认不自动发布。</p></div><div>{profiles.length < 2 ? <Button disabled={project.status !== 'APPROVED' || busy !== null} onClick={() => void createDefaults()} variant="secondary">{busy === 'profiles' ? <LoaderCircle className="spin" size={16} /> : <PackageCheck size={16} />}创建 2 个默认导出规格</Button> : <Button disabled={project.status !== 'APPROVED' || busy !== null || matrixExports.length > 0} onClick={() => void startMatrix()}>{busy === 'matrix' ? <LoaderCircle className="spin" size={16} /> : <PackageCheck size={16} />}生成 2 × 2 交付矩阵</Button>}</div></div><div className="delivery-profile-grid">{profiles.map((profile) => <article key={profile.id}><span>{displayLabel(profile.platform)}</span><h3>{localizeDisplayText(profile.name)}</h3><p>{profile.width} × {profile.height} · {profile.aspectRatio}</p><small>{profile.languages.map(displayLabel).join(' / ')} · {displayLabel(profile.captionMode)}</small></article>)}</div>{matrixExports.length ? <div className="delivery-list">{matrixExports.map((item) => <article key={item.id}><div><Film size={17} /><span><strong>{localizeDisplayText(item.profile)} · {displayLabel(item.language)}</strong><small>权利状态：{displayLabel(item.rightsStatus)}</small></span></div><StatusBadge status={item.status} />{item.status === 'READY' && item.assets.manifest ? <a href={item.assets.manifest}><Download size={15} />下载清单</a> : <LoaderCircle className="spin" size={15} />}</article>)}</div> : null}</section>
+    <Surface className="story-section"><div className="section-heading"><div><p className="eyebrow">交付矩阵</p><h2><PackageCheck size={19} />多平台 × 多语言</h2><p>画面母版在不同语言版本间复用，字幕和来源清单独立登记；默认不自动发布。</p></div><div>{profiles.length < 2 ? <Button disabled={project.status !== 'APPROVED' || busy !== null} onClick={() => void createDefaults()} variant="secondary">{busy === 'profiles' ? <LoaderCircle className="spin" size={16} /> : <PackageCheck size={16} />}创建 2 个默认导出规格</Button> : <Button disabled={project.status !== 'APPROVED' || busy !== null || matrixExports.length > 0} onClick={() => void startMatrix()}>{busy === 'matrix' ? <LoaderCircle className="spin" size={16} /> : <PackageCheck size={16} />}生成 2 × 2 交付矩阵</Button>}</div></div><div className="delivery-profile-grid">{profiles.map((profile) => <article key={profile.id}><span>{displayLabel(profile.platform)}</span><h3>{localizeDisplayText(profile.name)}</h3><p>{profile.width} × {profile.height} · {profile.aspectRatio}</p><small>{profile.languages.map(displayLabel).join(' / ')} · {displayLabel(profile.captionMode)}</small></article>)}</div>{matrixExports.length ? <div className="delivery-list">{matrixExports.map((item) => <article key={item.id}><div><Film size={17} /><span><strong>{localizeDisplayText(item.profile)} · {displayLabel(item.language)}</strong><small>权利状态：{displayLabel(item.rightsStatus)}</small></span></div><StatusBadge status={item.status} />{item.status === 'READY' && item.assets.manifest ? <a href={item.assets.manifest}><Download size={15} />下载清单</a> : <LoaderCircle className="spin" size={15} />}</article>)}</div> : null}</Surface>
 
     {timeline.timeline?.status === 'APPROVED' ? <Link className="button button--secondary button--md" to={`/projects/${projectId}/episodes/current/preview`}><Film size={16} />打开修改与小样工作区</Link> : null}
+
+    <ImpactConfirmModal
+      confirmLabel="批准第 5 阶段"
+      description="画面基线冻结后，修改需通过局部变更或创建修改版。"
+      items={[
+        { icon: <LockKeyhole size={16} />, title: '锁定整片时间线', detail: `时间线第 ${timeline.timeline?.version ?? 1} 版与 ${timeline.tracks.length} 条轨道将冻结。` },
+        { icon: <ShieldCheck size={16} />, title: '质量检查已通过', detail: `${timeline.qualityChecks.length} 项 QC 检查均已通过。` },
+        { icon: <Sparkles size={16} />, title: '解锁导出与交付', detail: '批准后可创建导出规格与多平台交付矩阵。' },
+      ]}
+      loading={busy === 'g5'}
+      onClose={() => { if (busy !== 'g5') setApproveOpen(false) }}
+      onConfirm={() => void approveG5()}
+      open={approveOpen}
+      subtitle="确认整片质量、音画同步与权利状态无误后再继续。"
+      title="批准第 5 阶段？"
+    />
   </div>
 }

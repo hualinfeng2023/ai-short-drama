@@ -292,8 +292,10 @@ class BibleCharacter(BaseModel):
     key: str
     name: str
     role: str
-    gender: Literal["male", "female", "unspecified"] = "unspecified"
+    gender: Literal["male", "female", "nonbinary", "unspecified"] = "unspecified"
+    ethnicity: str = "unspecified"
     age: str
+    height: str = "未指定"
     occupation: str
     personality: list[str] = Field(min_length=1, max_length=5)
     dramatic_function: str
@@ -752,6 +754,16 @@ class ScriptPackageOutput(BaseModel):
         return self
 
 
+class ScriptPackageOutlines(BaseModel):
+    outlines: list[EpisodeOutline] = Field(min_length=1, max_length=12)
+
+    @model_validator(mode="after")
+    def validate_first_episode(self) -> "ScriptPackageOutlines":
+        if 1 not in [item.episode_ordinal for item in self.outlines]:
+            raise ValueError("首集 Outline 必须存在")
+        return self
+
+
 class EpisodeScriptDraft(BaseModel):
     episode_ordinal: Literal[1] = 1
     title: str
@@ -797,9 +809,65 @@ def assemble_story_package(
     foundation = StoryFoundation.model_validate(foundation_result.payload)
     draft = EpisodeScriptDraft.model_validate(script_result.payload)
     review = NarrativeReview.model_validate(review_result.payload)
+    script = _assemble_episode_script(draft, review)
+    package = StoryPackage.model_validate(
+        {
+            **foundation.model_dump(mode="json"),
+            "scripts": [script.model_dump(mode="json")],
+            "critic": review.critic,
+        }
+    )
+    return TextGenerationResult(
+        payload=package.model_dump(mode="json"),
+        provider=review_result.provider,
+        model=review_result.model,
+        request_id=review_result.request_id,
+        repair_attempts=(
+            foundation_result.repair_attempts
+            + script_result.repair_attempts
+            + review_result.repair_attempts
+        ),
+    )
+
+
+def assemble_script_package(
+    outlines_result: TextGenerationResult,
+    script_result: TextGenerationResult,
+    review_result: TextGenerationResult,
+) -> TextGenerationResult:
+    """分阶段合并大纲/剧本草稿/叙事引擎，并修补可机械修复的合同字段。"""
+    outlines = ScriptPackageOutlines.model_validate(outlines_result.payload)
+    draft = EpisodeScriptDraft.model_validate(script_result.payload)
+    review = NarrativeReview.model_validate(review_result.payload)
+    script = _assemble_episode_script(draft, review)
+    package = ScriptPackageOutput.model_validate(
+        {
+            "outlines": [item.model_dump(mode="json") for item in outlines.outlines],
+            "scripts": [script.model_dump(mode="json")],
+            "critic": review.critic,
+        }
+    )
+    return TextGenerationResult(
+        payload=package.model_dump(mode="json"),
+        provider=review_result.provider,
+        model=review_result.model,
+        request_id=review_result.request_id,
+        repair_attempts=(
+            outlines_result.repair_attempts
+            + script_result.repair_attempts
+            + review_result.repair_attempts
+        ),
+    )
+
+
+def _assemble_episode_script(
+    draft: EpisodeScriptDraft,
+    review: NarrativeReview,
+) -> EpisodeScript:
     duration_ms = sum(scene.duration_ms for scene in draft.scenes)
 
     short_engine = review.short_drama_engine.model_copy(deep=True)
+    short_engine = _ensure_short_drama_engine_contract(short_engine)
     beat_count = len(short_engine.beats)
     for index, beat in enumerate(short_engine.beats, start=1):
         beat.sequence = index
@@ -821,7 +889,7 @@ def assemble_story_package(
     breakout.sequel_unit.current_unit_closure = short_engine.stage_closure
     breakout.sequel_unit.next_unit_trigger = short_engine.continuation_hook
 
-    script = EpisodeScript.model_validate(
+    return EpisodeScript.model_validate(
         {
             **draft.model_dump(mode="json"),
             "estimated_duration_ms": duration_ms,
@@ -829,29 +897,54 @@ def assemble_story_package(
             "breakout_engine": breakout.model_dump(mode="json"),
         }
     )
-    package = StoryPackage.model_validate(
-        {
-            **foundation.model_dump(mode="json"),
-            "scripts": [script.model_dump(mode="json")],
-            "critic": review.critic,
-        }
-    )
-    return TextGenerationResult(
-        payload=package.model_dump(mode="json"),
-        provider=review_result.provider,
-        model=review_result.model,
-        request_id=review_result.request_id,
-        repair_attempts=(
-            foundation_result.repair_attempts
-            + script_result.repair_attempts
-            + review_result.repair_attempts
-        ),
-    )
+
+
+def _ensure_short_drama_engine_contract(engine: ShortDramaEngine) -> ShortDramaEngine:
+    """补齐模型常漏的 CLOSURE，避免整包因单一节拍类型失败。"""
+    payload = engine.model_dump(mode="json")
+    beats = list(payload.get("beats") or [])
+    beat_types = [str(item.get("beat_type") or "") for item in beats]
+    if "CLOSURE" not in beat_types and beats:
+        insert_at = len(beats) - 1 if beat_types[-1] == "CONTINUATION_HOOK" else len(beats)
+        reference = beats[max(0, insert_at - 1)]
+        beats.insert(
+            insert_at,
+            {
+                "sequence": insert_at + 1,
+                "scene_ordinal": reference.get("scene_ordinal", 1),
+                "beat_type": "CLOSURE",
+                "at_ms": reference.get("at_ms", 0),
+                "description": str(payload.get("stage_closure") or "完成本阶段关系闭环"),
+                "story_state_change": str(payload.get("stage_closure") or "阶段关系暂时落定"),
+            },
+        )
+        for index, beat in enumerate(beats, start=1):
+            beat["sequence"] = index
+        payload["beats"] = beats
+    return ShortDramaEngine.model_validate(payload)
+
+
+def normalize_episode_script_draft(payload: dict[str, Any]) -> dict[str, Any]:
+    """去掉空台词场景，避免方舟返回空 lines 直接撞合同。"""
+    normalized = json.loads(json.dumps(payload, ensure_ascii=False))
+    scenes = [
+        scene
+        for scene in normalized.get("scenes", [])
+        if isinstance(scene, dict) and isinstance(scene.get("lines"), list) and scene["lines"]
+    ]
+    if len(scenes) >= 2:
+        normalized["scenes"] = scenes
+    return normalized
 
 
 class TextProvider(Protocol):
     async def generate_directions(
-        self, settings: Settings, brief: dict[str, Any]
+        self,
+        settings: Settings,
+        brief: dict[str, Any],
+        *,
+        existing_results: dict[str, TextGenerationResult] | None = None,
+        on_route_complete: Callable[[str, TextGenerationResult], Awaitable[None]] | None = None,
     ) -> TextGenerationResult: ...
 
     async def generate_story_package(
@@ -2182,7 +2275,12 @@ async def generate_script_excerpt_rewrite(
 
 class RoutedTextProvider:
     async def generate_directions(
-        self, settings: Settings, brief: dict[str, Any]
+        self,
+        settings: Settings,
+        brief: dict[str, Any],
+        *,
+        existing_results: dict[str, TextGenerationResult] | None = None,
+        on_route_complete: Callable[[str, TextGenerationResult], Awaitable[None]] | None = None,
     ) -> TextGenerationResult:
         if not settings.ark_api_key:
             batch = deterministic_directions(brief)
@@ -2246,26 +2344,128 @@ class RoutedTextProvider:
                 repair_attempts=result.repair_attempts,
             )
 
-        tasks = [
-            asyncio.create_task(generate_route(direction_key, label, emphasis))
+        results_by_key: dict[str, TextGenerationResult] = {}
+        for direction_key, _, _ in DIRECTION_ROUTES:
+            cached = (existing_results or {}).get(direction_key)
+            if cached is None:
+                continue
+            direction = StoryDirection.model_validate(cached.payload)
+            if direction.direction_key == direction_key:
+                results_by_key[direction_key] = cached
+
+        callback_lock = asyncio.Lock()
+
+        async def generate_and_record(
+            direction_key: str,
+            label: str,
+            emphasis: str,
+        ) -> TextGenerationResult:
+            result = await generate_route(direction_key, label, emphasis)
+            if on_route_complete is not None:
+                async with callback_lock:
+                    await on_route_complete(direction_key, result)
+            return result
+
+        pending_routes = [
+            (direction_key, label, emphasis)
             for direction_key, label, emphasis in DIRECTION_ROUTES
+            if direction_key not in results_by_key
+        ]
+        tasks = [
+            asyncio.create_task(generate_and_record(direction_key, label, emphasis))
+            for direction_key, label, emphasis in pending_routes
         ]
         try:
-            results = await asyncio.gather(*tasks)
+            task_results = await asyncio.gather(*tasks, return_exceptions=True)
         except BaseException:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
+        route_errors: dict[str, dict[str, Any]] = {}
+        for (direction_key, _, _), result in zip(
+            pending_routes, task_results, strict=True
+        ):
+            if isinstance(result, BaseException):
+                if isinstance(result, TextProviderError):
+                    route_errors[direction_key] = {
+                        "code": result.code,
+                        "message": str(result),
+                        "retryable": result.retryable,
+                        "details": result.details,
+                    }
+                else:
+                    route_errors[direction_key] = {
+                        "code": "ARK_TEXT_ROUTE_ERROR",
+                        "message": str(result),
+                        "retryable": True,
+                        "details": {"exception_type": type(result).__name__},
+                    }
+                continue
+            results_by_key[direction_key] = result
+
+        if route_errors:
+            completed_routes = [
+                direction_key
+                for direction_key, _, _ in DIRECTION_ROUTES
+                if direction_key in results_by_key
+            ]
+            failed_routes = [
+                direction_key
+                for direction_key, _, _ in DIRECTION_ROUTES
+                if direction_key in route_errors
+            ]
+            error_codes = {str(item["code"]) for item in route_errors.values()}
+            code = (
+                next(iter(error_codes))
+                if not completed_routes and len(error_codes) == 1
+                else "ARK_TEXT_PARTIAL_FAILURE"
+            )
+            primary_error = next(iter(route_errors.values()))
+            primary_details = (
+                dict(primary_error["details"])
+                if not completed_routes and isinstance(primary_error["details"], dict)
+                else {}
+            )
+            message = (
+                f"3 个故事方向均未生成完成：{primary_error['message']}"
+                if not completed_routes
+                else (
+                    f"3 个故事方向中已有 {len(completed_routes)} 个完成，"
+                    f"{len(failed_routes)} 个失败；已保留成功结果，将只重试失败方向"
+                )
+            )
+            raise TextProviderError(
+                code,
+                message,
+                retryable=all(bool(item["retryable"]) for item in route_errors.values()),
+                details={
+                    **primary_details,
+                    "completed_routes": completed_routes,
+                    "failed_routes": failed_routes,
+                    "failed_parts": failed_routes,
+                    "completed_steps": [
+                        f"故事方向 {direction_key}" for direction_key in completed_routes
+                    ],
+                    "route_errors": route_errors,
+                },
+            )
+
+        results = [
+            results_by_key[direction_key]
+            for direction_key, _, _ in DIRECTION_ROUTES
+        ]
         batch = StoryDirectionBatch.model_validate(
             {"directions": [result.payload for result in results]}
         )
         request_ids = [result.request_id for result in results if result.request_id]
+        providers = {result.provider for result in results}
+        models = {result.model for result in results}
         return TextGenerationResult(
             payload=batch.model_dump(mode="json"),
-            provider=results[0].provider,
-            model=results[0].model,
+            provider=results[0].provider if len(providers) == 1 else "mixed",
+            model=results[0].model if len(models) == 1 else "mixed",
             request_id=",".join(request_ids) or None,
             repair_attempts=sum(result.repair_attempts for result in results),
         )
@@ -2410,36 +2610,86 @@ class RoutedTextProvider:
                 request_id=None,
                 repair_attempts=0,
             )
-        prompt = (
-            "你是短剧总编剧。基于已批准 Story Bible 和角色关系网生成分集大纲与结构化剧本。"
-            f"{targeting_prompt_guardrails(brief)}"
-            "不得修改、替换或虚构新的角色关系。breakout_engine.relationship_reorders 中每一项"
-            "必须填写 relationship_key、source_character_key、target_character_key、before_state、"
-            "after_state 与 relationship_beat_id，并与批准关系网完全一致。"
-            "trigger_auth_sequence 必须与关系变化 trigger_ref 中的 authentication:N 一致；"
-            "关系变化除情绪外，必须改变行动关系、权力、信任、冲突或目标。"
-            f"剧本必须落实短剧公式：{SHORT_DRAMA_FORMULA}；"
-            f"同时落实爆款叙事公式：{BREAKOUT_FORMULA}。"
-            "严格返回 JSON，不要 Markdown。输出必须符合此 JSON Schema：\n"
-            f"{json.dumps(ScriptPackageOutput.model_json_schema(), ensure_ascii=False)}\nBrief:\n"
-            f"{json.dumps(brief, ensure_ascii=False)}\nDirection:\n"
-            f"{json.dumps(direction, ensure_ascii=False)}\nApproved Story Bible:\n"
-            f"{json.dumps(story_bible, ensure_ascii=False)}\nApproved Relationship Graph:\n"
-            f"{json.dumps(relationship_graph, ensure_ascii=False)}"
+
+        # 拆成大纲 / 剧本草稿 / 叙事引擎三阶段，避免单次超大 JSON 截断或漏字段后卡在 70%
+        outlines = await self.generate_script_outlines(
+            settings, brief, direction, story_bible, relationship_graph
         )
-        result = await _ark_json(settings, prompt=prompt, validator=ScriptPackageOutput)
-        _enforce_generated_targeting(result.payload, brief, require_contract=False)
-        package = ScriptPackageOutput.model_validate(result.payload)
+        foundation_context = {
+            "story_bible": story_bible,
+            "outlines": outlines.payload.get("outlines", []),
+        }
+        script = await self.generate_episode_script(
+            settings, brief, direction, foundation_context
+        )
+        review = await self.generate_narrative_review(
+            settings,
+            brief,
+            direction,
+            script.payload,
+            relationship_graph=relationship_graph,
+        )
+        assembled = assemble_script_package(outlines, script, review)
+        _enforce_generated_targeting(assembled.payload, brief, require_contract=False)
+        package = ScriptPackageOutput.model_validate(assembled.payload)
         try:
-            validate_script_package_relationship_contract(package, relationship_graph)
+            package = apply_relationship_context_to_script_package(
+                package.model_dump(mode="json"),
+                relationship_graph,
+            )
         except ValueError as exc:
             raise TextProviderError(
                 "RELATIONSHIP_SCRIPT_CONTRACT_INVALID",
                 str(exc),
                 retryable=False,
-                details={"request_id": result.request_id},
+                details={"request_id": assembled.request_id},
             ) from exc
-        return result
+        return TextGenerationResult(
+            payload=package.model_dump(mode="json"),
+            provider=assembled.provider,
+            model=assembled.model,
+            request_id=assembled.request_id,
+            repair_attempts=assembled.repair_attempts,
+        )
+
+    async def generate_script_outlines(
+        self,
+        settings: Settings,
+        brief: dict[str, Any],
+        direction: dict[str, Any],
+        story_bible: dict[str, Any],
+        relationship_graph: dict[str, Any],
+    ) -> TextGenerationResult:
+        if not settings.ark_api_key:
+            legacy_package = self._deterministic_package(brief, direction)
+            outlines = ScriptPackageOutlines(
+                outlines=legacy_package.outlines,
+            )
+            return TextGenerationResult(
+                payload=outlines.model_dump(mode="json"),
+                provider="mock",
+                model="deterministic-text-v3-relationship",
+                request_id=None,
+                repair_attempts=0,
+            )
+        prompt = (
+            "你是短剧总编剧。只基于已批准 Story Bible 与角色关系网生成分集大纲，"
+            "不要生成剧本、叙事引擎或质检。"
+            f"{targeting_prompt_guardrails(brief)}"
+            "不得修改、替换或虚构新的角色关系。首集大纲必须存在，每集目标时长匹配 Brief。"
+            "严格返回 JSON，不要 Markdown。输出必须符合此 JSON Schema：\n"
+            f"{json.dumps(ScriptPackageOutlines.model_json_schema(), ensure_ascii=False)}\nBrief:\n"
+            f"{json.dumps(brief, ensure_ascii=False)}\nDirection:\n"
+            f"{json.dumps(direction, ensure_ascii=False)}\nApproved Story Bible:\n"
+            f"{json.dumps(story_bible, ensure_ascii=False)}\nApproved Relationship Graph:\n"
+            f"{json.dumps(relationship_graph, ensure_ascii=False)}"
+        )
+        return await _ark_json(
+            settings,
+            prompt=prompt,
+            validator=ScriptPackageOutlines,
+            thinking_type="enabled",
+        )
 
     async def generate_story_foundation(
         self, settings: Settings, brief: dict[str, Any], direction: dict[str, Any]
@@ -2497,7 +2747,8 @@ class RoutedTextProvider:
         prompt = (
             "你是短剧编剧。只生成首集结构化场景和台词，不生成 Story Bible、分集大纲、"
             f"{targeting_prompt_guardrails(brief)}"
-            "叙事引擎或质检。首集必须有 2 至 8 个场景，每个场景都改变故事状态；"
+            "叙事引擎或质检。首集必须有 2 至 6 个场景，每个场景都改变故事状态；"
+            "每个场景 lines 至少 1 条，禁止空数组。"
             "场景时长总和必须匹配 Brief 目标，服务端会确定性计算总时长。"
             "严格返回 JSON，不要 Markdown。输出必须符合此 JSON Schema：\n"
             f"{json.dumps(EpisodeScriptDraft.model_json_schema(), ensure_ascii=False)}\nBrief:\n"
@@ -2505,7 +2756,13 @@ class RoutedTextProvider:
             f"{json.dumps(direction, ensure_ascii=False)}\nStory Foundation:\n"
             f"{json.dumps(foundation, ensure_ascii=False)}"
         )
-        result = await _ark_json(settings, prompt=prompt, validator=EpisodeScriptDraft)
+        result = await _ark_json(
+            settings,
+            prompt=prompt,
+            validator=EpisodeScriptDraft,
+            payload_normalizer=normalize_episode_script_draft,
+            thinking_type="enabled",
+        )
         _enforce_generated_targeting(result.payload, brief, require_contract=False)
         return result
 
@@ -2515,6 +2772,7 @@ class RoutedTextProvider:
         brief: dict[str, Any],
         direction: dict[str, Any],
         script: dict[str, Any],
+        relationship_graph: dict[str, Any] | None = None,
     ) -> TextGenerationResult:
         if not settings.ark_api_key:
             package_script = self._deterministic_package(brief, direction).scripts[0]
@@ -2530,10 +2788,25 @@ class RoutedTextProvider:
                 request_id=None,
                 repair_attempts=0,
             )
+        relationship_guard = ""
+        relationship_block = ""
+        if relationship_graph is not None:
+            relationship_guard = (
+                "不得修改、替换或虚构新的角色关系。"
+                "breakout_engine.relationship_reorders 必须引用批准关系网中的 relationship_key；"
+                "trigger_auth_sequence 必须与关系变化 trigger_ref 中的 authentication:N 一致；"
+                "关系变化除情绪外，必须改变行动关系、权力、信任、冲突或目标。"
+            )
+            relationship_block = (
+                "\nApproved Relationship Graph:\n"
+                f"{json.dumps(relationship_graph, ensure_ascii=False)}"
+            )
         prompt = (
             "你是短剧主编与质检。只基于已完成的首集剧本生成两套叙事引擎和 critic。"
             f"{targeting_prompt_guardrails(brief)}"
+            f"{relationship_guard}"
             f"短剧引擎必须落实：{SHORT_DRAMA_FORMULA}；至少两级递进式因果反转，"
+            "节拍必须包含 HOOK、ESCALATION、PAYOFF、CLOSURE、CONTINUATION_HOOK，"
             "最后一个节拍必须是续作悬念。"
             f"爆款引擎必须落实：{BREAKOUT_FORMULA}；误判、认证与关系重排必须有因果关系。"
             "服务端会统一时长、节拍时间、场景引用，以及两个引擎间重复的闭环和续作字段。"
@@ -2542,8 +2815,14 @@ class RoutedTextProvider:
             f"{json.dumps(brief, ensure_ascii=False)}\nDirection:\n"
             f"{json.dumps(direction, ensure_ascii=False)}\nEpisode Script:\n"
             f"{json.dumps(script, ensure_ascii=False)}"
+            f"{relationship_block}"
         )
-        result = await _ark_json(settings, prompt=prompt, validator=NarrativeReview)
+        result = await _ark_json(
+            settings,
+            prompt=prompt,
+            validator=NarrativeReview,
+            thinking_type="enabled",
+        )
         _enforce_generated_targeting(result.payload, brief, require_contract=False)
         return result
 

@@ -186,7 +186,7 @@ export function NewProjectPage() {
                   <Button onClick={() => fileRef.current?.click()} size="sm" variant="ghost">
                     <Paperclip size={16} /> 添加素材
                   </Button>
-                  <span className="composer__hint">⌘ Enter 创建</span>
+                  <span className="composer__hint">{idea.trim().length} 字 · 建议 10–200 字 · ⌘ Enter 创建</span>
                 </div>
                 <Button
                   disabled={!isValid || creating || apiStatus !== 'connected' || Boolean(asset && !assetRightsConfirmed)}

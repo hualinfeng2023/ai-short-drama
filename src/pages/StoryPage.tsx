@@ -54,13 +54,16 @@ import {
   type ScriptExcerptRewriteAction,
 } from '../api/client'
 import { RelationshipGraphSection, type RelationshipCharacter } from '../components/relationship-graph/RelationshipGraphSection'
-import { Button, Modal, PageHeader, StatusBadge } from '../components/ui'
+import { ImpactConfirmModal } from '../components/ConfirmModal'
+import { Button, Modal, PageHeader, SelectControl, StatusBadge, getStatusLabel } from '../components/ui'
 import { ServiceRequiredState } from '../components/ServiceRequiredState'
 import { useStudio } from '../store/StudioContext'
+import { useToast } from '../store/ToastContext'
 import type { BriefVersionRecord, DirectorProposal, NarrativeTargeting, ProjectRecord } from '../types'
 import { directionKeyLabel, directionKeyTurns, isQuestionStyleHook } from '../utils/storyDirection'
 import { localizeDisplayText } from '../utils/localizeDisplayText'
 import { diffText } from '../utils/textDiff'
+import { syncVisualNotesWithEthnicity } from '../utils/characterIdentityVisuals'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -85,6 +88,56 @@ function characterAge(character: Record<string, unknown>): string {
   return match?.[1] ?? '待补充'
 }
 
+function characterGender(character: Record<string, unknown>): CharacterEditDraft['gender'] {
+  const gender = stringValue(character.gender, 'unspecified')
+  return gender === 'male' || gender === 'female' || gender === 'nonbinary'
+    ? gender
+    : 'unspecified'
+}
+
+function worldEthnicitySuggestion(world: string): string {
+  const rules: Array<[RegExp, string]> = [
+    [/(华人|华裔|汉族|东亚移民)/i, '华人背景'],
+    [/(日裔|日本裔)/i, '日本背景'],
+    [/(韩裔|韩国裔)/i, '韩国背景'],
+    [/(南亚裔|印度裔|巴基斯坦裔|孟加拉裔)/i, '南亚背景'],
+    [/(非洲裔|非洲侨民|黑人社群)/i, '非洲或非洲侨民背景'],
+    [/(拉丁裔|拉丁美洲移民|拉美社群)/i, '拉丁裔或拉丁美洲背景'],
+    [/(中东裔|北非裔|阿拉伯裔)/i, '中东或北非背景'],
+    [/(原住民|印第安人|第一民族)/i, '原住民背景'],
+    [/(多族裔|混血|多元族裔)/i, '多族裔背景'],
+  ]
+  return rules.find(([pattern]) => pattern.test(world))?.[1] ?? ''
+}
+
+function characterEthnicity(character: Record<string, unknown>, world: string): string {
+  const ethnicity = stringValue(character.ethnicity, '')
+  if (!/^(unspecified|not specified|未指定)$/i.test(ethnicity)) {
+    return normalizedEthnicityValue(ethnicity)
+  }
+  return worldEthnicitySuggestion(world)
+}
+
+function characterGenderLabel(character: Record<string, unknown>): string {
+  return ({
+    female: '女性',
+    male: '男性',
+    nonbinary: '非二元',
+    unspecified: '未指定',
+  } as const)[characterGender(character)]
+}
+
+function characterInitials(character: Record<string, unknown>): string {
+  const name = stringValue(character.name, '').trim()
+  const words = name.split(/\s+/).filter(Boolean)
+  if (words.length > 1) {
+    const first = Array.from(words[0])[0] ?? ''
+    const last = Array.from(words.at(-1) ?? '')[0] ?? ''
+    return `${first}${last}`.toLocaleUpperCase('en-US')
+  }
+  return Array.from(name.replace(/\s+/g, '')).slice(0, 2).join('').toLocaleUpperCase('en-US') || '角色'
+}
+
 function characterOccupation(character: Record<string, unknown>): string {
   const explicit = stringValue(character.occupation, '')
   if (explicit) return explicit
@@ -95,6 +148,12 @@ function characterOccupation(character: Record<string, unknown>): string {
   if (evidence.includes('广告公司')) return '广告公司职员'
   if (evidence.includes('食堂')) return '社区食堂工作人员'
   return '待补充'
+}
+
+function characterHeight(character: Record<string, unknown>): string {
+  const explicit = character.height
+  if (typeof explicit === 'number' && Number.isFinite(explicit)) return `${explicit} cm`
+  return stringValue(explicit, '未指定')
 }
 
 function characterPersonality(character: Record<string, unknown>): string {
@@ -117,7 +176,10 @@ type CharacterFilter = 'all' | 'core' | 'opposition' | 'supporting'
 interface CharacterEditDraft {
   name: string
   role: string
+  gender: 'male' | 'female' | 'nonbinary' | 'unspecified'
+  ethnicity: string
   age: string
+  height: string
   occupation: string
   personality: string
   dramaticFunction: string
@@ -168,6 +230,30 @@ const MARKET_LABELS: Record<string, string> = {
   MY: '马来西亚',
   US: '美国',
   GB: '英国',
+}
+
+const MARKET_FLAGS: Record<string, string> = {
+  CN: '🇨🇳',
+  SG: '🇸🇬',
+  MY: '🇲🇾',
+  US: '🇺🇸',
+  GB: '🇬🇧',
+}
+
+function MarketValues({ markets }: { markets: string[] }) {
+  if (!markets.length) return <>未设置</>
+  return (
+    <span className="story-market-values">
+      {markets.map((market) => (
+        <span className="story-market-value" key={market}>
+          {MARKET_FLAGS[market]
+            ? <span aria-hidden="true" className="story-market-flag">{MARKET_FLAGS[market]}</span>
+            : <Globe2 aria-hidden="true" size={15} />}
+          <span>{MARKET_LABELS[market] ?? market}</span>
+        </span>
+      ))}
+    </span>
+  )
 }
 
 const AUDIENCE_LABELS: Record<string, string> = {
@@ -304,10 +390,62 @@ const DEFAULT_PACKAGE_ESTIMATE: StoryPackageEstimate = {
   versionStrategy: 'CREATE_NEW_VERSION',
 }
 
+const ETHNICITY_SUGGESTIONS_BY_MARKET: Record<string, string[]> = {
+  US: [
+    '白人（未细分）',
+    '西北欧背景',
+    '中欧背景',
+    '南欧背景',
+    '东欧背景',
+    '黑人或非裔美国人',
+    '亚裔美国人（未细分）',
+    '华裔美国人',
+    '台湾裔美国人',
+    '香港裔美国人',
+    '日裔美国人',
+    '韩裔美国人',
+    '蒙古裔美国人',
+    '越南裔美国人',
+    '泰裔美国人',
+    '菲律宾裔美国人',
+    '柬埔寨裔美国人',
+    '老挝裔美国人',
+    '苗族裔美国人',
+    '缅甸裔美国人',
+    '印度尼西亚裔美国人',
+    '马来西亚裔美国人',
+    '新加坡裔美国人',
+    '印度裔美国人',
+    '巴基斯坦裔美国人',
+    '孟加拉裔美国人',
+    '斯里兰卡裔美国人',
+    '尼泊尔裔美国人',
+    '不丹裔美国人',
+    '西裔或拉丁裔美国人',
+    '美洲原住民或阿拉斯加原住民',
+    '中东或北非裔美国人',
+    '夏威夷原住民或太平洋岛民',
+    '多族裔',
+  ],
+}
+
+const CUSTOM_ETHNICITY_VALUE = '__custom_ethnicity__'
+
+function ethnicitySuggestionsForMarket(primaryMarket: string | undefined): string[] {
+  return ETHNICITY_SUGGESTIONS_BY_MARKET[primaryMarket ?? ''] ?? []
+}
+
+function normalizedEthnicityValue(value: string): string {
+  if (value === '白人') return '白人（未细分）'
+  if (value === '亚裔美国人') return '亚裔美国人（未细分）'
+  return value
+}
+
 export function StoryPage() {
   const { projectId } = useParams()
   const navigate = useNavigate()
   const { refreshProjects } = useStudio()
+  const { notify } = useToast()
   const [project, setProject] = useState<ProjectRecord | null>(null)
   const [workspace, setWorkspace] = useState<StoryWorkspace | null>(null)
   const [brief, setBrief] = useState<BriefVersionRecord | null>(null)
@@ -318,11 +456,13 @@ export function StoryPage() {
   const [characterFilter, setCharacterFilter] = useState<CharacterFilter>('all')
   const [editingCharacter, setEditingCharacter] = useState<Record<string, unknown> | null>(null)
   const [characterEditDraft, setCharacterEditDraft] = useState<CharacterEditDraft | null>(null)
+  const [customEthnicityActive, setCustomEthnicityActive] = useState(false)
   const [characterRevisionReview, setCharacterRevisionReview] = useState<CharacterRevisionReview | null>(null)
   const [characterRevisionBusy, setCharacterRevisionBusy] = useState(false)
   const [characterRevisionError, setCharacterRevisionError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [acting, setActing] = useState(false)
+  const [approveScriptOpen, setApproveScriptOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [scriptSelection, setScriptSelection] = useState<ScriptTextSelection | null>(null)
@@ -443,6 +583,18 @@ export function StoryPage() {
     } finally {
       setActing(false)
     }
+  }
+
+  async function confirmApproveScript() {
+    if (!latestScript || !project) return
+    await runAction(async () => {
+      const job = await approveScriptVersion(latestScript.id, project.lockVersion)
+      await refreshProjects()
+      setApproveScriptOpen(false)
+      notify('首集剧本已批准，角色任务已入队。')
+      setNotice(`剧本已批准，角色任务已入队：${job.stage}`)
+      navigate(`/tasks?project=${project.id}`)
+    })
   }
 
   function captureScriptSelection(
@@ -606,15 +758,23 @@ export function StoryPage() {
   }
 
   function openCharacterEditor(character: Record<string, unknown>) {
+    const ethnicity = normalizedEthnicityValue(
+      characterEthnicity(character, stringValue(latestBible?.payload.world, '')),
+    )
+    const suggestedEthnicities = ethnicitySuggestionsForMarket(brief?.primaryMarket)
     setEditingCharacter(character)
     setCharacterEditDraft({
       name: stringValue(character.name, ''), role: stringValue(character.role, ''),
-      age: characterAge(character), occupation: characterOccupation(character),
+      gender: characterGender(character),
+      ethnicity,
+      age: characterAge(character), height: characterHeight(character),
+      occupation: characterOccupation(character),
       personality: characterPersonality(character),
       dramaticFunction: stringValue(character.dramatic_function, ''),
       desire: stringValue(character.desire, ''), fear: stringValue(character.fear, ''),
       secret: stringValue(character.secret, ''), visualNotes: stringValue(character.visual_notes, ''),
     })
+    setCustomEthnicityActive(Boolean(ethnicity) && !suggestedEthnicities.includes(ethnicity))
     setCharacterRevisionReview(null)
     setCharacterRevisionError(null)
   }
@@ -622,7 +782,10 @@ export function StoryPage() {
   function characterChanges(): CharacterRevisionChanges {
     if (!characterEditDraft) return {}
     return {
-      name: characterEditDraft.name, role: characterEditDraft.role, age: characterEditDraft.age,
+      name: characterEditDraft.name, role: characterEditDraft.role,
+      age: characterEditDraft.age, height: characterEditDraft.height,
+      gender: characterEditDraft.gender,
+      ethnicity: characterEditDraft.ethnicity.trim() || 'unspecified',
       occupation: characterEditDraft.occupation,
       personality: characterEditDraft.personality.split(/[、,，]/).map((item) => item.trim()).filter(Boolean).slice(0, 5),
       dramatic_function: characterEditDraft.dramaticFunction, desire: characterEditDraft.desire,
@@ -672,6 +835,7 @@ export function StoryPage() {
       })
       setEditingCharacter(null)
       setCharacterEditDraft(null)
+      setCustomEthnicityActive(false)
       setCharacterRevisionReview(null)
       await load()
       await refreshProjects()
@@ -687,11 +851,16 @@ export function StoryPage() {
     return <div className="page brief-page-state"><LoaderCircle className="spin" size={22} /><strong>正在读取故事资产…</strong></div>
   }
   if (!project || !workspace || !projectId) {
-    return <ServiceRequiredState feature="故事与剧本" projectId={projectId} />
+    return <ServiceRequiredState feature="故事剧本" projectId={projectId} />
   }
 
   const biblePayload = latestBible?.payload ?? {}
   const bibleRules = stringList(biblePayload.rules)
+  const ethnicitySuggestions = ethnicitySuggestionsForMarket(brief?.primaryMarket)
+  const ethnicityOptions = Array.from(new Set([
+    ...(characterEditDraft?.ethnicity.trim() ? [characterEditDraft.ethnicity.trim()] : []),
+    ...ethnicitySuggestions,
+  ]))
   const outlinePayload = latestOutline?.payload ?? {}
   const characters = recordList(biblePayload.characters)
   const characterTabs: Array<{ id: CharacterFilter; label: string; count: number }> = [
@@ -822,7 +991,6 @@ export function StoryPage() {
   return (
     <div className="page page--story">
       <PageHeader
-        eyebrow="第 2 阶段 · 故事与剧本"
         title="故事方向与剧本"
         description="比较故事方向，先审核故事设定与角色关系，再生成分集大纲和结构化首集剧本。"
         actions={<><Link className="button button--secondary button--md" to={`/projects/${project.id}`}><ArrowLeft size={16} />返回项目简报</Link><Button onClick={() => void runAction(async () => { await load(); setNotice('已载入最新版本。') })} variant="secondary"><RefreshCw size={16} />刷新</Button></>}
@@ -835,7 +1003,7 @@ export function StoryPage() {
         <header><div><p className="eyebrow">方向评审依据</p><h2 id="story-brief-baseline-title">本次创作基准</h2></div><span>所有方向均应符合以下条件</span></header>
         <dl className="story-brief-baseline__facts">
           <div><dt>平台</dt><dd>{labelValues(brief.platformTargets.map((item) => item.platform), PLATFORM_LABELS)}</dd></div>
-          <div><dt>市场</dt><dd>{labelValues([brief.primaryMarket, ...brief.secondaryMarkets], MARKET_LABELS)}</dd></div>
+          <div><dt>市场</dt><dd><MarketValues markets={[brief.primaryMarket, ...brief.secondaryMarkets]} /></dd></div>
           <div><dt>核心观众</dt><dd>{labelValues([brief.primaryAudience, ...brief.secondaryAudiences], AUDIENCE_LABELS)}</dd></div>
           <div><dt>目标时长</dt><dd>{brief.targetDurationSec} 秒 · {brief.aspectRatio} {brief.aspectRatio === '9:16' ? '竖屏' : '横屏'}</dd></div>
         </dl>
@@ -847,6 +1015,15 @@ export function StoryPage() {
 
       <section className="story-section">
         <div className="section-heading"><div><p className="eyebrow">{directionSelectionOpen ? '方向审核' : '方向基线'}</p><h2>{directionSelectionOpen ? mergeMode ? '选择要合并的故事方向' : '选择一个故事方向' : '已确认的故事方向'}</h2><p>{directionSelectionOpen ? mergeMode ? '至少选择两个方向，系统会保留各自优势并生成一个新的融合版本。' : '先比较最影响决策的差异，需要时再展开完整方案。确认后先生成可审核的故事结构与角色关系。' : '该方向已作为故事设定与角色关系的创作基线，当前阶段不再重复展示其他候选方向。'}</p></div>{directions.length === 0 ? <Button disabled={acting || project.status !== 'DRAFT'} onClick={() => void runAction(async () => { const job = await generateStoryDirections(project.id, project.lockVersion, crypto.randomUUID()); setNotice(`任务已入队：${job.stage}`); navigate(`/tasks?project=${project.id}`) })}><BookOpenCheck size={16} />生成 3 个方向</Button> : null}</div>
+        {directions.length === 0 ? <div className="story-direction-empty" role="status">
+          <p>还没有故事方向。完成以下步骤后即可开始生成：</p>
+          <ul className="story-prerequisite-list">
+            <li className={brief ? 'is-done' : 'is-pending'}>{brief ? <Check size={15} /> : <AlertTriangle size={15} />}<span>项目简报已保存并作为评审依据</span></li>
+            <li className={project.status === 'DRAFT' ? 'is-done' : 'is-pending'}>{project.status === 'DRAFT' ? <Check size={15} /> : <AlertTriangle size={15} />}<span>项目处于草稿状态（当前：{getStatusLabel(project.status)}）</span></li>
+            <li className={project.status !== 'PROPOSAL_RUNNING' ? 'is-done' : 'is-pending'}>{project.status !== 'PROPOSAL_RUNNING' ? <Check size={15} /> : <LoaderCircle className="spin" size={15} />}<span>{project.status === 'PROPOSAL_RUNNING' ? '故事方向正在生成中' : '当前没有进行中的方向任务'}</span></li>
+          </ul>
+          {project.status === 'PROPOSAL_RUNNING' ? <Link className="button button--secondary button--md" to={`/tasks?project=${project.id}`}>查看生成任务</Link> : project.status !== 'DRAFT' ? <Link className="button button--secondary button--md" to={`/projects/${project.id}`}>返回项目简报</Link> : !brief ? <Link className="button button--secondary button--md" to={`/projects/${project.id}`}>先完善项目简报</Link> : null}
+        </div> : null}
         {directionSelectionOpen && mergeMode ? <section className="story-merge-explanation" aria-label="合并方向规则">
           <article><Check size={16} /><div><strong>保留什么</strong><p>保留选中方向的核心冲突、情绪承诺、有效转折和续作动作，不是简单拼接文案。</p></div></article>
           <article><AlertTriangle size={16} /><div><strong>如何处理冲突</strong><p>以 Brief 必须满足与必须避免为最高优先级，再统一人物动机、时间线和因果链；无法兼容的内容会明确取舍。</p></div></article>
@@ -995,19 +1172,70 @@ export function StoryPage() {
           <dl><div><dt>核心规则</dt><dd>{bibleRules.length}</dd></div><div><dt>主要角色</dt><dd>{characters.length}</dd></div></dl>
         </header>
         <div className="story-bible-grid__overview">
-          <article className="story-bible-world"><header><Globe2 size={18} /><div><span>世界与连续性</span><h3>故事发生在哪里</h3></div></header><p>{stringValue(biblePayload.world)}</p></article>
-          <article className="story-bible-rules"><header><BookOpenCheck size={18} /><div><span>核心规则</span><h3>创作必须保持一致</h3></div></header><ol>{bibleRules.map((item, index) => <li key={item}><span>{index + 1}</span><p>{item}</p></li>)}</ol></article>
+          <article className="story-bible-world"><header><Globe2 size={18} /><div><h3>世界与连续性</h3></div></header><p>{stringValue(biblePayload.world)}</p></article>
+          <article className="story-bible-rules"><header><BookOpenCheck size={18} /><h3>核心规则</h3></header><ol>{bibleRules.map((item, index) => <li key={item}><span>{index + 1}</span><p>{item}</p></li>)}</ol></article>
         </div>
         <section aria-labelledby="story-characters-title" className="story-bible-characters">
-          <header><div><UsersRound size={18} /><div><span>角色事实源</span><h3 id="story-characters-title">角色文字设定</h3></div></div><small>{characters.length} 位角色</small></header>
+          <header><div><UsersRound size={18} /><h3 id="story-characters-title">角色文字设定</h3></div><small>{characters.length} 位角色</small></header>
           <div aria-label="按叙事功能筛选角色" className="story-character-tabs" role="tablist">{characterTabs.map((tab, index) => <button aria-controls="story-character-panel" aria-selected={characterFilter === tab.id} key={tab.id} onClick={() => setCharacterFilter(tab.id)} onKeyDown={(event) => { if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; event.preventDefault(); const nextIndex = event.key === 'Home' ? 0 : event.key === 'End' ? characterTabs.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + characterTabs.length) % characterTabs.length; setCharacterFilter(characterTabs[nextIndex].id); (event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[nextIndex])?.focus() }} role="tab" tabIndex={characterFilter === tab.id ? 0 : -1} type="button">{tab.label}<span>{tab.count}</span></button>)}</div>
-          <div aria-live="polite" id="story-character-panel" role="tabpanel">{visibleCharacters.map((character) => <article className="story-character" key={stringValue(character.key)}><header><div><span>{stringValue(character.role)}</span><strong>{stringValue(character.name)}</strong></div><button aria-label={`编辑${stringValue(character.name)}的角色信息`} onClick={() => openCharacterEditor(character)} type="button"><Pencil size={14} />编辑</button></header><p>{stringValue(character.dramatic_function)}</p><dl className="story-character__profile"><div><dt>年龄</dt><dd>{characterAge(character)}</dd></div><div><dt>职业</dt><dd>{characterOccupation(character)}</dd></div><div><dt>性格</dt><dd>{characterPersonality(character)}</dd></div></dl><dl><div><dt>欲望</dt><dd>{stringValue(character.desire)}</dd></div><div><dt>秘密</dt><dd>{stringValue(character.secret)}</dd></div></dl></article>)}</div>
+          <div aria-live="polite" id="story-character-panel" role="tabpanel">{visibleCharacters.map((character) => {
+            const ethnicity = characterEthnicity(character, stringValue(biblePayload.world, '')) || '未指定'
+            const category = characterCategory(character)
+            return <article className="story-character" data-character-category={category} key={stringValue(character.key)}>
+              <header>
+                <div className="story-character__identity">
+                  <span aria-hidden="true" className="story-character__avatar" data-category={category}>
+                    <span className="story-character__avatar-monogram">{characterInitials(character)}</span>
+                    <span className="story-character__avatar-status" />
+                  </span>
+                  <div><span>{stringValue(character.role)}</span><strong>{stringValue(character.name)}</strong><small>{characterGenderLabel(character)} · {ethnicity}</small></div>
+                </div>
+                <button aria-label={`编辑${stringValue(character.name)}的角色信息`} onClick={() => openCharacterEditor(character)} type="button"><Pencil size={14} />编辑</button>
+              </header>
+              <p className="story-character__function">{stringValue(character.dramatic_function)}</p>
+              <dl className="story-character__profile"><div><dt>年龄</dt><dd>{characterAge(character)}</dd></div><div><dt>职业</dt><dd>{characterOccupation(character)}</dd></div><div className="story-character__fact--wide"><dt>性格</dt><dd>{characterPersonality(character)}</dd></div></dl>
+              <dl className="story-character__motivation"><div><dt>欲望</dt><dd>{stringValue(character.desire)}</dd></div><div><dt>秘密</dt><dd>{stringValue(character.secret)}</dd></div></dl>
+            </article>
+          })}</div>
         </section>
       </section> : null}
 
-      <Modal className="modal--character-revision" description="修改不会覆盖当前版本。系统先审核故事逻辑与人物关系，确认影响后再创建同步修改版。" footer={<><Button disabled={characterRevisionBusy} onClick={() => { setEditingCharacter(null); setCharacterEditDraft(null); setCharacterRevisionReview(null); setCharacterRevisionError(null) }} variant="secondary">取消</Button>{characterRevisionReview ? <><Button disabled={characterRevisionBusy} onClick={() => { setCharacterRevisionReview(null); setCharacterRevisionError(null) }} variant="secondary">返回编辑</Button><Button disabled={characterRevisionBusy} onClick={() => void confirmCharacterEdit()}>{characterRevisionBusy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}确认修改并同步</Button></> : <Button disabled={characterRevisionBusy || !characterEditDraft?.name || !characterEditDraft.role || !characterEditDraft.age || !characterEditDraft.occupation || !characterEditDraft.personality} onClick={() => void runCharacterReview()}>{characterRevisionBusy ? <LoaderCircle className="spin" size={16} /> : <GitMerge size={16} />}检查修改影响</Button>}</>} onClose={() => { setEditingCharacter(null); setCharacterEditDraft(null); setCharacterRevisionReview(null); setCharacterRevisionError(null) }} open={Boolean(editingCharacter && characterEditDraft)} title={editingCharacter ? `编辑角色 · ${stringValue(editingCharacter.name)}` : '编辑角色'}>
+      <Modal className="modal--character-revision" description="修改不会覆盖当前版本。系统先审核故事逻辑与人物关系，确认影响后再创建同步修改版。" footer={<><Button disabled={characterRevisionBusy} onClick={() => { setEditingCharacter(null); setCharacterEditDraft(null); setCustomEthnicityActive(false); setCharacterRevisionReview(null); setCharacterRevisionError(null) }} variant="secondary">取消</Button>{characterRevisionReview ? <><Button disabled={characterRevisionBusy} onClick={() => { setCharacterRevisionReview(null); setCharacterRevisionError(null) }} variant="secondary">返回编辑</Button><Button disabled={characterRevisionBusy} onClick={() => void confirmCharacterEdit()}>{characterRevisionBusy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}确认修改并同步</Button></> : <Button disabled={characterRevisionBusy || !characterEditDraft?.name || !characterEditDraft.role || !characterEditDraft.age || !characterEditDraft.height || !characterEditDraft.occupation || !characterEditDraft.personality} onClick={() => void runCharacterReview()}>{characterRevisionBusy ? <LoaderCircle className="spin" size={16} /> : <GitMerge size={16} />}检查修改影响</Button>}</>} onClose={() => { setEditingCharacter(null); setCharacterEditDraft(null); setCustomEthnicityActive(false); setCharacterRevisionReview(null); setCharacterRevisionError(null) }} open={Boolean(editingCharacter && characterEditDraft)} title={editingCharacter ? `编辑角色 · ${stringValue(editingCharacter.name)}` : '编辑角色'}>
         {characterRevisionError ? <div className="character-revision-error" role="alert"><AlertTriangle size={17} /><div><strong>未能完成本次操作</strong><p>{characterRevisionError}</p></div></div> : null}
-        {characterEditDraft ? <div className="character-revision-form"><div className="character-revision-form__grid"><label>姓名<input disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, name: event.target.value } : current)} value={characterEditDraft.name} /></label><label>角色定位<input disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, role: event.target.value } : current)} value={characterEditDraft.role} /></label><label>年龄<input disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, age: event.target.value } : current)} value={characterEditDraft.age} /></label><label>职业<input disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, occupation: event.target.value } : current)} value={characterEditDraft.occupation} /></label><label className="character-revision-form__wide">性格关键词（用顿号分隔）<input disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, personality: event.target.value } : current)} value={characterEditDraft.personality} /></label><label className="character-revision-form__wide">剧情功能<textarea disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, dramaticFunction: event.target.value } : current)} rows={2} value={characterEditDraft.dramaticFunction} /></label><label>欲望<textarea disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, desire: event.target.value } : current)} rows={3} value={characterEditDraft.desire} /></label><label>恐惧<textarea disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, fear: event.target.value } : current)} rows={3} value={characterEditDraft.fear} /></label><label className="character-revision-form__wide">秘密<textarea disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, secret: event.target.value } : current)} rows={2} value={characterEditDraft.secret} /></label><label className="character-revision-form__wide">视觉特征<textarea disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, visualNotes: event.target.value } : current)} rows={3} value={characterEditDraft.visualNotes} /></label></div>{characterRevisionReview ? <section className={`character-revision-review is-${characterRevisionReview.review.verdict.toLowerCase()}`}><header><div><span>{characterRevisionReview.review.verdict === 'CONFLICT' ? '发现逻辑冲突' : '审核通过'}</span><h3>{characterRevisionReview.review.summary}</h3></div><small>{characterRevisionReview.provider}/{characterRevisionReview.model}</small></header>{characterRevisionReview.review.issues.length ? <ul>{characterRevisionReview.review.issues.map((issue) => <li data-severity={issue.severity.toLowerCase()} key={issue.code}><strong>{issue.severity === 'BLOCKER' ? '冲突' : issue.severity === 'WARNING' ? '提醒' : '信息'}</strong><div><p>{issue.message}</p><small>{issue.suggestion}</small></div></li>)}</ul> : <p>未发现需要阻止修改的故事逻辑问题。</p>}<div className="character-revision-impact"><div><span>人物关系</span><strong>{characterRevisionReview.affected.relationshipCount} 条</strong></div><div><span>分集大纲</span><strong>{characterRevisionReview.affected.outlineCount} 版</strong></div><div><span>剧本</span><strong>{characterRevisionReview.affected.scriptCount} 版</strong></div></div><p>确认后将创建新的故事设定和关系草稿；旧版本继续保留。重新确认关系后，系统才会生成同步后的故事线与剧本。</p></section> : null}</div> : null}
+        {characterEditDraft ? <div className="character-revision-form">
+          <div className="character-revision-form__grid">
+            <label>姓名<input disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, name: event.target.value } : current)} value={characterEditDraft.name} /></label>
+            <label>角色定位<input disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, role: event.target.value } : current)} value={characterEditDraft.role} /></label>
+            <label>年龄<input disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, age: event.target.value } : current)} value={characterEditDraft.age} /></label>
+            <label>身高<input disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, height: event.target.value } : current)} placeholder="例如：170 cm；不确定可填写未指定" value={characterEditDraft.height} /></label>
+            <label>职业<input disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, occupation: event.target.value } : current)} value={characterEditDraft.occupation} /></label>
+            <label>性别<SelectControl aria-label="性别" disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, gender: event.target.value as CharacterEditDraft['gender'] } : current)} value={characterEditDraft.gender}><option value="unspecified">未指定</option><option value="female">女性</option><option value="male">男性</option><option value="nonbinary">非二元</option></SelectControl></label>
+            <label>族裔／文化背景<SelectControl aria-label="族裔／文化背景" disabled={Boolean(characterRevisionReview)} onChange={(event) => {
+              const nextValue = event.target.value
+              const custom = nextValue === CUSTOM_ETHNICITY_VALUE
+              setCustomEthnicityActive(custom)
+              setCharacterEditDraft((current) => current ? {
+                ...current,
+                ethnicity: custom ? '' : nextValue,
+                visualNotes: syncVisualNotesWithEthnicity(current.visualNotes, custom ? '' : nextValue),
+              } : current)
+            }} searchable={ethnicityOptions.length >= 8} value={customEthnicityActive ? CUSTOM_ETHNICITY_VALUE : characterEditDraft.ethnicity}><option value="">未指定</option>{ethnicityOptions.map((suggestion) => <option key={suggestion} value={suggestion}>{suggestion}</option>)}<option value={CUSTOM_ETHNICITY_VALUE}>其他／自定义背景</option></SelectControl>{customEthnicityActive ? <><input aria-label="自定义族裔或文化背景" disabled={Boolean(characterRevisionReview)} onChange={(event) => {
+              const nextValue = event.target.value
+              setCharacterEditDraft((current) => current ? {
+                ...current,
+                ethnicity: nextValue,
+                visualNotes: syncVisualNotesWithEthnicity(current.visualNotes, nextValue),
+              } : current)
+            }} placeholder="例如：爱尔兰裔美国人、意大利裔美国人或其他具体亚洲背景" value={characterEditDraft.ethnicity} /><small className="character-revision-form__note">只用于外观与文化设定，不会推断性格、职业或剧情功能。</small></> : null}</label>
+            <label className="character-revision-form__wide">性格关键词（用顿号分隔）<input disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, personality: event.target.value } : current)} value={characterEditDraft.personality} /></label>
+            <label className="character-revision-form__wide">剧情功能<textarea disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, dramaticFunction: event.target.value } : current)} rows={2} value={characterEditDraft.dramaticFunction} /></label>
+            <label>欲望<textarea disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, desire: event.target.value } : current)} rows={3} value={characterEditDraft.desire} /></label>
+            <label>恐惧<textarea disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, fear: event.target.value } : current)} rows={3} value={characterEditDraft.fear} /></label>
+            <label className="character-revision-form__wide">秘密<textarea disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, secret: event.target.value } : current)} rows={2} value={characterEditDraft.secret} /></label>
+            <label className="character-revision-form__wide">视觉特征<textarea disabled={Boolean(characterRevisionReview)} onChange={(event) => setCharacterEditDraft((current) => current ? { ...current, visualNotes: event.target.value } : current)} rows={3} value={characterEditDraft.visualNotes} /><small className="character-revision-form__note">更改族裔／文化背景时会同步身份约束，同时保留年龄、发型、服装和表演状态等个体特征；你仍可继续修改。</small></label>
+          </div>
+          {characterRevisionReview ? <section className={`character-revision-review is-${characterRevisionReview.review.verdict.toLowerCase()}`}><header><div><span>{characterRevisionReview.review.verdict === 'CONFLICT' ? '发现逻辑冲突' : '审核通过'}</span><h3>{characterRevisionReview.review.summary}</h3></div><small>{characterRevisionReview.provider}/{characterRevisionReview.model}</small></header>{characterRevisionReview.review.issues.length ? <ul>{characterRevisionReview.review.issues.map((issue) => <li data-severity={issue.severity.toLowerCase()} key={issue.code}><strong>{issue.severity === 'BLOCKER' ? '冲突' : issue.severity === 'WARNING' ? '提醒' : '信息'}</strong><div><p>{issue.message}</p><small>{issue.suggestion}</small></div></li>)}</ul> : <p>未发现需要阻止修改的故事逻辑问题。</p>}<div className="character-revision-impact"><div><span>人物关系</span><strong>{characterRevisionReview.affected.relationshipCount} 条</strong></div><div><span>分集大纲</span><strong>{characterRevisionReview.affected.outlineCount} 版</strong></div><div><span>剧本</span><strong>{characterRevisionReview.affected.scriptCount} 版</strong></div></div><p>确认后将创建新的故事设定和关系草稿；旧版本继续保留。重新确认关系后，系统才会生成同步后的故事线与剧本。</p></section> : null}
+        </div> : null}
       </Modal>
 
       {workspace.relationshipGraphVersions.length ? <RelationshipGraphSection
@@ -1109,9 +1337,25 @@ export function StoryPage() {
               )
             })}
           </div>
-          <div className="story-direction-actions"><span>{workspace.relationshipGraphStale ? '关系修改版尚未批准，当前剧本已过期。' : '批准后锁定第 2 阶段，并让全部剧本角色进入前期制作。'}</span><Button disabled={acting || workspace.relationshipGraphStale || latestScript.status !== 'READY_FOR_REVIEW' || project.status !== 'SCRIPT_READY'} onClick={() => void runAction(async () => { const job = await approveScriptVersion(latestScript.id, project.lockVersion); await refreshProjects(); setNotice(`剧本已批准，角色任务已入队：${job.stage}`); navigate(`/tasks?project=${project.id}`) })}><Check size={16} />{workspace.relationshipGraphStale ? '关系更新后才能批准' : '批准首集剧本'}</Button></div>
+          <div className="story-direction-actions"><span>{workspace.relationshipGraphStale ? '关系修改版尚未批准，当前剧本已过期。' : '批准后锁定第 2 阶段，并让全部剧本角色进入前期制作。'}</span><Button disabled={acting || workspace.relationshipGraphStale || latestScript.status !== 'READY_FOR_REVIEW' || project.status !== 'SCRIPT_READY'} onClick={() => setApproveScriptOpen(true)}><Check size={16} />{workspace.relationshipGraphStale ? '关系更新后才能批准' : '批准首集剧本'}</Button></div>
         </section>
       </> : null}
+
+      <ImpactConfirmModal
+        confirmLabel="批准首集剧本"
+        description="批准后剧本版本将冻结，修改需创建修改版。"
+        items={[
+          { icon: <LockKeyhole size={16} />, title: '锁定第 2 阶段', detail: `剧本第 ${latestScript?.version ?? 1} 版将成为后续制作的文本基线。` },
+          { icon: <UsersRound size={16} />, title: '角色进入前期制作', detail: `${characters.length} 位剧本角色将触发视觉档案与前期资产任务。` },
+          { icon: <Sparkles size={16} />, title: '任务入队', detail: '批准后会跳转到任务页，等待角色与前期资产就绪。' },
+        ]}
+        loading={acting}
+        onClose={() => { if (!acting) setApproveScriptOpen(false) }}
+        onConfirm={() => void confirmApproveScript()}
+        open={approveScriptOpen}
+        subtitle="确认剧本、关系基线与角色设定无误后再继续。"
+        title="批准首集剧本？"
+      />
 
       {scriptRewriteMenuOpen && scriptSelection ? createPortal((
         <div

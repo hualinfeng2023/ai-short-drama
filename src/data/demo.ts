@@ -218,6 +218,7 @@ export const initialAppState: AppState = {
     {
       id: 'job-hero-s05',
       projectId: PROJECT_ID,
+      projectName: '她的第二人生',
       jobType: 'LOCAL_MOCK',
       entityType: 'shot',
       entityId: SHOT_IDS[4],
@@ -237,6 +238,7 @@ export const initialAppState: AppState = {
     {
       id: 'job-preview-v2',
       projectId: PROJECT_ID,
+      projectName: '她的第二人生',
       jobType: 'LOCAL_MOCK',
       entityType: 'episode',
       entityId: EPISODE_ID,

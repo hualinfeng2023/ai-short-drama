@@ -26,6 +26,11 @@ const REPLACEMENTS: Array<[RegExp, string]> = [
   [/Mock/gi, '模拟'],
   [/Export/gi, '导出'],
   [/Worker/gi, '后台任务进程'],
+  [/\bFULL_BODY\b/g, '全身'],
+  [/\bTHREE_QUARTER\b/g, '45°侧面'],
+  [/\bPROFILE\b/g, '侧面'],
+  [/\bEXPRESSIONS\b/g, '基础表情组'],
+  [/\bFRONT\b/g, '正面'],
   [/\bScript\b/gi, '剧本'],
   [/\bOutline\b/gi, '分集大纲'],
   [/\bShot\b/gi, '镜头'],
@@ -86,6 +91,50 @@ const EXACT_LABELS: Record<string, string> = {
   CU: '近景',
   WS: '全景',
   'Douyin Vertical': '抖音竖屏',
+}
+
+const CHARACTER_ROLE_EXACT: Record<string, string> = {
+  'Dual Protagonist One': '双主角之一',
+  'Dual Protagonist Two': '双主角之二',
+  'Dual Protagonist': '双主角',
+  'Co-Protagonist': '共同主角',
+  'Co Protagonist': '共同主角',
+  'Female Protagonist': '女主角',
+  'Male Protagonist': '男主角',
+  'Supporting Character': '配角',
+  'Supporting Role': '配角',
+  Protagonist: '主角',
+  Antagonist: '反派',
+}
+
+const CHARACTER_ROLE_PATTERNS: Array<[RegExp, string]> = [
+  [/^dual protagonist\s+(one|1)$/i, '双主角之一'],
+  [/^dual protagonist\s+(two|2)$/i, '双主角之二'],
+  [/^dual protagonist\s+\d+$/i, '双主角'],
+  [/^dual protagonist$/i, '双主角'],
+  [/^co-?protagonist$/i, '共同主角'],
+  [/^female protagonist$/i, '女主角'],
+  [/^male protagonist$/i, '男主角'],
+  [/^protagonist\s+(one|1)$/i, '主角之一'],
+  [/^protagonist\s+(two|2)$/i, '主角之二'],
+  [/^protagonist$/i, '主角'],
+  [/^supporting(?: character| role)?$/i, '配角'],
+  [/^antagonist$/i, '反派'],
+  [/^deuteragonist$/i, '第二主角'],
+  [/^ensemble(?: cast| character)?$/i, '群像角色'],
+]
+
+export function localizeCharacterRole(value: string): string {
+  const trimmed = value.trim()
+  if (!trimmed) return value
+  if (CHARACTER_ROLE_EXACT[trimmed]) return CHARACTER_ROLE_EXACT[trimmed]
+  const matchedExact = Object.entries(CHARACTER_ROLE_EXACT).find(
+    ([key]) => key.toLowerCase() === trimmed.toLowerCase(),
+  )
+  if (matchedExact) return matchedExact[1]
+  const matchedPattern = CHARACTER_ROLE_PATTERNS.find(([pattern]) => pattern.test(trimmed))
+  if (matchedPattern) return matchedPattern[1]
+  return localizeDisplayText(trimmed)
 }
 
 export function localizeDisplayText(value: string): string {

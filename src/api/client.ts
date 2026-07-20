@@ -236,6 +236,7 @@ interface ApiIdentityReviewRecord {
 interface ApiJob {
   id: string
   project_id: string
+  project_name: string
   job_type: string
   entity_type: string
   entity_id: string
@@ -483,8 +484,6 @@ export interface CharacterVisualProfile {
   stylingFields: Record<string, string | string[]>
   projectStyle: Record<string, string>
   negativeConstraints: string[]
-  recommendedDirections: Array<{ key: string; label: string; reason: string }>
-  selectedDirection?: string
   conflictReport: Array<{
     severity: 'BLOCKER' | 'WARNING' | 'INFO'
     code: string
@@ -532,6 +531,12 @@ export interface CharacterVisualRecord {
   visualBrief: string
   status: string
   lockVersion: number
+  sourceStale: boolean
+  pendingSourceChanges?: {
+    storyBibleVersion: number
+    storyBibleStatus: string
+    changedFields: string[]
+  }
   lockedCandidateId?: string
   currentProfileVersionId?: string
   lockedIdentityVersionId?: string
@@ -559,11 +564,14 @@ export interface CharacterVisualRecord {
     status: string
     reviewStatus: string
     selected: boolean
+    deletable: boolean
+    deleteBlockReason?: string
     variantKey?: string
     variantLabel?: string
     variantDescription?: string
     refinementNote?: string
     sourceCandidateId?: string
+    generationPrompt: string
   }>
   identities: Array<{
     id: string
@@ -878,6 +886,32 @@ export interface BriefAvoidancesSuggestion {
   warning?: string
 }
 
+export interface BriefBlockingQuestionsSuggestionInput {
+  idea: string
+  genre: string
+  style: string
+  target_duration_sec: number
+  aspect_ratio: '9:16' | '16:9'
+  target_platform: string
+  narrative_protagonist: NarrativeProtagonist
+  target_audience: TargetAudience
+  emotional_rewards: EmotionalReward[]
+  audience_profile: string
+  production_format: ProductionFormat
+  primary_market: string
+  canonical_language: string
+  content_requirements: string[]
+  content_avoidances: string[]
+  existing_questions: string[]
+}
+
+export interface BriefBlockingQuestionsSuggestion {
+  items: string[]
+  provider: string
+  model: string
+  warning?: string
+}
+
 export interface BriefStoryRewriteInput {
   idea: string
   genre: string
@@ -1077,11 +1111,14 @@ function mapJob(job: ApiJob): Job {
   return {
     id: job.id,
     projectId: job.project_id,
+    projectName: job.project_name,
     jobType: job.job_type,
     entityType: job.entity_type,
     entityId: job.entity_id,
     label: job.label,
-    entity: job.entity,
+    entity: typeof job.entity === 'string' && job.entity
+      ? job.entity
+      : `${job.entity_type}:${job.entity_id}`,
     status: job.status,
     progress: job.progress,
     stage: job.stage,
@@ -1623,6 +1660,28 @@ export async function suggestBriefAvoidances(
     model: string
     warning: string | null
   }>(`/api/v1/projects/${projectId}/brief-avoidance-suggestions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  return {
+    items: result.items,
+    provider: result.provider,
+    model: result.model,
+    warning: result.warning ?? undefined,
+  }
+}
+
+export async function suggestBriefBlockingQuestions(
+  projectId: string,
+  input: BriefBlockingQuestionsSuggestionInput,
+): Promise<BriefBlockingQuestionsSuggestion> {
+  const result = await requestJson<{
+    items: string[]
+    provider: string
+    model: string
+    warning: string | null
+  }>(`/api/v1/projects/${projectId}/brief-blocking-question-suggestions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
@@ -2935,7 +2994,10 @@ export async function createRelationshipGraphRevision(
 export interface CharacterRevisionChanges {
   name?: string
   role?: string
+  gender?: 'male' | 'female' | 'nonbinary' | 'unspecified'
+  ethnicity?: string
   age?: string
+  height?: string
   occupation?: string
   personality?: string[]
   dramatic_function?: string
@@ -3212,14 +3274,6 @@ function mapCharacterVisualProfile(
     stylingFields: (profile.styling_fields ?? {}) as Record<string, string | string[]>,
     projectStyle: (profile.project_style ?? {}) as Record<string, string>,
     negativeConstraints: (profile.negative_constraints ?? []) as string[],
-    recommendedDirections: (profile.recommended_directions ?? []) as Array<{
-      key: string
-      label: string
-      reason: string
-    }>,
-    ...(profile.selected_direction == null
-      ? {}
-      : { selectedDirection: String(profile.selected_direction) }),
     conflictReport: (profile.conflict_report ?? []) as CharacterVisualProfile['conflictReport'],
     contentHash: String(profile.content_hash),
   }
@@ -3296,6 +3350,14 @@ export async function fetchCharacterVisuals(
         visualBrief: String(raw.visual_brief),
         status: String(raw.status),
         lockVersion: Number(raw.lock_version),
+        sourceStale: Boolean(raw.source_stale),
+        ...(isRecord(raw.pending_source_changes) ? {
+          pendingSourceChanges: {
+            storyBibleVersion: Number(raw.pending_source_changes.story_bible_version),
+            storyBibleStatus: String(raw.pending_source_changes.story_bible_status),
+            changedFields: (raw.pending_source_changes.changed_fields ?? []) as string[],
+          },
+        } : {}),
         ...(raw.locked_candidate_id == null
           ? {}
           : { lockedCandidateId: String(raw.locked_candidate_id) }),
@@ -3341,6 +3403,10 @@ export async function fetchCharacterVisuals(
           status: String(item.status),
           reviewStatus: String(item.review_status),
           selected: Boolean(item.selected),
+          deletable: Boolean(item.deletable),
+          ...(item.delete_block_reason == null
+            ? {}
+            : { deleteBlockReason: String(item.delete_block_reason) }),
           ...(item.variant_key == null ? {} : { variantKey: String(item.variant_key) }),
           ...(item.variant_label == null ? {} : { variantLabel: String(item.variant_label) }),
           ...(item.variant_description == null
@@ -3352,6 +3418,7 @@ export async function fetchCharacterVisuals(
           ...(item.source_candidate_id == null
             ? {}
             : { sourceCandidateId: String(item.source_candidate_id) }),
+          generationPrompt: String(item.generation_prompt ?? ''),
         })),
         identities: identities.map((item) => ({
           id: String(item.id),
@@ -3411,7 +3478,6 @@ export async function updateCharacterVisualProfile(
     personality_visualization?: Record<string, string>
     styling_fields?: Record<string, string | string[]>
     negative_constraints?: string[]
-    selected_direction?: string
   },
 ): Promise<CharacterVisualProfile> {
   const result = await requestJson<Record<string, unknown>>(
@@ -3450,7 +3516,12 @@ export async function generateCharacterVisualCandidates(
   characterId: string,
   expectedVersion: number,
   profileVersionId: string,
-  refinement?: { sourceCandidateId: string; note: string },
+  options?: {
+    count?: 1 | 2 | 3
+    sourceCandidateId?: string
+    note?: string
+    customPrompt?: string
+  },
 ) {
   return requestJson<{ batch: Record<string, unknown>; jobs: ApiJob[] }>(
     `/api/v1/projects/${projectId}/characters/${characterId}/visual-candidates`,
@@ -3460,13 +3531,43 @@ export async function generateCharacterVisualCandidates(
       body: JSON.stringify({
         expected_version: expectedVersion,
         profile_version_id: profileVersionId,
-        count: 3,
-        ...(refinement
+        count: options?.count ?? 3,
+        ...(options?.sourceCandidateId && options.note
           ? {
-              source_candidate_id: refinement.sourceCandidateId,
-              refinement_note: refinement.note,
+              source_candidate_id: options.sourceCandidateId,
+              refinement_note: options.note,
             }
           : {}),
+        ...(options?.sourceCandidateId && options.customPrompt
+          ? {
+              source_candidate_id: options.sourceCandidateId,
+              custom_prompt: options.customPrompt,
+            }
+          : {}),
+        actor: '创作者',
+      }),
+    },
+  )
+}
+
+export async function deleteCharacterVisualCandidate(
+  projectId: string,
+  characterId: string,
+  candidateId: string,
+  expectedVersion: number,
+) {
+  return requestJson<{
+    character_id: string
+    candidate_id: string
+    deleted: boolean
+    lock_version: number
+  }>(
+    `/api/v1/projects/${projectId}/characters/${characterId}/visual-candidates/${candidateId}`,
+    {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        expected_version: expectedVersion,
         actor: '创作者',
       }),
     },
@@ -4292,7 +4393,6 @@ export async function recoverPersistedJob(
       model: request.model ?? null,
       strategy: request.strategy ?? null,
       additional_input: request.additionalInput ?? null,
-      note: request.note ?? null,
     }),
   })
   return mapJob(job)

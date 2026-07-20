@@ -22,6 +22,7 @@ from app.services.jobs import (
     reconcile_terminal_project_jobs,
     recover_expired_jobs,
     update_job_diagnostics,
+    update_job_intermediate_output,
     update_job_progress,
     upsert_worker_heartbeat,
 )
@@ -78,8 +79,11 @@ class PersistentJobWorker:
 
     async def _job_heartbeat_loop(self, job_id: str) -> None:
         interval = self._job_heartbeat_interval()
+        loop = asyncio.get_running_loop()
+        next_heartbeat_at = loop.time() + interval
         while True:
-            await asyncio.sleep(interval)
+            await asyncio.sleep(max(0, next_heartbeat_at - loop.time()))
+            next_heartbeat_at += interval
             try:
                 # A dedicated session keeps Worker liveness independent from a
                 # handler that is awaiting a slow provider response.
@@ -203,6 +207,23 @@ class PersistentJobWorker:
             raise JobCancelled
         await asyncio.sleep(0.05)
 
+    async def _save_intermediate_output(
+        self,
+        session: Session,
+        job: Job,
+        updates: dict[str, object],
+    ) -> None:
+        active = update_job_intermediate_output(
+            session,
+            job_id=job.id,
+            worker_id=self.worker_id,
+            updates=updates,
+            lease_seconds=self.settings.worker_lease_seconds,
+        )
+        if not active:
+            raise JobCancelled
+        await asyncio.sleep(0.05)
+
     async def _execute(self, session: Session, job: Job) -> dict[str, object]:
         handler = get_job_handler(job.job_type)
         if handler is None:
@@ -247,5 +268,6 @@ class PersistentJobWorker:
             evaluate_identity_consistency=evaluate_identity_consistency,
             generate_video=generate_video,
             cancel_video_task=cancel_video_task,
+            save_intermediate_output=self._save_intermediate_output,
         )
         return await handler(context, session, job, payload)

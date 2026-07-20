@@ -1,4 +1,5 @@
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 
@@ -18,7 +19,11 @@ from app.services.creative_story import (
 from app.services.proposals import materialize_mock_proposal
 from app.services.text_provider import (
     RoutedTextProvider,
+    StoryDirection,
+    TextGenerationResult,
     TextProviderError,
+    apply_relationship_context_to_script_package,
+    assemble_script_package,
     assemble_story_package,
 )
 
@@ -60,6 +65,52 @@ async def _await_with_progress[T](
                 await task
 
 
+def _cached_story_direction_results(job: Job) -> dict[str, TextGenerationResult]:
+    output_json = getattr(job, "output_json", None)
+    if not output_json:
+        return {}
+    try:
+        output = json.loads(output_json)
+    except json.JSONDecodeError:
+        return {}
+    routes = output.get("story_direction_routes") if isinstance(output, dict) else None
+    if not isinstance(routes, dict):
+        return {}
+
+    results: dict[str, TextGenerationResult] = {}
+    for direction_key, raw in routes.items():
+        if not isinstance(direction_key, str) or not isinstance(raw, dict):
+            continue
+        try:
+            direction = StoryDirection.model_validate(raw.get("payload"))
+            if direction.direction_key != direction_key:
+                continue
+            results[direction_key] = TextGenerationResult(
+                payload=direction.model_dump(mode="json"),
+                provider=str(raw["provider"]),
+                model=str(raw["model"]),
+                request_id=(
+                    str(raw["request_id"])
+                    if raw.get("request_id") is not None
+                    else None
+                ),
+                repair_attempts=int(raw.get("repair_attempts", 0)),
+            )
+        except (KeyError, TypeError, ValueError, ValidationError):
+            continue
+    return results
+
+
+def _story_direction_result_record(result: TextGenerationResult) -> dict[str, object]:
+    return {
+        "payload": result.payload,
+        "provider": result.provider,
+        "model": result.model,
+        "request_id": result.request_id,
+        "repair_attempts": result.repair_attempts,
+    }
+
+
 @register_job_handler("GENERATE_PROPOSAL")
 async def generate_proposal(
     context: JobExecutionContext,
@@ -94,25 +145,56 @@ async def generate_story_directions(
 ) -> dict[str, object]:
     await context.checkpoint(session, job, 15, "校验项目简报第 2 版与目标优先级")
     provider = RoutedTextProvider()
-    try:
-        timeout_seconds = min(context.settings.ark_request_timeout_seconds, 120)
-        async with asyncio.timeout(timeout_seconds):
-            result = await _await_with_progress(
-                context,
+    cached_results = _cached_story_direction_results(job)
+    cached_records = {
+        direction_key: _story_direction_result_record(result)
+        for direction_key, result in cached_results.items()
+    }
+    completed_routes = set(cached_results)
+
+    def current_stage() -> str:
+        completed = len(completed_routes)
+        if completed:
+            return f"已完成 {completed}/3 个故事方向，正在生成其余方向"
+        return "正在分别生成 3 个差异化故事方向"
+
+    async def on_route_complete(
+        direction_key: str,
+        result: TextGenerationResult,
+    ) -> None:
+        completed_routes.add(direction_key)
+        cached_records[direction_key] = _story_direction_result_record(result)
+        save_intermediate = getattr(context, "save_intermediate_output", None)
+        if save_intermediate is not None:
+            await save_intermediate(
                 session,
                 job,
-                provider.generate_directions(context.settings, dict(payload["brief"])),
-                initial_progress=15,
-                ceiling=65,
-                stage="正在分别生成 3 个差异化故事方向",
+                {"story_direction_routes": dict(cached_records)},
             )
-    except TimeoutError as exc:
-        raise JobExecutionError(
-            "ARK_TEXT_TIMEOUT",
-            f"火山方舟在 {timeout_seconds:g} 秒内未完成故事方向生成",
-            retryable=True,
-            details={"timeout_seconds": timeout_seconds},
-        ) from exc
+        completed = len(completed_routes)
+        progress = {1: 35, 2: 50, 3: 65}[completed]
+        stage = (
+            "3 个故事方向均已生成，正在执行结构校验"
+            if completed == 3
+            else f"已完成 {completed}/3 个故事方向，继续生成其余 {3 - completed} 个"
+        )
+        await context.checkpoint(session, job, progress, stage)
+
+    try:
+        result = await _await_with_progress(
+            context,
+            session,
+            job,
+            provider.generate_directions(
+                context.settings,
+                dict(payload["brief"]),
+                existing_results=cached_results,
+                on_route_complete=on_route_complete,
+            ),
+            initial_progress=15,
+            ceiling=40,
+            stage=current_stage,
+        )
     except TextProviderError as exc:
         raise JobExecutionError(
             exc.code, str(exc), retryable=exc.retryable, details=exc.details
@@ -296,11 +378,11 @@ async def generate_script_package(
     )
     provider = RoutedTextProvider()
     try:
-        result = await _await_with_progress(
+        outlines = await _await_with_progress(
             context,
             session,
             job,
-            provider.generate_script_package(
+            provider.generate_script_outlines(
                 context.settings,
                 brief,
                 direction,
@@ -308,12 +390,71 @@ async def generate_script_package(
                 relationship_graph,
             ),
             initial_progress=15,
-            ceiling=70,
-            stage="正在生成关系驱动的分集大纲与首集剧本",
+            ceiling=35,
+            stage="正在生成关系驱动的分集大纲",
+        )
+        foundation_context = {
+            "story_bible": story_bible,
+            "outlines": outlines.payload.get("outlines", []),
+        }
+        script_draft = await _await_with_progress(
+            context,
+            session,
+            job,
+            provider.generate_episode_script(
+                context.settings,
+                brief,
+                direction,
+                foundation_context,
+            ),
+            initial_progress=35,
+            ceiling=55,
+            stage="正在生成首集结构化剧本",
+        )
+        review = await _await_with_progress(
+            context,
+            session,
+            job,
+            provider.generate_narrative_review(
+                context.settings,
+                brief,
+                direction,
+                script_draft.payload,
+                relationship_graph=relationship_graph,
+            ),
+            initial_progress=55,
+            ceiling=72,
+            stage="正在生成叙事引擎与结构质检",
+        )
+        assembled = assemble_script_package(outlines, script_draft, review)
+        package = apply_relationship_context_to_script_package(
+            assembled.payload,
+            relationship_graph,
+        )
+        result = TextGenerationResult(
+            payload=package.model_dump(mode="json"),
+            provider=assembled.provider,
+            model=assembled.model,
+            request_id=assembled.request_id,
+            repair_attempts=assembled.repair_attempts,
         )
     except TextProviderError as exc:
         raise JobExecutionError(
             exc.code, str(exc), retryable=exc.retryable, details=exc.details
+        ) from exc
+    except ValidationError as exc:
+        raise JobExecutionError(
+            "SCRIPT_PACKAGE_ASSEMBLY_INVALID",
+            "分阶段结果合并后仍未通过创作合同校验",
+            retryable=False,
+            details={"validation_error": str(exc)[:8000]},
+        ) from exc
+    except ValueError as exc:
+        raise JobExecutionError(
+            "RELATIONSHIP_SCRIPT_CONTRACT_INVALID",
+            str(exc),
+            retryable=False,
+            details={},
         ) from exc
     await context.checkpoint(session, job, 78, "校验关系重排与认证变化强引用")
     await context.checkpoint(session, job, 90, "写入分集大纲与剧本版本事实")

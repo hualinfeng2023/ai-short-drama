@@ -113,6 +113,7 @@ export function OnboardingDialog({
     >
       <header className="onboarding__header">
         <span className="onboarding__brand"><Clapperboard size={15} />快速上手</span>
+        <button className="onboarding__skip" onClick={onFinish} type="button">跳过引导</button>
         <button aria-label="关闭引导" className="onboarding__close" onClick={onFinish} type="button"><X size={16} /></button>
       </header>
       <div className="onboarding__stage" key={step}>

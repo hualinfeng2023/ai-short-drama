@@ -36,6 +36,7 @@ from app.db.models import (
 )
 from app.schemas import JobRead
 from app.services.assets import register_file, resolve_asset_path
+from app.services.character_image_qc import detect_lower_right_watermark
 from app.services.events import append_event
 from app.services.image_provider import GeneratedImage
 from app.services.jobs import enqueue_job, job_to_read
@@ -500,7 +501,7 @@ def reference_data_urls(
     settings: Settings,
     asset_ids: list[str],
     *,
-    mask_character_watermark: bool = False,
+    detect_and_mask_character_watermark: bool = False,
 ) -> list[str]:
     values: list[str] = []
     for asset_id in asset_ids:
@@ -508,15 +509,17 @@ def reference_data_urls(
         if asset is None:
             continue
         content = resolve_asset_path(settings, asset).read_bytes()
-        if mask_character_watermark:
+        if detect_and_mask_character_watermark:
             content = mask_character_reference_watermark(content, asset.mime)
         values.append(f"data:{asset.mime};base64,{base64.b64encode(content).decode()}")
     return values
 
 
 def mask_character_reference_watermark(content: bytes, mime: str) -> bytes:
-    """Hide the known lower-right AI label before a character image is reused."""
+    """Hide the known lower-right AI label only when a watermark is detected."""
     if mime not in {"image/jpeg", "image/png", "image/webp"}:
+        return content
+    if not detect_lower_right_watermark(content, mime):
         return content
     try:
         with Image.open(BytesIO(content)) as source:

@@ -28,15 +28,16 @@ import {
   type ProviderSettings,
   type RuntimeConfig,
 } from '../api/client'
-import { Button, Modal, PageHeader, SelectControl, StatusBadge } from '../components/ui'
+import { Button, Modal, PageHeader, SelectControl, StatusBadge, Surface } from '../components/ui'
+import { ConfirmModal } from '../components/ConfirmModal'
 import { useStudio } from '../store/StudioContext'
 import { useToast } from '../store/ToastContext'
 import type { VisualMode } from '../types'
 
-const modes: Array<{ id: VisualMode; title: string; description: string; tone: string }> = [
-  { id: 'standard', title: '标准工作台', description: '规范基线：浅灰画布、白色面板、蓝色单主色。', tone: '适合完整流程' },
-  { id: 'focus', title: '专注模式', description: '更紧凑的间距与更少的辅助说明，优先信息密度。', tone: '适合高频审核' },
-  { id: 'cinema', title: '暗房模式', description: '深色工作区与更强画面层级，突出小样和版本比较。', tone: '适合媒体审阅' },
+const modes: Array<{ id: VisualMode; title: string; description: string; tone: string; previewHint: string }> = [
+  { id: 'standard', title: '标准工作台', description: '规范基线：浅灰画布、白色面板、蓝色单主色。', tone: '适合完整流程', previewHint: '侧栏 + 内容区 + 操作栏' },
+  { id: 'focus', title: '专注模式', description: '更紧凑的间距与更少的辅助说明，优先信息密度。', tone: '适合高频审核', previewHint: '窄侧栏 + 高密度列表' },
+  { id: 'cinema', title: '暗房模式', description: '深色工作区与更强画面层级，突出小样和版本比较。', tone: '适合媒体审阅', previewHint: '深色画布 + 突出预览区' },
 ]
 
 const PROMPT_MODEL_OPTIONS = [
@@ -150,6 +151,7 @@ export function SettingsPage() {
   const [notice, setNotice] = useState<{ tone: 'success' | 'error'; message: string } | null>(null)
   const [activeProvider, setActiveProvider] = useState<'ark' | 'tos'>('ark')
   const [recoveryOpen, setRecoveryOpen] = useState(false)
+  const [pendingResetDemo, setPendingResetDemo] = useState(false)
   const [recovering, setRecovering] = useState(false)
   const [recoveryNotice, setRecoveryNotice] = useState<{ tone: 'success' | 'error'; message: string } | null>(null)
   const apiConnected = apiStatus === 'connected'
@@ -319,7 +321,6 @@ export function SettingsPage() {
   return <div className="page page--settings">
     <PageHeader
       description="外观、运行环境、服务凭证与数据恢复，分门别类管理。"
-      eyebrow="工作台配置"
       title="系统设置"
     />
     <div className="settings-shell">
@@ -352,38 +353,38 @@ export function SettingsPage() {
           <section>
             <div className="section-heading"><div><h2>界面模式</h2></div></div>
             <p className="settings-copy">三种模式共享同一信息架构与交互规则，切换只影响信息密度和画面层级。</p>
-            <div className="mode-grid">{modes.map((mode) => <button className={visualMode === mode.id ? 'active' : ''} key={mode.id} onClick={() => { if (visualMode !== mode.id) { setVisualMode(mode.id); notify(`已切换到「${mode.title}」，界面密度与层级已更新。`, 'info') } }}><span className={`mode-preview mode-preview--${mode.id}`}><i /><i /><i /></span><div><strong>{mode.title}</strong><p>{mode.description}</p><small>{mode.tone}</small></div>{visualMode === mode.id ? <em><Check size={14} />当前</em> : null}</button>)}</div>
+            <div className="mode-grid">{modes.map((mode) => <button className={visualMode === mode.id ? 'active' : ''} key={mode.id} onClick={() => { if (visualMode !== mode.id) { setVisualMode(mode.id); notify(`已切换到「${mode.title}」，界面密度与层级已更新。`, 'info') } }}><span className={`mode-preview mode-preview--${mode.id}`} aria-hidden="true"><i /><i /><i /><span className="mode-preview__hint">{mode.previewHint}</span></span><div><strong>{mode.title}</strong><p>{mode.description}</p><small>{mode.tone}</small></div>{visualMode === mode.id ? <em><Check size={14} />当前</em> : null}</button>)}</div>
           </section>
         ) : null}
 
         {settingsSection === 'runtime' ? (
-          <section className="runtime-card">
+          <Surface className="runtime-card">
             <div className="section-heading"><div><h2>本地工作台</h2></div><StatusBadge label={apiConnected ? 'API 已连接' : apiStatus === 'loading' ? '连接中' : '离线回退'} status={apiConnected ? 'APPROVED' : apiStatus === 'loading' ? 'GENERATING' : 'READY'} /></div>
             <dl><div><dt><MonitorCog size={15} />图片模型</dt><dd>{imageLabel}</dd></div><div><dt><MonitorCog size={15} />视频模型</dt><dd>{videoLabel}</dd></div><div><dt><Database size={15} />数据来源</dt><dd>{apiConnected ? 'FastAPI + SQLite' : '浏览器本地存储'}</dd></div><div><dt><ShieldCheck size={15} />持久化流程</dt><dd>{capabilities?.mediaPipeline ? '任务 + 媒体 + 版本 + 导出' : apiConnected ? '读取能力中' : '不可用'}</dd></div></dl>
             <small>未配置真实服务商时仍可走通确定性的模拟流程。保存方舟 API Key 后，文本、图片和视频任务会由后端 Worker 调用真实服务。</small>
-          </section>
+          </Surface>
         ) : null}
 
         {settingsSection === 'data' ? (
           <div className="settings-stack">
-            {apiConnected ? <section className="reset-card">
+            {apiConnected ? <Surface className="reset-card">
               <p className="eyebrow">故障恢复</p>
               <h2>重新同步当前项目</h2>
               <p>清除当前项目的浏览器缓存，再从 SQLite 重新读取项目、镜头与任务；不会删除服务端数据。</p>
               <Button onClick={() => { setRecoveryNotice(null); setRecoveryOpen(true) }} variant="secondary"><RotateCcw size={16} />清除本地缓存并重新同步</Button>
               {recoveryNotice ? <small className={`settings-recovery-notice settings-recovery-notice--${recoveryNotice.tone}`} role={recoveryNotice.tone === 'error' ? 'alert' : 'status'}>{recoveryNotice.message}</small> : null}
-            </section> : apiStatus === 'mock_fallback' ? <section className="reset-card">
+            </Surface> : apiStatus === 'mock_fallback' ? <Surface className="reset-card">
               <p className="eyebrow">离线演示</p>
               <h2>恢复演示项目</h2>
               <p>恢复浏览器中的内置演示场景；此模式没有连接 SQLite。</p>
-              <Button onClick={() => { resetDemo(); notify('已恢复内置演示项目。') }} variant="secondary"><RotateCcw size={16} />恢复演示项目</Button>
-            </section> : null}
-            <section className="reset-card">
+              <Button onClick={() => setPendingResetDemo(true)} variant="secondary"><RotateCcw size={16} />恢复演示项目</Button>
+            </Surface> : null}
+            <Surface className="reset-card">
               <p className="eyebrow">浏览器本地数据</p>
               <h2>本机保存的内容</h2>
               <p>故事草稿、界面模式偏好、演示项目副本与新手引导标记都只保存在当前浏览器中，不会上传。</p>
               <Button onClick={() => window.dispatchEvent(new Event('studio:show-onboarding'))} variant="secondary"><Eye size={16} />重新观看新手引导</Button>
-            </section>
+            </Surface>
           </div>
         ) : null}
 
@@ -533,5 +534,18 @@ export function SettingsPage() {
         <div><strong>{project.name}</strong><p>如页面状态异常或与服务端不一致，可使用此操作恢复到 SQLite 中的最新状态。</p></div>
       </div>
     </Modal>
+
+    <ConfirmModal
+      confirmLabel="恢复演示项目"
+      description="当前浏览器中的演示数据将被重置为内置样片，未保存的本地修改会丢失。"
+      onClose={() => setPendingResetDemo(false)}
+      onConfirm={() => {
+        resetDemo()
+        setPendingResetDemo(false)
+        notify('已恢复内置演示项目。')
+      }}
+      open={pendingResetDemo}
+      title="恢复演示项目？"
+    />
   </div>
 }

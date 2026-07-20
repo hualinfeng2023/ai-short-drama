@@ -3,6 +3,7 @@ import { RotateCcw, TriangleAlert } from 'lucide-react'
 
 interface ErrorBoundaryProps {
   children: ReactNode
+  resetKey?: string
 }
 
 interface ErrorBoundaryState {
@@ -20,6 +21,15 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     console.error('[ui] 页面渲染失败', error)
   }
 
+  componentDidUpdate(previousProps: ErrorBoundaryProps) {
+    if (
+      this.state.hasError
+      && previousProps.resetKey !== this.props.resetKey
+    ) {
+      this.setState({ hasError: false })
+    }
+  }
+
   render() {
     if (this.state.hasError) {
       return (
@@ -28,11 +38,11 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
             <TriangleAlert size={22} />
           </span>
           <h2>这个页面暂时无法显示</h2>
-          <p>界面渲染时发生意外错误，你的项目数据不受影响。可以刷新重试，或先返回项目列表。</p>
+          <p>界面渲染时发生意外错误，你的项目数据不受影响。可以重新尝试，或先返回项目列表。</p>
           <div className="route-error__actions">
-            <button onClick={() => window.location.reload()} type="button">
+            <button onClick={() => this.setState({ hasError: false })} type="button">
               <RotateCcw size={15} />
-              刷新页面
+              重新尝试
             </button>
             <a href="/projects">返回项目列表</a>
           </div>

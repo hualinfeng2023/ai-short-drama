@@ -9,6 +9,7 @@ from app.db.models import Job
 
 Checkpoint = Callable[[Session, Job, float, str], Awaitable[None]]
 RecordDiagnostics = Callable[[Session, Job, dict[str, object]], Awaitable[None]]
+SaveIntermediateOutput = Callable[[Session, Job, dict[str, object]], Awaitable[None]]
 Heartbeat = Callable[[Session, str, str | None], None]
 AsyncProviderCall = Callable[..., Awaitable[Any]]
 
@@ -44,3 +45,4 @@ class JobExecutionContext:
     evaluate_identity_consistency: AsyncProviderCall
     generate_video: AsyncProviderCall
     cancel_video_task: AsyncProviderCall
+    save_intermediate_output: SaveIntermediateOutput | None = None
