@@ -8,15 +8,19 @@ from sqlalchemy.orm import sessionmaker
 
 from app.config import get_settings
 from app.db.models import (
+    Asset,
     AuditLog,
     EpisodeOutlineVersion,
     EventLog,
+    GenerationRecord,
     Project,
     ScriptLine,
     ScriptScene,
     ScriptVersion,
+    Shot,
     StoryBibleVersion,
     StoryVersion,
+    Take,
 )
 from app.db.session import get_engine
 from app.seed import PROJECT_ID
@@ -195,6 +199,35 @@ def prepare_script() -> int:
                 estimated_duration_ms=3_000,
                 pronunciation_json="{}",
                 localization_json="{}",
+            )
+        )
+        preserved_shot = session.scalar(select(Shot).limit(1))
+        preserved_asset = session.scalar(select(Asset).limit(1))
+        assert preserved_shot is not None and preserved_asset is not None
+        session.add(
+            Take(
+                id="93000000-0000-4000-8000-000000000007",
+                shot_id=preserved_shot.id,
+                kind="DIRECTOR_TEST",
+                version=1,
+                asset_id=preserved_asset.id,
+                status="SUCCEEDED",
+                approval="APPROVED",
+                is_current=False,
+                parent_take_id=None,
+                generation_record_id=None,
+                quality_status="PASSED",
+                identity_status="NOT_APPLICABLE",
+                identity_score=None,
+                identity_message=None,
+                identity_reference_asset_ids_json="[]",
+                identity_review_decision=None,
+                identity_review_issues_json="[]",
+                identity_review_note=None,
+                identity_review_actor=None,
+                identity_reviewed_at=None,
+                identity_review_look_version=None,
+                created_at=now,
             )
         )
         session.commit()
@@ -376,6 +409,228 @@ async def test_domain_command_revises_script_idempotently(client: AsyncClient) -
         assert len(events) == 1
         event_payload = json.loads(events[0].payload_json)
         assert event_payload["command_id"] == command["command_id"]
+
+
+@pytest.mark.anyio
+async def test_director_proposal_review_execute_compare_and_rollback(
+    client: AsyncClient,
+) -> None:
+    prepare_script()
+    create_payload = {
+        "expected_version": 8,
+        "target_type": "SCRIPT_SCENE",
+        "target_id": SCENE_ID,
+        "issue_types": ["AI_DIALOGUE", "CHARACTER_MOTIVATION", "PACING"],
+        "instruction": "检查人物是否在解释剧情，而不是采取行动。",
+        "actor": "test-director",
+    }
+    proposed = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json=create_payload,
+        headers={"Idempotency-Key": "director-proposal-create-v1"},
+    )
+    assert proposed.status_code == 201, proposed.text
+    assert proposed.headers["Idempotency-Replayed"] == "false"
+    proposal = proposed.json()["data"]
+    assert proposal["status"] == "PROPOSED"
+    assert proposal["issue_type"] == "AI_DIALOGUE"
+    assert len(proposal["alternatives"]) == 3
+    assert proposal["recommended_option"] in {
+        item["option_id"] for item in proposal["alternatives"]
+    }
+    assert proposal["requires_confirmation"] is True
+    assert proposal["estimated_cost_usd"] == 0
+    assert proposal["provider"]["model"] == "deterministic-director-evaluator-v1"
+    assert proposal["preserved_objects"]
+
+    replayed = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json=create_payload,
+        headers={"Idempotency-Key": "director-proposal-create-v1"},
+    )
+    assert replayed.status_code == 201
+    assert replayed.headers["Idempotency-Replayed"] == "true"
+    assert replayed.json()["data"]["proposal_id"] == proposal["proposal_id"]
+
+    replay_conflict = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json={**create_payload, "instruction": "同一幂等键下的不同审查要求。"},
+        headers={"Idempotency-Key": "director-proposal-create-v1"},
+    )
+    assert replay_conflict.status_code == 409
+    assert replay_conflict.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+
+    unconfirmed = await client.post(
+        f"/api/v1/director-review-proposals/{proposal['proposal_id']}/execute",
+        json={
+            "expected_version": 8,
+            "option_id": proposal["recommended_option"],
+            "actor": "test-director",
+            "confirmed": False,
+        },
+        headers={"Idempotency-Key": "director-proposal-apply-unconfirmed-v1"},
+    )
+    assert unconfirmed.status_code == 409
+    assert unconfirmed.json()["error"]["code"] == "USER_CONFIRMATION_REQUIRED"
+
+    executed = await client.post(
+        f"/api/v1/director-review-proposals/{proposal['proposal_id']}/execute",
+        json={
+            "expected_version": 8,
+            "option_id": proposal["recommended_option"],
+            "actor": "test-director",
+            "confirmed": True,
+        },
+        headers={"Idempotency-Key": "director-proposal-apply-v1"},
+    )
+    assert executed.status_code == 200, executed.text
+    assert executed.headers["Idempotency-Replayed"] == "false"
+    result = executed.json()["data"]
+    assert result["proposal"]["status"] == "APPLIED_PENDING_APPROVAL"
+    assert result["script"]["version"] == 2
+    assert result["proposal"]["comparison"]["media_generation"] is False
+    assert result["proposal"]["comparison"]["base_script_version_id"] == SCRIPT_ID
+    revised_script_id = result["script"]["id"]
+
+    execute_replay = await client.post(
+        f"/api/v1/director-review-proposals/{proposal['proposal_id']}/execute",
+        json={
+            "expected_version": 8,
+            "option_id": proposal["recommended_option"],
+            "actor": "test-director",
+            "confirmed": True,
+        },
+        headers={"Idempotency-Key": "director-proposal-apply-v1"},
+    )
+    assert execute_replay.status_code == 200
+    assert execute_replay.headers["Idempotency-Replayed"] == "true"
+    assert execute_replay.json()["data"] == result
+
+    rolled_back = await client.post(
+        f"/api/v1/director-review-proposals/{proposal['proposal_id']}/decision",
+        json={
+            "expected_version": 9,
+            "decision": "ROLLBACK",
+            "actor": "test-director",
+            "confirmed": True,
+        },
+        headers={"Idempotency-Key": "director-proposal-rollback-v1"},
+    )
+    assert rolled_back.status_code == 200, rolled_back.text
+    rollback = rolled_back.json()["data"]
+    assert rollback["status"] == "ROLLED_BACK"
+    assert rollback["result_script_version_id"] == revised_script_id
+    assert rollback["rollback_script_version_id"]
+
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        rollback_script = session.get(ScriptVersion, rollback["rollback_script_version_id"])
+        assert rollback_script is not None
+        rollback_scene = session.scalar(
+            select(ScriptScene).where(ScriptScene.script_version_id == rollback_script.id)
+        )
+        assert rollback_scene is not None
+        rollback_line = session.scalar(
+            select(ScriptLine).where(ScriptLine.script_scene_id == rollback_scene.id)
+        )
+        assert rollback_line is not None
+        assert rollback_line.text == "其实我觉得，你现在必须离开这里。"
+        generation_records = list(
+            session.scalars(
+                select(GenerationRecord).where(
+                    GenerationRecord.project_id == PROJECT_ID,
+                    GenerationRecord.capability == "DIRECTOR_SCENE_REVIEW",
+                )
+            )
+        )
+        assert len(generation_records) == 1
+        assert generation_records[0].output_asset_id is None
+        command_audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.action.in_(
+                        {
+                            "CREATE_DIRECTOR_PROPOSAL",
+                            "APPLY_DIRECTOR_PROPOSAL",
+                            "DECIDE_DIRECTOR_PROPOSAL",
+                        }
+                    ),
+                )
+            )
+        )
+        assert len(command_audits) == 3
+
+
+@pytest.mark.anyio
+async def test_director_proposal_reject_and_approve_state_paths(
+    client: AsyncClient,
+) -> None:
+    prepare_script()
+    request = {
+        "expected_version": 8,
+        "target_type": "SCRIPT_SCENE",
+        "target_id": SCENE_ID,
+        "issue_types": ["STORY_LOGIC"],
+        "actor": "test-director",
+    }
+    rejected_proposal = (
+        await client.post(
+            f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+            json=request,
+            headers={"Idempotency-Key": "director-reject-create-v1"},
+        )
+    ).json()["data"]
+    rejected = await client.post(
+        f"/api/v1/director-review-proposals/{rejected_proposal['proposal_id']}/decision",
+        json={
+            "expected_version": 8,
+            "decision": "REJECT",
+            "actor": "test-director",
+            "confirmed": True,
+        },
+        headers={"Idempotency-Key": "director-reject-decision-v1"},
+    )
+    assert rejected.status_code == 200, rejected.text
+    assert rejected.json()["data"]["status"] == "REJECTED"
+
+    approved_proposal = (
+        await client.post(
+            f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+            json=request,
+            headers={"Idempotency-Key": "director-approve-create-v1"},
+        )
+    ).json()["data"]
+    applied = await client.post(
+        f"/api/v1/director-review-proposals/{approved_proposal['proposal_id']}/execute",
+        json={
+            "expected_version": 8,
+            "option_id": approved_proposal["recommended_option"],
+            "actor": "test-director",
+            "confirmed": True,
+        },
+        headers={"Idempotency-Key": "director-approve-apply-v1"},
+    )
+    assert applied.status_code == 200, applied.text
+    applied_data = applied.json()["data"]
+    approved = await client.post(
+        f"/api/v1/director-review-proposals/{approved_proposal['proposal_id']}/decision",
+        json={
+            "expected_version": 9,
+            "decision": "APPROVE",
+            "actor": "test-director",
+            "confirmed": True,
+        },
+        headers={"Idempotency-Key": "director-approve-decision-v1"},
+    )
+    assert approved.status_code == 200, approved.text
+    approved_data = approved.json()["data"]
+    assert approved_data["status"] == "APPROVED"
+    assert approved_data["result_script_version_id"] == applied_data["script"]["id"]
+    assert approved_data["approval_result"]["decision"] == "APPROVE"
 
 
 @pytest.mark.anyio

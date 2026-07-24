@@ -45,6 +45,9 @@ class DirectorCommand(BaseModel):
         "ROLLBACK_PREVIEW",
         "LOCK_CHARACTER_IDENTITY",
         "RESTORE_CHARACTER_IDENTITY",
+        "CREATE_DIRECTOR_PROPOSAL",
+        "APPLY_DIRECTOR_PROPOSAL",
+        "DECIDE_DIRECTOR_PROPOSAL",
     ]
     actor: CommandActor
     target_object_id: str = Field(min_length=36, max_length=36)

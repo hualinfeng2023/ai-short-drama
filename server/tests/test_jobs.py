@@ -1015,6 +1015,7 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
             for shot in persisted_shots
         }
         assert snapshot_before
+        director_scene_id = persisted_shots[0].scene_id
         assert all(json.loads(values[0]) for values in snapshot_before.values())
         character = session.scalar(
             select(Character).where(
@@ -1142,6 +1143,26 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
     assert ("SPECIFIES_SHOT", False) in relations
     assert ("GENERATED_TAKE", False) in relations
     assert ("CONTAINS_CLIP", False) in relations
+
+    director_project = (await client.get(f"/api/v1/projects/{project_id}")).json()["data"]
+    director_proposal_response = await client.post(
+        f"/api/v1/projects/{project_id}/director-review-proposals",
+        json={
+            "expected_version": director_project["lock_version"],
+            "target_type": "SCENE",
+            "target_id": director_scene_id,
+            "issue_types": ["STORY_LOGIC", "CHARACTER_MOTIVATION", "PACING"],
+            "instruction": "检查这一生产场景的因果、人物动机和节奏。",
+            "actor": "test-director",
+        },
+        headers={"Idempotency-Key": "production-scene-director-proposal-v1"},
+    )
+    assert director_proposal_response.status_code == 201, director_proposal_response.text
+    director_proposal = director_proposal_response.json()["data"]
+    assert director_proposal["target_objects"][0]["type"] == "ScriptScene"
+    assert director_proposal["affected_objects"]
+    assert director_proposal["preserved_objects"]
+    assert all(item["approval"] == "APPROVED" for item in director_proposal["preserved_objects"])
 
     with Session(get_engine(get_settings().database_url)) as session:
         generated_takes = list(

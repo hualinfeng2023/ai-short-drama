@@ -1,6 +1,7 @@
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 from fastapi import HTTPException
 from pydantic import TypeAdapter, ValidationError
@@ -17,17 +18,22 @@ from app.db.models import (
     CharacterStoryStateVersion,
     CharacterVisualProfileVersion,
     Episode,
+    GenerationRecord,
     IdempotencyKey,
     Project,
     Scene,
+    ScriptLine,
+    ScriptScene,
     ScriptVersion,
     Shot,
     StoryboardVersion,
     Take,
+    TimelineClip,
     TimelineItem,
     TimelineVersion,
 )
 from app.domain.commands import DirectorCommand
+from app.domain.director import DirectorReviewOutput
 from app.schemas import (
     CharacterVisualProfileConfirmRequest,
     CharacterVisualProfileUpdateRequest,
@@ -45,6 +51,7 @@ from app.services.character_visuals import (
     update_visual_profile,
 )
 from app.services.creative_story import approve_script, revise_script
+from app.services.director_proposals import director_proposal_to_read
 from app.services.events import append_event
 from app.services.projects import canonical_json, content_hash, version_conflict
 from app.services.revisions import approve_timeline, create_revision, rollback_timeline
@@ -463,9 +470,7 @@ def _shot_state_hash(shot: Shot) -> str:
             "character_look_version": shot.character_look_version,
             "character_identity_version_ids_json": shot.character_identity_version_ids_json,
             "character_look_version_ids_json": shot.character_look_version_ids_json,
-            "character_story_state_version_ids_json": (
-                shot.character_story_state_version_ids_json
-            ),
+            "character_story_state_version_ids_json": (shot.character_story_state_version_ids_json),
         }
     )
 
@@ -804,9 +809,7 @@ def _execute_shot_take_review(
         command=command,
     )
     expected_version = _object_lock_version(command)
-    review_payload = {
-        key: value for key, value in command.payload.items() if key != "confirmed"
-    }
+    review_payload = {key: value for key, value in command.payload.items() if key != "confirmed"}
     validated = IdentityReviewRequest(
         expected_version=expected_version,
         actor=command.actor.id,
@@ -978,10 +981,7 @@ def _timeline_state_hash(
     )
     take_ids = [item.take_id for item in items]
     takes = (
-        {
-            take.id: take
-            for take in session.scalars(select(Take).where(Take.id.in_(take_ids))).all()
-        }
+        {take.id: take for take in session.scalars(select(Take).where(Take.id.in_(take_ids))).all()}
         if take_ids
         else {}
     )
@@ -1000,9 +1000,7 @@ def _timeline_state_hash(
                     "shot_id": item.shot_id,
                     "take_id": item.take_id,
                     "take_state_hash": (
-                        _take_state_hash(takes[item.take_id])
-                        if item.take_id in takes
-                        else None
+                        _take_state_hash(takes[item.take_id]) if item.take_id in takes else None
                     ),
                 }
                 for item in items
@@ -1180,11 +1178,7 @@ def _character_identity_state_hash(
 
 def _project_shot_snapshot_hash(session: Session, project_id: str) -> str:
     shot_ids = select(Shot.id).join(Scene).join(Episode).where(Episode.project_id == project_id)
-    shots = list(
-        session.scalars(
-            select(Shot).where(Shot.id.in_(shot_ids)).order_by(Shot.id)
-        ).all()
-    )
+    shots = list(session.scalars(select(Shot).where(Shot.id.in_(shot_ids)).order_by(Shot.id)).all())
     return content_hash(
         [
             {
@@ -1193,9 +1187,7 @@ def _project_shot_snapshot_hash(session: Session, project_id: str) -> str:
                 "status": shot.status,
                 "current_take_id": shot.current_take_id,
                 "candidate_take": shot.candidate_take,
-                "character_identity_version_ids_json": (
-                    shot.character_identity_version_ids_json
-                ),
+                "character_identity_version_ids_json": (shot.character_identity_version_ids_json),
                 "character_look_version_ids_json": shot.character_look_version_ids_json,
                 "character_story_state_version_ids_json": (
                     shot.character_story_state_version_ids_json
@@ -1278,9 +1270,7 @@ def _execute_character_identity_lock(
     return MutationResult(
         result={
             "identity": result,
-            "script_job": (
-                script_job.model_dump(mode="json") if script_job is not None else None
-            ),
+            "script_job": (script_job.model_dump(mode="json") if script_job is not None else None),
         },
         entity_type="character_identity_version",
         entity_id=identity.id,
@@ -1320,6 +1310,522 @@ def _execute_character_identity_restore(
         entity_id=identity.id,
         before_hash=before_hash,
         after_hash=_character_identity_state_hash(session, character),
+    )
+
+
+def _director_proposal_target(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> tuple[Project, ChangeSet, dict[str, object]]:
+    project = session.get(Project, project_id)
+    change_set = session.get(ChangeSet, command.target_object_id)
+    if project is None or change_set is None or change_set.project_id != project.id:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "DIRECTOR_PROPOSAL_NOT_FOUND",
+                "message": "Director Proposal 不存在",
+            },
+        )
+    impact = json.loads(change_set.impact_json)
+    if "proposal" not in impact:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "DIRECTOR_PROPOSAL_NOT_FOUND",
+                "message": "该 ChangeSet 不是 Director Proposal",
+            },
+        )
+    return project, change_set, impact
+
+
+def _execute_create_director_proposal(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    project = session.get(Project, project_id)
+    script = session.get(ScriptVersion, command.target_version_id)
+    scene = session.get(ScriptScene, command.target_object_id)
+    if (
+        project is None
+        or script is None
+        or script.project_id != project.id
+        or scene is None
+        or scene.script_version_id != script.id
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "COMMAND_TARGET_NOT_FOUND", "message": "Director 审查目标不存在"},
+        )
+    _validate_target(command, object_id=scene.id, version_id=script.id)
+    expected_version = command.expected_version.project_lock_version
+    if expected_version is None or project.lock_version != expected_version:
+        raise version_conflict(project, expected_version or 0)
+    if (
+        command.expected_version.target_hash is not None
+        and script.content_hash != command.expected_version.target_hash
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "TARGET_CONTENT_CHANGED",
+                "message": "目标剧本已变化，请重新发起 Director 审查",
+            },
+        )
+    payload = command.payload
+    review_payload = payload.get("review")
+    context = payload.get("context")
+    impact_payload = payload.get("impact")
+    provider = payload.get("provider")
+    if not all(
+        isinstance(value, dict) for value in (review_payload, context, impact_payload, provider)
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "COMMAND_PAYLOAD_INVALID", "message": "Director Proposal 内容无效"},
+        )
+    review = DirectorReviewOutput.model_validate(review_payload)
+    proposal = {
+        "issue_type": review.issue_type,
+        "observation": review.observation,
+        "rationale": review.rationale,
+        "target_objects": [{"type": "ScriptScene", "id": scene.id, "version_id": script.id}],
+        "proposed_changes": [
+            item.proposed_change.model_dump(mode="json") for item in review.options
+        ],
+        "alternatives": [item.model_dump(mode="json") for item in review.options],
+        "recommended_option": review.recommended_option_id,
+        "confidence": review.confidence,
+        "affected_objects": impact_payload.get("affected_objects", []),
+        "preserved_objects": impact_payload.get("preserved_objects", []),
+        "estimated_time_seconds": sum(item.estimated_time_seconds for item in review.options),
+        "estimated_cost_usd": max(item.estimated_cost_usd for item in review.options),
+        "requires_confirmation": True,
+        "validation_plan": review.validation_plan,
+        "base_script_version_id": script.id,
+        "script_scene_id": scene.id,
+        "requested_by": payload.get("requested_by"),
+        "provider": provider,
+    }
+    stored_impact: dict[str, object] = {
+        "proposal": proposal,
+        "impact": impact_payload,
+        "context": context,
+    }
+    change_set = ChangeSet(
+        id=command.command_id,
+        project_id=project.id,
+        base_timeline_id=project.current_timeline_version_id,
+        base_relationship_graph_id=script.relationship_graph_version_id,
+        scope_json=canonical_json(
+            {
+                "type": "SCRIPT_SCENE",
+                "ids": [scene.id],
+                "script_version_id": script.id,
+            }
+        ),
+        instruction=str(payload.get("instruction") or "Director 场景审查"),
+        impact_json=canonical_json(stored_impact),
+        estimate_json=canonical_json(
+            {
+                "estimated_seconds": proposal["estimated_time_seconds"],
+                "estimated_cost_usd": proposal["estimated_cost_usd"],
+                "media_generation": False,
+            }
+        ),
+        status="PROPOSED",
+        result_timeline_id=None,
+        result_relationship_graph_id=None,
+        created_at=datetime.now(UTC),
+    )
+    session.add(change_set)
+    session.add(
+        GenerationRecord(
+            id=str(uuid4()),
+            project_id=project.id,
+            job_id=None,
+            entity_type="director_proposal",
+            entity_id=change_set.id,
+            capability="DIRECTOR_SCENE_REVIEW",
+            provider=str(provider.get("provider", "unknown")),
+            model=str(provider.get("model", "unknown")),
+            config_version="director-proposal-v1",
+            prompt_hash=content_hash(context),
+            seed=None,
+            reference_asset_ids_json="[]",
+            provider_request_id=(
+                str(provider["request_id"]) if provider.get("request_id") else None
+            ),
+            provider_task_id=None,
+            status="SUCCEEDED",
+            latency_ms=None,
+            input_units=None,
+            output_units=None,
+            estimated_cost_usd=float(proposal["estimated_cost_usd"]),
+            output_asset_id=None,
+            metadata_json=canonical_json(
+                {
+                    "command_id": command.command_id,
+                    "target_script_version_id": script.id,
+                    "target_script_scene_id": scene.id,
+                    "media_generation": False,
+                }
+            ),
+            created_at=datetime.now(UTC),
+            completed_at=datetime.now(UTC),
+        )
+    )
+    session.flush()
+    return MutationResult(
+        result=director_proposal_to_read(change_set),
+        entity_type="director_proposal",
+        entity_id=change_set.id,
+        before_hash=script.content_hash,
+        after_hash=content_hash(stored_impact),
+    )
+
+
+def _take_state_hash(take: Take) -> str:
+    return content_hash(
+        {
+            "status": take.status,
+            "approval": take.approval,
+            "asset_id": take.asset_id,
+            "is_current": take.is_current,
+        }
+    )
+
+
+def _assert_preserved_director_objects(
+    session: Session, preserved: list[dict[str, object]]
+) -> None:
+    for expected in preserved:
+        if expected.get("type") != "Take":
+            continue
+        take = session.get(Take, str(expected["id"]))
+        if take is None or _take_state_hash(take) != expected.get("state_hash"):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "PRESERVED_OBJECT_CHANGED",
+                    "message": "范围外 Approved Take 已变化，Director 命令已中止",
+                    "details": {"object": expected},
+                },
+            )
+
+
+def _revised_entity(
+    session: Session,
+    *,
+    source_scene_id: str,
+    source_entity_id: str,
+    revised_script_id: str,
+    scope: str,
+) -> tuple[ScriptScene, ScriptLine | None]:
+    source_scene = session.get(ScriptScene, source_scene_id)
+    if source_scene is None:
+        raise RuntimeError("Director Proposal 来源场景丢失")
+    revised_scene = session.scalar(
+        select(ScriptScene).where(
+            ScriptScene.script_version_id == revised_script_id,
+            ScriptScene.ordinal == source_scene.ordinal,
+        )
+    )
+    if revised_scene is None:
+        raise RuntimeError("Director 修改后的场景丢失")
+    if scope == "SCENE":
+        return revised_scene, None
+    source_line = session.get(ScriptLine, source_entity_id)
+    revised_line = (
+        session.scalar(
+            select(ScriptLine).where(
+                ScriptLine.script_scene_id == revised_scene.id,
+                ScriptLine.ordinal == source_line.ordinal,
+            )
+        )
+        if source_line is not None
+        else None
+    )
+    if revised_line is None:
+        raise RuntimeError("Director 修改后的台词丢失")
+    return revised_scene, revised_line
+
+
+def _execute_apply_director_proposal(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    _require_explicit_user_confirmation(command)
+    project, change_set, impact = _director_proposal_target(
+        session, project_id=project_id, command=command
+    )
+    if change_set.status != "PROPOSED":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "DIRECTOR_PROPOSAL_NOT_PENDING", "message": "Proposal 已处理"},
+        )
+    proposal = dict(impact["proposal"])
+    base_script_id = str(proposal["base_script_version_id"])
+    _validate_target(command, object_id=change_set.id, version_id=base_script_id)
+    expected_version = command.expected_version.project_lock_version
+    if expected_version is None or project.lock_version != expected_version:
+        raise version_conflict(project, expected_version or 0)
+    base_script = session.get(ScriptVersion, base_script_id)
+    if base_script is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "DIRECTOR_BASE_VERSION_MISSING", "message": "基础剧本版本不存在"},
+        )
+    if (
+        command.expected_version.target_hash is not None
+        and base_script.content_hash != command.expected_version.target_hash
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "TARGET_CONTENT_CHANGED", "message": "基础剧本内容已变化"},
+        )
+    option_id = command.payload.get("option_id")
+    option = next(
+        (item for item in proposal["alternatives"] if item.get("option_id") == option_id),
+        None,
+    )
+    if option is None:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "DIRECTOR_OPTION_INVALID", "message": "选择的修复方案不存在"},
+        )
+    change = dict(option["proposed_change"])
+    change_scope = str(change["scope"])
+    change_entity_id = str(change["entity_id"])
+    if change_scope == "SCENE":
+        target_entity = session.get(ScriptScene, change_entity_id)
+        if (
+            target_entity is None
+            or target_entity.id != proposal["script_scene_id"]
+            or target_entity.script_version_id != base_script.id
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "DIRECTOR_TARGET_CHANGED",
+                    "message": "Proposal 的 Scene 目标已变化",
+                },
+            )
+        validated_changes = ScriptSceneUpdateRequest(
+            expected_version=expected_version,
+            **dict(change["changes"]),
+        ).model_dump(exclude={"expected_version"}, exclude_none=True)
+    else:
+        target_entity = session.get(ScriptLine, change_entity_id)
+        target_scene = (
+            session.get(ScriptScene, target_entity.script_scene_id)
+            if target_entity is not None
+            else None
+        )
+        if (
+            target_entity is None
+            or target_scene is None
+            or target_scene.id != proposal["script_scene_id"]
+            or target_scene.script_version_id != base_script.id
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "DIRECTOR_TARGET_CHANGED",
+                    "message": "Proposal 的 Line 目标已变化",
+                },
+            )
+        validated_changes = ScriptLineUpdateRequest(
+            expected_version=expected_version,
+            **dict(change["changes"]),
+        ).model_dump(exclude={"expected_version"}, exclude_none=True)
+    for field, expected in dict(change["before"]).items():
+        if getattr(target_entity, field, object()) != expected:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "DIRECTOR_SOURCE_CHANGED",
+                    "message": "Director 审查使用的原始字段已变化，请重新审查",
+                    "details": {"field": field},
+                },
+            )
+    preserved = list(dict(impact["impact"]).get("preserved_objects", []))
+    _assert_preserved_director_objects(session, preserved)
+    result = revise_script(
+        session,
+        script_id=base_script.id,
+        expected_version=expected_version,
+        scope=change_scope,
+        entity_id=change_entity_id,
+        changes=validated_changes,
+        commit=False,
+        allow_director_revision=True,
+    )
+    revised_scene, revised_line = _revised_entity(
+        session,
+        source_scene_id=str(proposal["script_scene_id"]),
+        source_entity_id=change_entity_id,
+        revised_script_id=str(result["id"]),
+        scope=change_scope,
+    )
+    downstream = dict(impact["impact"])
+    shot_ids = list(downstream.get("shot_ids", []))
+    take_ids = list(downstream.get("take_ids", []))
+    timeline_clip_ids = list(downstream.get("timeline_clip_ids", []))
+    for shot in session.scalars(select(Shot).where(Shot.id.in_(shot_ids))):
+        shot.status = "SUSPECT"
+    for take in session.scalars(select(Take).where(Take.id.in_(take_ids))):
+        take.status = "SUSPECT"
+    for clip in session.scalars(select(TimelineClip).where(TimelineClip.id.in_(timeline_clip_ids))):
+        clip.degraded = True
+    _assert_preserved_director_objects(session, preserved)
+    after_values = {
+        key: getattr(revised_line or revised_scene, key) for key in dict(change["changes"])
+    }
+    impact["selected_option_id"] = option_id
+    impact["result_script_version_id"] = result["id"]
+    impact["comparison"] = {
+        "before": change["before"],
+        "after": after_values,
+        "base_script_version_id": base_script.id,
+        "result_script_version_id": result["id"],
+        "estimated_duration_before_ms": sum(
+            int(item["estimated_duration_ms"]) for item in dict(impact["context"]).get("lines", [])
+        ),
+        "estimated_duration_after_ms": sum(
+            line.estimated_duration_ms
+            for line in session.scalars(
+                select(ScriptLine).where(ScriptLine.script_scene_id == revised_scene.id)
+            )
+        ),
+        "media_generation": False,
+    }
+    impact["invalidated"] = downstream.get("affected_objects", [])
+    change_set.impact_json = canonical_json(impact)
+    change_set.status = "APPLIED_PENDING_APPROVAL"
+    session.flush()
+    return MutationResult(
+        result={
+            "proposal": director_proposal_to_read(change_set),
+            "script": result,
+        },
+        entity_type="director_proposal",
+        entity_id=change_set.id,
+        before_hash=base_script.content_hash,
+        after_hash=str(result["content_hash"]),
+    )
+
+
+def _execute_decide_director_proposal(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    _require_explicit_user_confirmation(command)
+    project, change_set, impact = _director_proposal_target(
+        session, project_id=project_id, command=command
+    )
+    expected_version = command.expected_version.project_lock_version
+    if expected_version is None or project.lock_version != expected_version:
+        raise version_conflict(project, expected_version or 0)
+    proposal = dict(impact["proposal"])
+    decision = command.payload.get("decision")
+    before_hash = content_hash(impact)
+    target_script = session.get(ScriptVersion, command.target_version_id)
+    if command.expected_version.target_hash is not None and (
+        target_script is None or target_script.content_hash != command.expected_version.target_hash
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "TARGET_CONTENT_CHANGED",
+                "message": "Director 决策目标版本已变化",
+            },
+        )
+    if decision == "REJECT":
+        if change_set.status != "PROPOSED":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "DIRECTOR_REJECT_REQUIRES_PENDING",
+                    "message": "已执行的 Proposal 请使用 Rollback",
+                },
+            )
+        _validate_target(
+            command,
+            object_id=change_set.id,
+            version_id=str(proposal["base_script_version_id"]),
+        )
+        change_set.status = "REJECTED"
+    elif decision == "APPROVE":
+        result_script_id = str(impact.get("result_script_version_id") or "")
+        if change_set.status != "APPLIED_PENDING_APPROVAL" or not result_script_id:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "DIRECTOR_APPROVAL_NOT_READY", "message": "Proposal 尚未执行"},
+            )
+        _validate_target(command, object_id=change_set.id, version_id=result_script_id)
+        change_set.status = "APPROVED"
+        impact["approval_result"] = {
+            "decision": "APPROVE",
+            "actor": command.actor.id,
+            "at": datetime.now(UTC).isoformat(),
+        }
+    elif decision == "ROLLBACK":
+        result_script_id = str(impact.get("result_script_version_id") or "")
+        if change_set.status != "APPLIED_PENDING_APPROVAL" or not result_script_id:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "DIRECTOR_ROLLBACK_NOT_READY", "message": "Proposal 尚未执行"},
+            )
+        _validate_target(command, object_id=change_set.id, version_id=result_script_id)
+        option_id = str(impact["selected_option_id"])
+        option = next(item for item in proposal["alternatives"] if item["option_id"] == option_id)
+        change = dict(option["proposed_change"])
+        revised_scene, revised_line = _revised_entity(
+            session,
+            source_scene_id=str(proposal["script_scene_id"]),
+            source_entity_id=str(change["entity_id"]),
+            revised_script_id=result_script_id,
+            scope=str(change["scope"]),
+        )
+        rollback = revise_script(
+            session,
+            script_id=result_script_id,
+            expected_version=expected_version,
+            scope=str(change["scope"]),
+            entity_id=(revised_line or revised_scene).id,
+            changes=dict(change["before"]),
+            commit=False,
+            allow_director_revision=True,
+        )
+        impact["rollback_script_version_id"] = rollback["id"]
+        impact["approval_result"] = {
+            "decision": "ROLLBACK",
+            "actor": command.actor.id,
+            "at": datetime.now(UTC).isoformat(),
+        }
+        change_set.status = "ROLLED_BACK"
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "DIRECTOR_DECISION_INVALID", "message": "决策类型无效"},
+        )
+    change_set.impact_json = canonical_json(impact)
+    session.flush()
+    return MutationResult(
+        result=director_proposal_to_read(change_set),
+        entity_type="director_proposal",
+        entity_id=change_set.id,
+        before_hash=before_hash,
+        after_hash=content_hash({"status": change_set.status, "impact": change_set.impact_json}),
     )
 
 
@@ -1416,6 +1922,24 @@ def dispatch_domain_command(
             )
         elif command.command_type == "RESTORE_CHARACTER_IDENTITY":
             mutation = _execute_character_identity_restore(
+                session,
+                project_id=project_id,
+                command=command,
+            )
+        elif command.command_type == "CREATE_DIRECTOR_PROPOSAL":
+            mutation = _execute_create_director_proposal(
+                session,
+                project_id=project_id,
+                command=command,
+            )
+        elif command.command_type == "APPLY_DIRECTOR_PROPOSAL":
+            mutation = _execute_apply_director_proposal(
+                session,
+                project_id=project_id,
+                command=command,
+            )
+        elif command.command_type == "DECIDE_DIRECTOR_PROPOSAL":
+            mutation = _execute_decide_director_proposal(
                 session,
                 project_id=project_id,
                 command=command,

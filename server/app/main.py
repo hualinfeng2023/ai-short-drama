@@ -14,6 +14,7 @@ from app.api.v1.audio import router as audio_router
 from app.api.v1.character_visuals import router as character_visuals_router
 from app.api.v1.commands import router as commands_router
 from app.api.v1.delivery import router as delivery_router
+from app.api.v1.director import router as director_router
 from app.api.v1.events import router as events_router
 from app.api.v1.exports import router as exports_router
 from app.api.v1.film_ir import router as film_ir_router
@@ -89,6 +90,7 @@ install_error_handlers(app)
 app.include_router(health_router)
 app.include_router(projects_router)
 app.include_router(commands_router)
+app.include_router(director_router)
 app.include_router(jobs_router)
 app.include_router(proposals_router)
 app.include_router(relationship_graphs_router)
