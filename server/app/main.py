@@ -12,9 +12,11 @@ from app.api.trace import trace_id_context
 from app.api.v1.assets import router as assets_router
 from app.api.v1.audio import router as audio_router
 from app.api.v1.character_visuals import router as character_visuals_router
+from app.api.v1.commands import router as commands_router
 from app.api.v1.delivery import router as delivery_router
 from app.api.v1.events import router as events_router
 from app.api.v1.exports import router as exports_router
+from app.api.v1.film_ir import router as film_ir_router
 from app.api.v1.health import router as health_router
 from app.api.v1.jobs import router as jobs_router
 from app.api.v1.preproduction import router as preproduction_router
@@ -86,6 +88,7 @@ async def attach_trace_id(request: Request, call_next):  # noqa: ANN001, ANN201
 install_error_handlers(app)
 app.include_router(health_router)
 app.include_router(projects_router)
+app.include_router(commands_router)
 app.include_router(jobs_router)
 app.include_router(proposals_router)
 app.include_router(relationship_graphs_router)
@@ -104,6 +107,7 @@ app.include_router(provider_settings_router)
 app.include_router(revisions_router)
 app.include_router(reviews_router)
 app.include_router(exports_router)
+app.include_router(film_ir_router)
 
 STATIC_ROOT = Path(__file__).resolve().parent / "static"
 if (STATIC_ROOT / "index.html").is_file():

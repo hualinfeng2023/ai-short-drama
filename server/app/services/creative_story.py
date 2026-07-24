@@ -1189,6 +1189,7 @@ def revise_script(
     scope: str,
     entity_id: str,
     changes: dict[str, object],
+    commit: bool = True,
 ) -> dict[str, object]:
     source = session.get(ScriptVersion, script_id)
     if source is None:
@@ -1343,7 +1344,10 @@ def revise_script(
             "entity_id": entity_id,
         },
     )
-    session.commit()
+    if commit:
+        session.commit()
+    else:
+        session.flush()
     return {
         "id": revised.id,
         "version": revised.version,
@@ -1361,6 +1365,7 @@ def approve_script(
     expected_version: int,
     actor: str,
     trace_id: str,
+    commit: bool = True,
 ) -> tuple[dict[str, object], JobRead, bool]:
     script = session.get(ScriptVersion, script_id)
     if script is None:
@@ -1442,6 +1447,8 @@ def approve_script(
         event_type="script.approved",
         payload={"script_id": script.id, "episode_ordinal": script.episode_ordinal},
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     session.refresh(job)
     return _version_payload(script), job_to_read(job), replayed

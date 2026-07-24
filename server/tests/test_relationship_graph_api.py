@@ -9,6 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from app.config import get_settings
 from app.db.models import (
     Asset,
+    AuditLog,
     ChangeSet,
     Character,
     CharacterCandidateBatch,
@@ -540,6 +541,101 @@ async def test_relationship_graph_edit_review_lock_and_revision_flow(client: Asy
     )
     assert revision.status_code == 409
     assert revision.json()["error"]["code"] == "DOWNSTREAM_IMPACT_CONFIRMATION_REQUIRED"
+
+
+@pytest.mark.anyio
+async def test_character_profile_writes_use_idempotent_command_boundary(
+    client: AsyncClient,
+) -> None:
+    prepare_relationship_project()
+    graph = await create_graph(client)
+    approved = await client.post(
+        f"/api/v1/relationship-graphs/{graph['id']}/approve",
+        json={"expected_project_version": 2, "expected_graph_version": 1, "actor": "reviewer"},
+    )
+    assert approved.status_code == 200, approved.text
+    workspace = (
+        await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")
+    ).json()["data"]
+    character = workspace["characters"][0]
+    character_id = character["id"]
+
+    update_request = {
+        "expected_version": character["lock_version"],
+        "selected_direction": "冷峻纪实",
+        "actor": "command-tester",
+    }
+    update_headers = {"Idempotency-Key": f"character-profile-update:{character_id}"}
+    endpoint = f"/api/v1/projects/{PROJECT_ID}/characters/{character_id}/visual-profile"
+    updated = await client.patch(endpoint, json=update_request, headers=update_headers)
+    assert updated.status_code == 200, updated.text
+    assert updated.headers["Idempotency-Replayed"] == "false"
+    assert updated.json()["data"]["selected_direction"] == "冷峻纪实"
+
+    update_replay = await client.patch(endpoint, json=update_request, headers=update_headers)
+    assert update_replay.status_code == 200, update_replay.text
+    assert update_replay.headers["Idempotency-Replayed"] == "true"
+    assert update_replay.json()["data"] == updated.json()["data"]
+
+    update_conflict = await client.patch(
+        endpoint,
+        json={**update_request, "selected_direction": "相同键的不同内容"},
+        headers=update_headers,
+    )
+    assert update_conflict.status_code == 409
+    assert update_conflict.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+
+    refreshed = (
+        await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")
+    ).json()["data"]
+    current = next(item for item in refreshed["characters"] if item["id"] == character_id)
+    confirm_request = {
+        "expected_version": current["lock_version"],
+        "profile_version_id": current["profile"]["id"],
+        "actor": "command-tester",
+    }
+    confirm_headers = {"Idempotency-Key": f"character-profile-confirm:{character_id}"}
+    confirm_endpoint = f"{endpoint}/confirm"
+    confirmed = await client.post(
+        confirm_endpoint,
+        json=confirm_request,
+        headers=confirm_headers,
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.headers["Idempotency-Replayed"] == "false"
+    assert confirmed.json()["data"]["status"] == "CONFIRMED"
+
+    confirm_replay = await client.post(
+        confirm_endpoint,
+        json=confirm_request,
+        headers=confirm_headers,
+    )
+    assert confirm_replay.status_code == 200, confirm_replay.text
+    assert confirm_replay.headers["Idempotency-Replayed"] == "true"
+    assert confirm_replay.json()["data"] == confirmed.json()["data"]
+
+    factory = sessionmaker(bind=get_engine(get_settings().database_url), expire_on_commit=False)
+    with factory() as session:
+        audits = list(
+            session.scalars(
+                select(AuditLog)
+                .where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.action.in_(
+                        [
+                            "UPDATE_CHARACTER_VISUAL_PROFILE",
+                            "CONFIRM_CHARACTER_VISUAL_PROFILE",
+                        ]
+                    ),
+                )
+                .order_by(AuditLog.created_at)
+            ).all()
+        )
+        assert [item.action for item in audits] == [
+            "UPDATE_CHARACTER_VISUAL_PROFILE",
+            "CONFIRM_CHARACTER_VISUAL_PROFILE",
+        ]
+        assert all(item.before_hash != item.after_hash for item in audits)
 
 
 @pytest.mark.anyio
@@ -1307,8 +1403,22 @@ async def test_character_identity_can_restore_a_previous_locked_baseline(
             "identity_version_id": second_identity_id,
             "actor": "tester",
         },
+        headers={"Idempotency-Key": "second-identity-lock-v1"},
     )
     assert second_lock.status_code == 200, second_lock.text
+    assert second_lock.headers["Idempotency-Replayed"] == "false"
+    second_lock_replay = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/characters/{character['id']}/identity/lock",
+        json={
+            "expected_version": character["lock_version"],
+            "identity_version_id": second_identity_id,
+            "actor": "tester",
+        },
+        headers={"Idempotency-Key": "second-identity-lock-v1"},
+    )
+    assert second_lock_replay.status_code == 200, second_lock_replay.text
+    assert second_lock_replay.headers["Idempotency-Replayed"] == "true"
+    assert second_lock_replay.json()["data"] == second_lock.json()["data"]
     current = (await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")).json()["data"]
     character = next(item for item in current["characters"] if item["id"] == character["id"])
     assert character["locked_identity_version_id"] == second_identity_id
@@ -1320,9 +1430,23 @@ async def test_character_identity_can_restore_a_previous_locked_baseline(
             "identity_version_id": first_identity_id,
             "actor": "tester",
         },
+        headers={"Idempotency-Key": "restore-first-identity-v1"},
     )
     assert restored.status_code == 200, restored.text
+    assert restored.headers["Idempotency-Replayed"] == "false"
     assert restored.json()["data"]["existing_shots_preserved"] is True
+    restored_replay = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/characters/{character['id']}/identity/restore",
+        json={
+            "expected_version": character["lock_version"],
+            "identity_version_id": first_identity_id,
+            "actor": "tester",
+        },
+        headers={"Idempotency-Key": "restore-first-identity-v1"},
+    )
+    assert restored_replay.status_code == 200, restored_replay.text
+    assert restored_replay.headers["Idempotency-Replayed"] == "true"
+    assert restored_replay.json()["data"] == restored.json()["data"]
     current = (await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")).json()["data"]
     character = next(item for item in current["characters"] if item["id"] == character["id"])
     assert character["locked_identity_version_id"] == first_identity_id
@@ -1330,6 +1454,29 @@ async def test_character_identity_can_restore_a_previous_locked_baseline(
     assert statuses[first_identity_id] == "LOCKED"
     assert statuses[second_identity_id] == "SUPERSEDED"
     assert len(character["looks"]) == 3
+    with factory() as session:
+        audits = list(
+            session.scalars(
+                select(AuditLog)
+                .where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.action.in_(
+                        [
+                            "LOCK_CHARACTER_IDENTITY",
+                            "RESTORE_CHARACTER_IDENTITY",
+                        ]
+                    ),
+                )
+                .order_by(AuditLog.created_at)
+            ).all()
+        )
+        assert [item.action for item in audits].count("LOCK_CHARACTER_IDENTITY") == 2
+        assert [item.action for item in audits].count("RESTORE_CHARACTER_IDENTITY") == 1
+        assert [item.action for item in audits][-2:] == [
+            "LOCK_CHARACTER_IDENTITY",
+            "RESTORE_CHARACTER_IDENTITY",
+        ]
+        assert all(item.before_hash != item.after_hash for item in audits)
 
 
 @pytest.mark.parametrize(
@@ -1830,7 +1977,11 @@ async def test_character_revision_requires_review_and_creates_synchronized_draft
             "height": "170 cm",
             "occupation": "调查记者",
             "personality": ["敏锐", "克制"],
-            "visual_notes": "短发，佩戴细框眼镜。族裔／文化背景为“爱尔兰裔美国人”；具体外貌应与该身份一致，同时保留自然个体差异，不添加刻板五官、服饰或文化符号。",
+            "visual_notes": (
+                "短发，佩戴细框眼镜。族裔／文化背景为“爱尔兰裔美国人”；"
+                "具体外貌应与该身份一致，同时保留自然个体差异，"
+                "不添加刻板五官、服饰或文化符号。"
+            ),
         },
         "expected_version": 2,
     }

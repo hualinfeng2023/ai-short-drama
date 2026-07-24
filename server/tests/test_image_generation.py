@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.db.models import Asset, Job, Take
+from app.db.models import Asset, AuditLog, GenerationRecord, Job, Take
 from app.db.session import get_engine
 from app.jobs.contracts import JobExecutionContext, JobExecutionError
 from app.jobs.handlers.production import _generate_character_image
@@ -21,6 +21,93 @@ from app.services.identity_consistency import evaluate_identity_consistency
 from app.services.image_provider import GeneratedImage, generate_image
 
 pytestmark = pytest.mark.anyio
+
+
+async def test_shot_binding_writes_use_idempotent_command_boundary(
+    client: AsyncClient,
+) -> None:
+    workspace = (await client.get(f"/api/v1/projects/{PROJECT_ID}/workspace")).json()["data"]
+    shot = next(item for item in workspace["shots"] if item["id"] == SHOT_IDS[0])
+    endpoint = f"/api/v1/shots/{shot['id']}/character-bindings"
+    request = {
+        "expected_version": shot["lock_version"],
+        "character_ids": shot["character_ids"],
+        "look_version": "Look Command V2",
+    }
+    headers = {"Idempotency-Key": "shot-bindings-command-v2"}
+
+    updated = await client.put(endpoint, json=request, headers=headers)
+    assert updated.status_code == 200, updated.text
+    assert updated.headers["Idempotency-Replayed"] == "false"
+    assert updated.json()["data"]["character_look_version"] == "Look Command V2"
+
+    replayed = await client.put(endpoint, json=request, headers=headers)
+    assert replayed.status_code == 200, replayed.text
+    assert replayed.headers["Idempotency-Replayed"] == "true"
+    assert replayed.json()["data"] == updated.json()["data"]
+
+    conflict = await client.put(
+        endpoint,
+        json={**request, "look_version": "相同键的不同绑定"},
+        headers=headers,
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+
+    with Session(get_engine(get_settings().database_url)) as session:
+        audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.action == "SET_SHOT_CHARACTER_BINDINGS",
+                )
+            ).all()
+        )
+        assert len(audits) == 1
+        assert audits[0].entity_id == shot["id"]
+        assert audits[0].before_hash != audits[0].after_hash
+
+
+async def test_apply_take_uses_idempotent_command_boundary(client: AsyncClient) -> None:
+    created = await client.post(
+        f"/api/v1/shots/{SHOT_IDS[0]}/takes",
+        json={"resolution": "2K"},
+        headers={"Idempotency-Key": "apply-command-source-v1"},
+    )
+    assert created.status_code == 202, created.text
+    worker = PersistentJobWorker(get_settings())
+    assert await worker.run_once() is True
+
+    identity_approved = await client.post(
+        f"/api/v1/shots/{SHOT_IDS[0]}/takes/candidate/identity-approve",
+        json={"actor": "test-reviewer"},
+    )
+    assert identity_approved.status_code == 200, identity_approved.text
+
+    endpoint = f"/api/v1/shots/{SHOT_IDS[0]}/takes/candidate/apply"
+    headers = {"Idempotency-Key": "apply-take-command-v1"}
+    applied = await client.post(endpoint, headers=headers)
+    assert applied.status_code == 200, applied.text
+    assert applied.headers["Idempotency-Replayed"] == "false"
+    assert applied.json()["data"]["candidate_take"] is None
+    assert applied.json()["data"]["status"] == "APPROVED"
+
+    replayed = await client.post(endpoint, headers=headers)
+    assert replayed.status_code == 200, replayed.text
+    assert replayed.headers["Idempotency-Replayed"] == "true"
+    assert replayed.json()["data"] == applied.json()["data"]
+
+    with Session(get_engine(get_settings().database_url)) as session:
+        audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.action == "APPLY_SHOT_TAKE",
+                )
+            ).all()
+        )
+        assert len(audits) == 1
+        assert audits[0].before_hash != audits[0].after_hash
 
 
 async def test_character_reference_prompt_forbids_reproducing_text_or_marks() -> None:
@@ -485,16 +572,39 @@ async def test_shot_generation_job_persists_and_applies_take(
         headers={"Idempotency-Key": "review-and-apply-v3"},
     )
     assert reviewed.status_code == 200
+    assert reviewed.headers["Idempotency-Replayed"] == "false"
     applied = reviewed.json()["data"]["shot"]
     assert applied["current_take"] == 3
     assert applied["candidate_take"] is None
     assert applied["current_image_url"].endswith("/content")
     assert applied["current_identity_review"]["decision"] == "APPROVE_AND_APPLY"
     assert applied["current_identity_review"]["actor"] == "test-reviewer"
+    reviewed_replay = await client.post(
+        f"/api/v1/shots/{SHOT_IDS[0]}/takes/candidate/review",
+        json={
+            "decision": "APPROVE_AND_APPLY",
+            "issues": [],
+            "note": "与锁定参考图一致",
+            "expected_version": shot["lock_version"],
+            "actor": "test-reviewer",
+        },
+        headers={"Idempotency-Key": "review-and-apply-v3"},
+    )
+    assert reviewed_replay.status_code == 200
+    assert reviewed_replay.headers["Idempotency-Replayed"] == "true"
+    assert reviewed_replay.json()["data"] == reviewed.json()["data"]
 
     with Session(get_engine(get_settings().database_url)) as session:
         take = session.scalar(select(Take).where(Take.shot_id == SHOT_IDS[0]))
         assert take is not None and take.is_current is True
+        assert take.generation_record_id is not None
+        generation = session.get(GenerationRecord, take.generation_record_id)
+        assert generation is not None
+        assert generation.job_id == job["id"]
+        assert generation.capability == "SHOT_IMAGE"
+        generation_metadata = json.loads(generation.metadata_json)
+        assert generation_metadata["trace_id"]
+        assert generation_metadata["job_type"] == "GENERATE_SHOT_IMAGE"
         assert take.identity_review_decision == "APPROVE_AND_APPLY"
         assert take.identity_reviewed_at is not None
         asset = session.get(Asset, take.asset_id)
@@ -541,12 +651,27 @@ async def test_identity_review_regenerates_with_selected_issue_guidance(
         headers={"Idempotency-Key": "review-regenerate-with-guidance"},
     )
     assert regenerated.status_code == 200
+    assert regenerated.headers["Idempotency-Replayed"] == "false"
     result = regenerated.json()["data"]
     assert result["action"] == "REGENERATE"
     assert result["job"]["status"] == "PENDING"
     assert result["shot"]["status"] == "GENERATING"
     assert result["shot"]["candidate_take"] == rejected_version + 1
     assert result["shot"]["latest_identity_review"]["issues"] == ["HAIR", "WARDROBE"]
+    regenerated_replay = await client.post(
+        f"/api/v1/shots/{SHOT_IDS[0]}/takes/candidate/review",
+        json={
+            "decision": "REGENERATE",
+            "issues": ["HAIR", "WARDROBE"],
+            "note": "刘海和外套需要更贴近参考图",
+            "expected_version": shot["lock_version"],
+            "actor": "test-reviewer",
+        },
+        headers={"Idempotency-Key": "review-regenerate-with-guidance"},
+    )
+    assert regenerated_replay.status_code == 200
+    assert regenerated_replay.headers["Idempotency-Replayed"] == "true"
+    assert regenerated_replay.json()["data"] == regenerated.json()["data"]
 
     with Session(get_engine(get_settings().database_url)) as session:
         rejected = session.scalar(

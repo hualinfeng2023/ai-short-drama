@@ -40,6 +40,7 @@ from app.schemas import JobRead
 from app.services.assets import register_file, resolve_asset_path
 from app.services.character_image_qc import detect_lower_right_watermark
 from app.services.events import append_event
+from app.services.generation_records import ensure_generation_record
 from app.services.image_provider import GeneratedImage
 from app.services.jobs import enqueue_job, job_to_read
 from app.services.media import PreviewFiles, PreviewShot
@@ -293,7 +294,9 @@ def resolve_storyboard_take_generation_inputs(
             )
         ).all()
     } if ordered_ids else {}
-    characters = [characters_by_id[item_id] for item_id in ordered_ids if item_id in characters_by_id]
+    characters = [
+        characters_by_id[item_id] for item_id in ordered_ids if item_id in characters_by_id
+    ]
     reference_asset_ids: list[str] = []
     for character in characters:
         for asset_id in _character_reference_asset_ids(session, character):
@@ -802,6 +805,38 @@ def materialize_storyboard_take(
     if spec is None or shot is None or storyboard is None:
         raise ValueError("分镜任务实体不存在")
     replace_existing = bool(payload.get("replace_existing"))
+    identity_refs = [
+        item for item in payload.get("reference_asset_ids", []) if isinstance(item, str)
+    ]
+
+    def trace_generation(asset: Asset, take: Take, *, reused: bool) -> None:
+        record = ensure_generation_record(
+            session,
+            job=job,
+            capability="STORYBOARD_TAKE",
+            provider=asset.provider,
+            model=image.model,
+            config_version="storyboard-take-v1",
+            prompt=str(payload.get("prompt", "")),
+            seed=payload.get("seed"),
+            reference_asset_ids=identity_refs,
+            provider_request_id=image.request_id,
+            provider_task_id=None,
+            output_asset_id=asset.id,
+            entity_type="take",
+            entity_id=take.id,
+            estimated_cost_usd=0.0 if asset.provider == "mock" else None,
+            metadata={
+                "take_kind": take.kind,
+                "take_version": take.version,
+                "storyboard_version_id": storyboard.id,
+                "shot_spec_id": spec.id,
+                "reused_existing_output": reused,
+                "replace_existing": replace_existing,
+            },
+        )
+        take.generation_record_id = record.id
+
     current_take = session.scalar(
         select(Take).where(
             Take.shot_id == shot.id,
@@ -818,10 +853,12 @@ def materialize_storyboard_take(
                 metadata = {}
             # 同一 job 重试时直接返回已登记结果，避免重复造 Take
             if isinstance(metadata, dict) and metadata.get("job_id") == job.id:
+                trace_generation(current_asset, current_take, reused=True)
                 return current_asset, current_take, None
         if not replace_existing:
             if current_asset is None:
                 raise ValueError("分镜版本资产不存在")
+            trace_generation(current_asset, current_take, reused=True)
             return current_asset, current_take, None
     tmp_dir = settings.data_dir / "tmp" / job.id / "storyboard-take"
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -856,9 +893,6 @@ def materialize_storyboard_take(
         }
     )
     now = datetime.now(UTC)
-    identity_refs = [
-        item for item in payload.get("reference_asset_ids", []) if isinstance(item, str)
-    ]
     next_version = 1
     parent_take_id = None
     if current_take is not None and replace_existing:
@@ -891,6 +925,7 @@ def materialize_storyboard_take(
         created_at=now,
     )
     session.add(take)
+    trace_generation(asset, take, reused=False)
     shot.current_take = next_version
     shot.current_take_id = take.id
     shot.status = "READY"
@@ -1556,6 +1591,7 @@ def approve_storyboard(
     expected_version: int,
     actor: str,
     trace_id: str,
+    commit: bool = True,
 ) -> tuple[dict[str, object], JobRead, bool]:
     storyboard = session.get(StoryboardVersion, storyboard_id)
     if storyboard is None:
@@ -1619,7 +1655,9 @@ def approve_storyboard(
         event_type="storyboard.approved",
         payload={"storyboard_version_id": storyboard.id},
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     session.refresh(job)
     return (
         {

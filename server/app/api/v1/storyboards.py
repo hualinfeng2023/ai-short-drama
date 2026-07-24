@@ -1,11 +1,16 @@
-from fastapi import APIRouter, Depends, Header, Response, status
+from uuid import NAMESPACE_URL, uuid5
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
 from app.api.trace import get_trace_id, success
+from app.db.models import StoryboardVersion
 from app.db.session import get_session
+from app.domain.commands import CommandActor, DirectorCommand, ExpectedVersion
 from app.schemas import StoryboardShotRegenerateRequest, StoryPackageGenerateRequest
+from app.services.domain_commands import dispatch_domain_command
+from app.services.projects import content_hash
 from app.services.storyboards_v2 import (
-    approve_storyboard,
     list_workflow_runs,
     regenerate_storyboard_shot,
     storyboard_workspace,
@@ -57,15 +62,45 @@ def approve_storyboard_version(
     storyboard_id: str,
     payload: StoryPackageGenerateRequest,
     response: Response,
-    _idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=160),
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=160),
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
-    storyboard, job, replayed = approve_storyboard(
-        session,
-        storyboard_id=storyboard_id,
-        expected_version=payload.expected_version,
-        actor=payload.actor,
-        trace_id=get_trace_id(),
+    storyboard = session.get(StoryboardVersion, storyboard_id)
+    if storyboard is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "NOT_FOUND", "message": "分镜版本不存在"},
+        )
+    command_id = str(
+        uuid5(NAMESPACE_URL, f"{storyboard.project_id}:domain-command:{idempotency_key}")
     )
-    response.headers["Idempotency-Replayed"] = str(replayed).lower()
-    return success({"storyboard": storyboard, "job": job})
+    execution = dispatch_domain_command(
+        session,
+        project_id=storyboard.project_id,
+        command=DirectorCommand(
+            command_id=command_id,
+            command_type="APPROVE_STORYBOARD",
+            actor=CommandActor(type="USER", id=payload.actor),
+            target_object_id=storyboard.id,
+            target_version_id=storyboard.id,
+            expected_version=ExpectedVersion(
+                project_lock_version=payload.expected_version,
+                target_version_id=storyboard.id,
+                target_hash=storyboard.content_hash,
+            ),
+            payload={"confirmed": True},
+            idempotency_key=idempotency_key,
+        ),
+        request_fingerprint=content_hash(
+            {
+                "route": f"storyboard-approval:{storyboard.id}",
+                "expected_version": payload.expected_version,
+                "actor": payload.actor,
+                "confirmed": True,
+            }
+        ),
+    )
+    response.headers["Idempotency-Replayed"] = str(
+        execution.idempotency_replayed
+    ).lower()
+    return success(execution.result)

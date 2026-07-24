@@ -2,9 +2,15 @@ import json
 from datetime import UTC, datetime
 
 import pytest
+from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.orm import sessionmaker
+
 from app.config import get_settings
 from app.db.models import (
+    AuditLog,
     EpisodeOutlineVersion,
+    EventLog,
     Project,
     ScriptLine,
     ScriptScene,
@@ -15,9 +21,6 @@ from app.db.models import (
 from app.db.session import get_engine
 from app.seed import PROJECT_ID
 from app.services.projects import canonical_json, content_hash
-from httpx import AsyncClient
-from sqlalchemy import select
-from sqlalchemy.orm import sessionmaker
 
 STORY_ID = "93000000-0000-4000-8000-000000000001"
 BIBLE_ID = "93000000-0000-4000-8000-000000000002"
@@ -284,3 +287,167 @@ async def test_excerpt_rewrite_retry_history_and_apply(client: AsyncClient) -> N
     )
     assert stale.status_code == 409
     assert stale.json()["error"]["code"] == "SCRIPT_REWRITE_SOURCE_CHANGED"
+
+
+@pytest.mark.anyio
+async def test_domain_command_revises_script_idempotently(client: AsyncClient) -> None:
+    prepare_script()
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        source = session.get(ScriptVersion, SCRIPT_ID)
+        assert source is not None
+        source_hash = source.content_hash
+
+    command = {
+        "command_id": "94000000-0000-4000-8000-000000000001",
+        "command_type": "REVISE_SCRIPT",
+        "actor": {"type": "USER", "id": "test-writer"},
+        "target_object_id": SCRIPT_ID,
+        "target_version_id": SCRIPT_ID,
+        "expected_version": {
+            "project_lock_version": 8,
+            "target_version_id": SCRIPT_ID,
+            "target_hash": source_hash,
+        },
+        "payload": {
+            "scope": "LINE",
+            "entity_id": LINE_ID,
+            "changes": {"text": "灯灭以后，我只等你十秒。"},
+        },
+        "idempotency_key": "revise-script-command-v1",
+    }
+    executed = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/commands",
+        json=command,
+    )
+    assert executed.status_code == 200, executed.text
+    assert executed.headers["Idempotency-Replayed"] == "false"
+    execution = executed.json()["data"]
+    assert execution["command_id"] == command["command_id"]
+    assert execution["status"] == "SUCCEEDED"
+    assert execution["result"]["version"] == 2
+
+    replayed = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/commands",
+        json=command,
+    )
+    assert replayed.status_code == 200, replayed.text
+    assert replayed.headers["Idempotency-Replayed"] == "true"
+    assert replayed.json()["data"]["result"] == execution["result"]
+
+    conflict = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/commands",
+        json={
+            **command,
+            "command_id": "94000000-0000-4000-8000-000000000002",
+            "payload": {
+                **command["payload"],
+                "changes": {"text": "这次提交使用了不同的正文。"},
+            },
+        },
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+
+    with factory() as session:
+        audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.action == "REVISE_SCRIPT",
+                )
+            ).all()
+        )
+        assert len(audits) == 1
+        assert audits[0].actor == "test-writer"
+        assert audits[0].before_hash == source_hash
+        assert audits[0].after_hash == execution["result"]["content_hash"]
+        events = list(
+            session.scalars(
+                select(EventLog).where(
+                    EventLog.project_id == PROJECT_ID,
+                    EventLog.event_type == "domain_command.executed",
+                )
+            ).all()
+        )
+        assert len(events) == 1
+        event_payload = json.loads(events[0].payload_json)
+        assert event_payload["command_id"] == command["command_id"]
+
+
+@pytest.mark.anyio
+async def test_script_patch_adapter_replays_by_idempotency_key(client: AsyncClient) -> None:
+    prepare_script()
+    request = {
+        "expected_version": 8,
+        "text": "灯灭以后，我只等你十秒。",
+    }
+    headers = {"Idempotency-Key": "script-line-patch-v1"}
+    endpoint = f"/api/v1/scripts/{SCRIPT_ID}/lines/{LINE_ID}"
+
+    executed = await client.patch(endpoint, json=request, headers=headers)
+    assert executed.status_code == 200, executed.text
+    assert executed.headers["Idempotency-Replayed"] == "false"
+
+    replayed = await client.patch(endpoint, json=request, headers=headers)
+    assert replayed.status_code == 200, replayed.text
+    assert replayed.headers["Idempotency-Replayed"] == "true"
+    assert replayed.json()["data"] == executed.json()["data"]
+
+    conflict = await client.patch(
+        endpoint,
+        json={**request, "text": "相同幂等键不能提交不同内容。"},
+        headers=headers,
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+
+
+@pytest.mark.anyio
+async def test_approval_command_requires_explicit_user_actor(client: AsyncClient) -> None:
+    prepare_script()
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        source = session.get(ScriptVersion, SCRIPT_ID)
+        assert source is not None
+        source_hash = source.content_hash
+
+    rejected = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/commands",
+        json={
+            "command_id": "94000000-0000-4000-8000-000000000010",
+            "command_type": "APPROVE_SCRIPT",
+            "actor": {"type": "DIRECTOR", "id": "director-orchestrator"},
+            "target_object_id": SCRIPT_ID,
+            "target_version_id": SCRIPT_ID,
+            "expected_version": {
+                "project_lock_version": 8,
+                "target_version_id": SCRIPT_ID,
+                "target_hash": source_hash,
+            },
+            "payload": {"confirmed": True},
+            "idempotency_key": "director-cannot-approve-v1",
+        },
+    )
+    assert rejected.status_code == 409
+    assert rejected.json()["error"]["code"] == "USER_CONFIRMATION_REQUIRED"
+
+    with factory() as session:
+        source = session.get(ScriptVersion, SCRIPT_ID)
+        assert source is not None
+        assert source.status == "READY_FOR_REVIEW"
+        assert (
+            session.scalar(
+                select(AuditLog).where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.action == "APPROVE_SCRIPT",
+                )
+            )
+            is None
+        )

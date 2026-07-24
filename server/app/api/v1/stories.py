@@ -1,9 +1,13 @@
-from fastapi import APIRouter, Depends, Header, Response, status
+from uuid import NAMESPACE_URL, uuid4, uuid5
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
 from app.api.trace import get_trace_id, success
 from app.config import get_settings
+from app.db.models import ScriptVersion
 from app.db.session import get_session
+from app.domain.commands import CommandActor, DirectorCommand, ExpectedVersion
 from app.schemas import (
     CharacterRevisionCreateRequest,
     CharacterRevisionReviewRequest,
@@ -19,15 +23,15 @@ from app.schemas import (
 )
 from app.services.character_revisions import create_character_revision, review_character_revision
 from app.services.creative_story import (
-    approve_script,
     list_story_directions,
     merge_story_directions,
     request_story_directions,
     request_story_structure,
-    revise_script,
     story_package_estimate,
     story_workspace,
 )
+from app.services.domain_commands import dispatch_domain_command
+from app.services.projects import content_hash
 from app.services.script_rewrites import (
     apply_script_excerpt_rewrite,
     create_script_excerpt_rewrite,
@@ -35,6 +39,105 @@ from app.services.script_rewrites import (
 )
 
 router = APIRouter(prefix="/api/v1", tags=["story"])
+
+
+def _dispatch_script_revision(
+    session: Session,
+    *,
+    script_id: str,
+    expected_version: int,
+    scope: str,
+    entity_id: str,
+    changes: dict[str, object],
+    idempotency_key: str | None,
+) -> tuple[dict[str, object], bool]:
+    source = session.get(ScriptVersion, script_id)
+    if source is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "NOT_FOUND", "message": "剧本不存在"},
+        )
+    command_id = (
+        str(uuid5(NAMESPACE_URL, f"{source.project_id}:script-command:{idempotency_key}"))
+        if idempotency_key
+        else str(uuid4())
+    )
+    execution = dispatch_domain_command(
+        session,
+        project_id=source.project_id,
+        command=DirectorCommand(
+            command_id=command_id,
+            command_type="REVISE_SCRIPT",
+            actor=CommandActor(type="USER", id="demo-user"),
+            target_object_id=source.id,
+            target_version_id=source.id,
+            expected_version=ExpectedVersion(
+                project_lock_version=expected_version,
+                target_version_id=source.id,
+                target_hash=source.content_hash,
+            ),
+            payload={
+                "scope": scope,
+                "entity_id": entity_id,
+                "changes": changes,
+            },
+            idempotency_key=idempotency_key or f"script-adapter:{command_id}",
+        ),
+        request_fingerprint=content_hash(
+            {
+                "route": f"script-revision:{script_id}:{scope}:{entity_id}",
+                "expected_version": expected_version,
+                "changes": changes,
+            }
+        ),
+    )
+    return execution.result, execution.idempotency_replayed
+
+
+def _dispatch_script_approval(
+    session: Session,
+    *,
+    script_id: str,
+    expected_version: int,
+    actor: str,
+    idempotency_key: str,
+) -> tuple[dict[str, object], bool]:
+    script = session.get(ScriptVersion, script_id)
+    if script is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "NOT_FOUND", "message": "剧本不存在"},
+        )
+    command_id = str(
+        uuid5(NAMESPACE_URL, f"{script.project_id}:domain-command:{idempotency_key}")
+    )
+    execution = dispatch_domain_command(
+        session,
+        project_id=script.project_id,
+        command=DirectorCommand(
+            command_id=command_id,
+            command_type="APPROVE_SCRIPT",
+            actor=CommandActor(type="USER", id=actor),
+            target_object_id=script.id,
+            target_version_id=script.id,
+            expected_version=ExpectedVersion(
+                project_lock_version=expected_version,
+                target_version_id=script.id,
+                target_hash=script.content_hash,
+            ),
+            payload={"confirmed": True},
+            idempotency_key=idempotency_key,
+        ),
+        request_fingerprint=content_hash(
+            {
+                "route": f"script-approval:{script.id}",
+                "expected_version": expected_version,
+                "actor": actor,
+                "confirmed": True,
+            }
+        ),
+    )
+    return execution.result, execution.idempotency_replayed
 
 
 @router.post(
@@ -168,36 +271,44 @@ def approve_script_version(
     script_id: str,
     payload: ScriptApprovalRequest,
     response: Response,
-    _idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=160),
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=160),
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
-    script, job, replayed = approve_script(
+    result, replayed = _dispatch_script_approval(
         session,
         script_id=script_id,
         expected_version=payload.expected_version,
         actor=payload.actor,
-        trace_id=get_trace_id(),
+        idempotency_key=idempotency_key,
     )
     response.headers["Idempotency-Replayed"] = str(replayed).lower()
-    return success({"script": script, "job": job})
+    return success(result)
 
 
 @router.patch("/scripts/{script_id}")
 def update_script_episode(
     script_id: str,
     payload: ScriptEpisodeUpdateRequest,
+    response: Response,
+    idempotency_key: str | None = Header(
+        default=None,
+        alias="Idempotency-Key",
+        min_length=8,
+        max_length=160,
+    ),
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
-    return success(
-        revise_script(
-            session,
-            script_id=script_id,
-            expected_version=payload.expected_version,
-            scope="EPISODE",
-            entity_id=script_id,
-            changes={"title": payload.title},
-        )
+    result, replayed = _dispatch_script_revision(
+        session,
+        script_id=script_id,
+        expected_version=payload.expected_version,
+        scope="EPISODE",
+        entity_id=script_id,
+        changes={"title": payload.title},
+        idempotency_key=idempotency_key,
     )
+    response.headers["Idempotency-Replayed"] = str(replayed).lower()
+    return success(result)
 
 
 @router.patch("/scripts/{script_id}/scenes/{scene_id}")
@@ -205,18 +316,26 @@ def update_script_scene(
     script_id: str,
     scene_id: str,
     payload: ScriptSceneUpdateRequest,
+    response: Response,
+    idempotency_key: str | None = Header(
+        default=None,
+        alias="Idempotency-Key",
+        min_length=8,
+        max_length=160,
+    ),
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
-    return success(
-        revise_script(
-            session,
-            script_id=script_id,
-            expected_version=payload.expected_version,
-            scope="SCENE",
-            entity_id=scene_id,
-            changes=payload.model_dump(exclude={"expected_version"}, exclude_none=True),
-        )
+    result, replayed = _dispatch_script_revision(
+        session,
+        script_id=script_id,
+        expected_version=payload.expected_version,
+        scope="SCENE",
+        entity_id=scene_id,
+        changes=payload.model_dump(exclude={"expected_version"}, exclude_none=True),
+        idempotency_key=idempotency_key,
     )
+    response.headers["Idempotency-Replayed"] = str(replayed).lower()
+    return success(result)
 
 
 @router.patch("/scripts/{script_id}/lines/{line_id}")
@@ -224,18 +343,26 @@ def update_script_line(
     script_id: str,
     line_id: str,
     payload: ScriptLineUpdateRequest,
+    response: Response,
+    idempotency_key: str | None = Header(
+        default=None,
+        alias="Idempotency-Key",
+        min_length=8,
+        max_length=160,
+    ),
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
-    return success(
-        revise_script(
-            session,
-            script_id=script_id,
-            expected_version=payload.expected_version,
-            scope="LINE",
-            entity_id=line_id,
-            changes=payload.model_dump(exclude={"expected_version"}, exclude_none=True),
-        )
+    result, replayed = _dispatch_script_revision(
+        session,
+        script_id=script_id,
+        expected_version=payload.expected_version,
+        scope="LINE",
+        entity_id=line_id,
+        changes=payload.model_dump(exclude={"expected_version"}, exclude_none=True),
+        idempotency_key=idempotency_key,
     )
+    response.headers["Idempotency-Replayed"] = str(replayed).lower()
+    return success(result)
 
 
 @router.post(

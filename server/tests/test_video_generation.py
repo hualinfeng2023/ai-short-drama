@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.db.models import Asset, Job, Shot, Take
+from app.db.models import Asset, GenerationRecord, Job, Shot, Take
 from app.db.session import get_engine
 from app.jobs.worker import PersistentJobWorker
 from app.seed import PROJECT_ID, SHOT_IDS
@@ -207,6 +207,15 @@ async def test_shot_video_job_persists_provider_task_and_asset(
             )
         )
         assert take is not None and take.is_current is False
+        assert take.generation_record_id is not None
+        generation = session.get(GenerationRecord, take.generation_record_id)
+        assert generation is not None
+        assert generation.job_id == job["id"]
+        assert generation.capability == "SHOT_VIDEO"
+        assert generation.provider_task_id == "task-video-persisted"
+        generation_metadata = json.loads(generation.metadata_json)
+        assert generation_metadata["trace_id"]
+        assert generation_metadata["job_type"] == "GENERATE_SHOT_VIDEO"
         asset = session.get(Asset, take.asset_id)
         assert asset is not None
         assert asset.provider == "volcengine-ark"

@@ -164,11 +164,23 @@ def analyze_revision(
         .order_by(TimelineItem.ordinal)
     ).all()
     take_assets: dict[str, str] = {}
+    preserved_objects: list[dict[str, object]] = []
     for item in items:
         take = session.get(Take, item.take_id)
         asset = session.get(Asset, take.asset_id) if take else None
         if asset is not None:
             take_assets[item.shot_id] = asset.sha256
+            if item.shot_id not in shot_ids and take is not None:
+                preserved_objects.append(
+                    {
+                        "shot_id": item.shot_id,
+                        "take_id": take.id,
+                        "asset_id": asset.id,
+                        "asset_hash": asset.sha256,
+                        "approval": take.approval,
+                        "is_current": take.is_current,
+                    }
+                )
     intent_type = _intent_type(instruction)
     changed_asset_types = ["subtitle_srt", "subtitle_vtt", "timeline"]
     if intent_type == "VISUAL":
@@ -185,6 +197,7 @@ def analyze_revision(
             "preserved_hashes": [
                 digest for shot_id, digest in take_assets.items() if shot_id not in shot_ids
             ],
+            "preserved_objects": preserved_objects,
         },
         estimated_points=12 * len(shot_ids),
         estimated_seconds=max(4, 3 * len(shot_ids)),
@@ -219,6 +232,7 @@ def create_revision(
     confirmed: bool,
     idempotency_key: str,
     trace_id: str,
+    commit: bool = True,
 ) -> tuple[ChangeSetRead, JobRead, bool]:
     if not confirmed:
         raise HTTPException(
@@ -298,7 +312,9 @@ def create_revision(
         event_type="revision.created",
         payload={"change_set_id": change_set.id, "base_timeline_id": impact.base_timeline_id},
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     session.refresh(job)
     return change_set_to_read(change_set), job_to_read(job), replayed
 
@@ -336,6 +352,7 @@ def revision_inputs(
         .where(TimelineItem.timeline_id == base.id)
         .order_by(TimelineItem.ordinal)
     ).all()
+    _assert_preserved_objects(session, change_set)
     preview_shots: list[PreviewShot] = []
     take_ids: dict[str, str] = {}
     for item in items:
@@ -423,6 +440,66 @@ def revision_inputs(
     return project, episode, change_set, preview_shots, take_ids
 
 
+def _preserved_objects(change_set: ChangeSet) -> list[dict[str, object]]:
+    impact = json.loads(change_set.impact_json)
+    affected = impact.get("affected", {}) if isinstance(impact, dict) else {}
+    preserved = affected.get("preserved_objects", []) if isinstance(affected, dict) else []
+    return [item for item in preserved if isinstance(item, dict)]
+
+
+def _assert_preserved_objects(
+    session: Session,
+    change_set: ChangeSet,
+    *,
+    selected_take_ids: dict[str, str] | None = None,
+) -> None:
+    changed: list[dict[str, object]] = []
+    for expected in _preserved_objects(change_set):
+        shot_id = expected.get("shot_id")
+        take_id = expected.get("take_id")
+        asset_id = expected.get("asset_id")
+        if not all(isinstance(value, str) for value in (shot_id, take_id, asset_id)):
+            changed.append({"reason": "INVALID_PRESERVED_SNAPSHOT", "expected": expected})
+            continue
+        take = session.get(Take, take_id)
+        asset = session.get(Asset, asset_id)
+        reasons: list[str] = []
+        if take is None or take.shot_id != shot_id:
+            reasons.append("TAKE_CHANGED")
+        if asset is None or take is None or take.asset_id != asset.id:
+            reasons.append("ASSET_REFERENCE_CHANGED")
+        if asset is not None and asset.sha256 != expected.get("asset_hash"):
+            reasons.append("ASSET_HASH_CHANGED")
+        if take is not None and take.approval != expected.get("approval"):
+            reasons.append("APPROVAL_CHANGED")
+        if take is not None and take.is_current is not expected.get("is_current"):
+            reasons.append("CURRENT_SELECTION_CHANGED")
+        if (
+            selected_take_ids is not None
+            and selected_take_ids.get(shot_id) != take_id
+        ):
+            reasons.append("TIMELINE_REFERENCE_CHANGED")
+        if reasons:
+            changed.append(
+                {
+                    "shot_id": shot_id,
+                    "take_id": take_id,
+                    "reasons": reasons,
+                }
+            )
+    if changed:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "PRESERVED_OBJECT_CHANGED",
+                "message": "范围外受保护素材已经变化，变更集不能继续执行",
+                "user_action": "重新分析影响范围并创建新的变更集",
+                "retryable": False,
+                "details": {"changed": changed},
+            },
+        )
+
+
 def register_revision_preview(
     session: Session,
     settings: Settings,
@@ -436,6 +513,11 @@ def register_revision_preview(
 ) -> TimelineVersion:
     if change_set.result_timeline_id is not None:
         return _timeline_or_404(session, change_set.result_timeline_id)
+    _assert_preserved_objects(
+        session,
+        change_set,
+        selected_take_ids=take_ids,
+    )
     next_version = (
         session.scalar(
             select(func.max(TimelineVersion.version)).where(
@@ -640,6 +722,8 @@ def approve_timeline(
     expected_version: int,
     actor: str,
     trace_id: str,
+    commit: bool = True,
+    record_audit: bool = True,
 ) -> TimelineRead:
     timeline = _timeline_or_404(session, timeline_id)
     project = project_or_404(session, timeline.project_id)
@@ -649,6 +733,21 @@ def approve_timeline(
         raise HTTPException(status_code=409, detail="只能批准当前小样")
     if timeline.status == "APPROVED":
         return timeline_to_read(session, timeline)
+    change_set = session.scalar(
+        select(ChangeSet).where(ChangeSet.result_timeline_id == timeline.id)
+    )
+    if change_set is not None:
+        timeline_take_ids = {
+            item.shot_id: item.take_id
+            for item in session.scalars(
+                select(TimelineItem).where(TimelineItem.timeline_id == timeline.id)
+            ).all()
+        }
+        _assert_preserved_objects(
+            session,
+            change_set,
+            selected_take_ids=timeline_take_ids,
+        )
     now = datetime.now(UTC)
     gate = session.scalar(
         select(ReviewGate).where(
@@ -699,17 +798,18 @@ def approve_timeline(
             workflow.current_gate = None
             workflow.completed_at = now
             workflow.updated_at = now
-    _audit(
-        session,
-        project_id=project.id,
-        actor=actor,
-        action="APPROVE_PREVIEW",
-        entity_type="timeline",
-        entity_id=timeline.id,
-        before_hash=None,
-        after_hash=timeline.baseline_hash,
-        trace_id=trace_id,
-    )
+    if record_audit:
+        _audit(
+            session,
+            project_id=project.id,
+            actor=actor,
+            action="APPROVE_PREVIEW",
+            entity_type="timeline",
+            entity_id=timeline.id,
+            before_hash=None,
+            after_hash=timeline.baseline_hash,
+            trace_id=trace_id,
+        )
     append_event(
         session,
         project_id=project.id,
@@ -717,7 +817,9 @@ def approve_timeline(
         event_type="preview.approved",
         payload={"timeline_id": timeline.id, "version": timeline.version, "actor": actor},
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     session.refresh(timeline)
     return timeline_to_read(session, timeline)
 
@@ -729,6 +831,8 @@ def rollback_timeline(
     expected_version: int,
     actor: str,
     trace_id: str,
+    commit: bool = True,
+    record_audit: bool = True,
 ) -> TimelineRead:
     timeline = _timeline_or_404(session, timeline_id)
     project = project_or_404(session, timeline.project_id)
@@ -743,17 +847,18 @@ def rollback_timeline(
     project.status = "APPROVED" if timeline.status == "APPROVED" else "PREVIEW_READY"
     project.lock_version += 1
     project.updated_at = datetime.now(UTC)
-    _audit(
-        session,
-        project_id=project.id,
-        actor=actor,
-        action="ROLLBACK_PREVIEW",
-        entity_type="timeline",
-        entity_id=timeline.id,
-        before_hash=previous.baseline_hash,
-        after_hash=timeline.baseline_hash,
-        trace_id=trace_id,
-    )
+    if record_audit:
+        _audit(
+            session,
+            project_id=project.id,
+            actor=actor,
+            action="ROLLBACK_PREVIEW",
+            entity_type="timeline",
+            entity_id=timeline.id,
+            before_hash=previous.baseline_hash,
+            after_hash=timeline.baseline_hash,
+            trace_id=trace_id,
+        )
     append_event(
         session,
         project_id=project.id,
@@ -761,6 +866,8 @@ def rollback_timeline(
         event_type="preview.rolled_back",
         payload={"from_timeline_id": previous.id, "to_timeline_id": timeline.id},
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     session.refresh(timeline)
     return timeline_to_read(session, timeline)

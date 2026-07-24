@@ -12,14 +12,21 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db.models import (
     Asset,
+    AudioTake,
+    AuditLog,
     Character,
+    CharacterCandidate,
+    CharacterIdentityAsset,
     ExportArtifact,
     ExportRecord,
+    GenerationRecord,
     Job,
+    LipSyncTake,
     Project,
     ProposalVersion,
     Shot,
     Take,
+    TimelineItem,
 )
 from app.db.session import get_engine
 from app.jobs.handlers.proposal import (
@@ -408,13 +415,15 @@ async def test_global_jobs_aggregates_multiple_projects(client: AsyncClient) -> 
 
     assert expected_ids <= {job["id"] for job in global_jobs}
     assert {job["project_id"] for job in global_jobs} >= {PROJECT_ID, project["id"]}
-    assert next(job for job in global_jobs if job["id"] == created_job_id)[
-        "project_name"
-    ] == project["name"]
+    assert (
+        next(job for job in global_jobs if job["id"] == created_job_id)["project_name"]
+        == project["name"]
+    )
     assert created_job_id in {job["id"] for job in scoped_jobs}
-    assert next(job for job in scoped_jobs if job["id"] == created_job_id)[
-        "project_name"
-    ] == project["name"]
+    assert (
+        next(job for job in scoped_jobs if job["id"] == created_job_id)["project_name"]
+        == project["name"]
+    )
     assert seeded_job_id not in {job["id"] for job in scoped_jobs}
 
 
@@ -892,7 +901,16 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
         headers={"Idempotency-Key": "approve-script-v1"},
     )
     assert approved.status_code == 202
+    assert approved.headers["Idempotency-Replayed"] == "false"
     assert approved.json()["data"]["script"]["status"] == "APPROVED"
+    approved_replay = await client.post(
+        f"/api/v1/scripts/{script['id']}/approve",
+        json={"expected_version": 12, "actor": "test-writer"},
+        headers={"Idempotency-Key": "approve-script-v1"},
+    )
+    assert approved_replay.status_code == 202
+    assert approved_replay.headers["Idempotency-Replayed"] == "true"
+    assert approved_replay.json()["data"] == approved.json()["data"]
     project_after = (await client.get(f"/api/v1/projects/{project_id}")).json()["data"]
     assert project_after["status"] == "STORY_APPROVED"
     project_after = await _run_worker_until_project_status(
@@ -945,6 +963,42 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
     assert storyboard_workspace["gate"]["status"] == "PENDING_REVIEW"
 
     with Session(get_engine(get_settings().database_url)) as session:
+        generation_records = list(
+            session.scalars(
+                select(GenerationRecord).where(GenerationRecord.project_id == project_id)
+            ).all()
+        )
+        traced_entity_ids = {record.entity_id for record in generation_records}
+        candidate_ids = set(
+            session.scalars(
+                select(CharacterCandidate.id).where(CharacterCandidate.project_id == project_id)
+            ).all()
+        )
+        identity_asset_ids = set(
+            session.scalars(
+                select(CharacterIdentityAsset.id).where(
+                    CharacterIdentityAsset.project_id == project_id
+                )
+            ).all()
+        )
+        assert candidate_ids <= traced_entity_ids
+        assert identity_asset_ids <= traced_entity_ids
+        assert all(
+            take.generation_record_id is not None
+            for take in session.scalars(
+                select(Take).where(
+                    Take.shot_id.in_([item["shot_id"] for item in storyboard_workspace["shots"]]),
+                    Take.kind == "STORYBOARD",
+                )
+            )
+        )
+        for record in generation_records:
+            metadata = json.loads(record.metadata_json)
+            assert metadata["trace_id"]
+            assert metadata["job_type"]
+            assert metadata["job_request_hash"]
+            assert metadata["job_idempotency_key"]
+
         persisted_shots = list(
             session.scalars(
                 select(Shot)
@@ -1002,6 +1056,15 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
         headers={"Idempotency-Key": "approve-storyboard-v1"},
     )
     assert approved_storyboard.status_code == 202
+    assert approved_storyboard.headers["Idempotency-Replayed"] == "false"
+    approved_storyboard_replay = await client.post(
+        f"/api/v1/storyboards/{storyboard_workspace['storyboard']['id']}/approve",
+        json={"expected_version": project_after["lock_version"], "actor": "test-director"},
+        headers={"Idempotency-Key": "approve-storyboard-v1"},
+    )
+    assert approved_storyboard_replay.status_code == 202
+    assert approved_storyboard_replay.headers["Idempotency-Replayed"] == "true"
+    assert approved_storyboard_replay.json()["data"] == approved_storyboard.json()["data"]
     processed = 0
     for _ in range(60):
         if not await worker.run_once():
@@ -1037,6 +1100,72 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
     assert len(timeline_workspace["quality_checks"]) == 8
     assert all(item["status"] == "PASSED" for item in timeline_workspace["quality_checks"])
     assert timeline_workspace["gate"]["status"] == "PENDING"
+
+    film_ir_response = await client.get(f"/api/v1/projects/{project_id}/film-ir")
+    assert film_ir_response.status_code == 200, film_ir_response.text
+    film_ir = film_ir_response.json()["data"]
+    film_ir_objects = film_ir["objects"]
+    film_ir_types = {item["type"] for item in film_ir_objects}
+    assert {
+        "Project",
+        "Story",
+        "Script",
+        "Beat",
+        "ScriptScene",
+        "Scene",
+        "Storyboard",
+        "Shot",
+        "Take",
+        "Asset",
+        "GenerationRecord",
+        "Timeline",
+        "TimelineClip",
+        "Character",
+    } <= film_ir_types
+    assert (
+        next(item for item in film_ir_objects if item["type"] == "Story")["canonical_kind"]
+        == "CANONICAL"
+    )
+    assert (
+        next(item for item in film_ir_objects if item["type"] == "Script")["canonical_kind"]
+        == "CANONICAL"
+    )
+    assert (
+        next(item for item in film_ir_objects if item["type"] == "Timeline")["canonical_kind"]
+        == "DERIVED"
+    )
+    relations = {(edge["relation"], edge["inferred"]) for edge in film_ir["edges"]}
+    assert ("STORY_TO_SCRIPT", False) in relations
+    assert ("DERIVES_BEAT", True) in relations
+    assert ("BEAT_TO_SCRIPT_SCENE", True) in relations
+    assert ("REALIZED_AS_SCENE", False) in relations
+    assert ("SPECIFIES_SHOT", False) in relations
+    assert ("GENERATED_TAKE", False) in relations
+    assert ("CONTAINS_CLIP", False) in relations
+
+    with Session(get_engine(get_settings().database_url)) as session:
+        generated_takes = list(
+            session.scalars(
+                select(Take)
+                .join(Shot, Shot.id == Take.shot_id)
+                .where(
+                    Shot.id.in_([item["shot_id"] for item in storyboard_workspace["shots"]]),
+                    Take.kind.in_({"STORYBOARD", "KEYFRAME", "VIDEO"}),
+                )
+            ).all()
+        )
+        assert generated_takes
+        assert all(take.generation_record_id for take in generated_takes)
+        audio_takes = list(
+            session.scalars(select(AudioTake).where(AudioTake.project_id == project_id)).all()
+        )
+        lip_sync_takes = list(
+            session.scalars(select(LipSyncTake).where(LipSyncTake.project_id == project_id)).all()
+        )
+        assert audio_takes
+        assert lip_sync_takes
+        assert all(take.generation_record_id for take in audio_takes)
+        assert all(take.generation_record_id for take in lip_sync_takes)
 
     project_after = (await client.get(f"/api/v1/projects/{project_id}")).json()["data"]
     approved_g5 = await client.post(
@@ -1233,11 +1362,7 @@ async def test_intermediate_output_survives_automatic_retry_claim(
             session,
             job_id=job.id,
             worker_id="intermediate-worker-1",
-            updates={
-                "story_direction_routes": {
-                    "emotion": {"request_id": "request-emotion"}
-                }
-            },
+            updates={"story_direction_routes": {"emotion": {"request_id": "request-emotion"}}},
             lease_seconds=15,
         )
         finish_job_failure(
@@ -1259,9 +1384,7 @@ async def test_intermediate_output_survives_automatic_retry_claim(
         assert second.output_json is not None
         output = json.loads(second.output_json)
 
-    assert output["story_direction_routes"]["emotion"]["request_id"] == (
-        "request-emotion"
-    )
+    assert output["story_direction_routes"]["emotion"]["request_id"] == ("request-emotion")
 
 
 async def test_cancel_retry_and_worker_completion(client: AsyncClient) -> None:
@@ -1817,6 +1940,9 @@ async def test_revision_compare_approve_export_and_rollback_closed_loop(
     assert impact.status_code == 200
     assert impact.json()["data"]["intent"]["type"] == "DIALOGUE"
     assert impact.json()["data"]["requires_confirmation"] is True
+    preserved_objects = impact.json()["data"]["affected"]["preserved_objects"]
+    assert len(preserved_objects) == len(workspace["shots"]) - 1
+    assert shot_id not in {item["shot_id"] for item in preserved_objects}
 
     revision = await client.post(
         f"/api/v1/projects/{project_id}/revisions",
@@ -1824,7 +1950,16 @@ async def test_revision_compare_approve_export_and_rollback_closed_loop(
         headers={"Idempotency-Key": "revision-change-set-v1"},
     )
     assert revision.status_code == 202
+    assert revision.headers["Idempotency-Replayed"] == "false"
     assert revision.json()["data"]["revision"]["status"] == "PENDING"
+    revision_replay = await client.post(
+        f"/api/v1/projects/{project_id}/revisions",
+        json={**impact_payload, "confirmed": True},
+        headers={"Idempotency-Key": "revision-change-set-v1"},
+    )
+    assert revision_replay.status_code == 202
+    assert revision_replay.headers["Idempotency-Replayed"] == "true"
+    assert revision_replay.json()["data"] == revision.json()["data"]
     revision_job_id = revision.json()["data"]["job"]["id"]
     cancelled_revision = await client.post(
         f"/api/v1/jobs/{revision_job_id}/cancel",
@@ -1862,13 +1997,56 @@ async def test_revision_compare_approve_export_and_rollback_closed_loop(
     assert after == before
 
     project_before_approval = (await client.get(f"/api/v1/projects/{project_id}")).json()["data"]
+    protected = preserved_objects[0]
+    with Session(get_engine(get_settings().database_url)) as session:
+        protected_take = session.get(Take, protected["take_id"])
+        assert protected_take is not None
+        original_approval = protected_take.approval
+        protected_take.approval = "SUSPECT"
+        session.commit()
+    blocked_approval = await client.post(
+        f"/api/v1/previews/{result_timeline_id}/approve",
+        json={"expected_version": project_before_approval["lock_version"], "actor": "test"},
+        headers={"Idempotency-Key": "revision-approve-preview-blocked"},
+    )
+    assert blocked_approval.status_code == 409
+    assert blocked_approval.json()["error"]["code"] == "PRESERVED_OBJECT_CHANGED"
+    with Session(get_engine(get_settings().database_url)) as session:
+        protected_take = session.get(Take, protected["take_id"])
+        assert protected_take is not None
+        protected_take.approval = original_approval
+        session.commit()
+
     approved = await client.post(
         f"/api/v1/previews/{result_timeline_id}/approve",
         json={"expected_version": project_before_approval["lock_version"], "actor": "test"},
         headers={"Idempotency-Key": "revision-approve-preview-v2"},
     )
     assert approved.status_code == 200
+    assert approved.headers["Idempotency-Replayed"] == "false"
     assert approved.json()["data"]["status"] == "APPROVED"
+    approved_replay = await client.post(
+        f"/api/v1/previews/{result_timeline_id}/approve",
+        json={"expected_version": project_before_approval["lock_version"], "actor": "test"},
+        headers={"Idempotency-Key": "revision-approve-preview-v2"},
+    )
+    assert approved_replay.status_code == 200
+    assert approved_replay.headers["Idempotency-Replayed"] == "true"
+    assert approved_replay.json()["data"] == approved.json()["data"]
+    with Session(get_engine(get_settings().database_url)) as session:
+        result_items = {
+            item.shot_id: item.take_id
+            for item in session.scalars(
+                select(TimelineItem).where(TimelineItem.timeline_id == result_timeline_id)
+            ).all()
+        }
+        for preserved in preserved_objects:
+            take = session.get(Take, preserved["take_id"])
+            asset = session.get(Asset, preserved["asset_id"])
+            assert take is not None and asset is not None
+            assert result_items[preserved["shot_id"]] == preserved["take_id"]
+            assert take.asset_id == preserved["asset_id"]
+            assert asset.sha256 == preserved["asset_hash"]
     estimate = await client.post(
         f"/api/v1/projects/{project_id}/exports/estimate",
         json={"profile": "hybrid_720p"},
@@ -1915,6 +2093,31 @@ async def test_revision_compare_approve_export_and_rollback_closed_loop(
         headers={"Idempotency-Key": "revision-rollback-v1"},
     )
     assert rollback.status_code == 200
+    assert rollback.headers["Idempotency-Replayed"] == "false"
+    rollback_replay = await client.post(
+        f"/api/v1/previews/{baseline['id']}/rollback",
+        json={"expected_version": project_before_rollback["lock_version"], "actor": "test"},
+        headers={"Idempotency-Key": "revision-rollback-v1"},
+    )
+    assert rollback_replay.status_code == 200
+    assert rollback_replay.headers["Idempotency-Replayed"] == "true"
+    assert rollback_replay.json()["data"] == rollback.json()["data"]
+    with Session(get_engine(get_settings().database_url)) as session:
+        timeline_command_audits = list(
+            session.scalars(
+                select(AuditLog)
+                .where(
+                    AuditLog.project_id == project_id,
+                    AuditLog.action.in_(["APPROVE_PREVIEW", "ROLLBACK_PREVIEW"]),
+                )
+                .order_by(AuditLog.created_at)
+            ).all()
+        )
+        assert [item.action for item in timeline_command_audits] == [
+            "APPROVE_PREVIEW",
+            "ROLLBACK_PREVIEW",
+        ]
+        assert all(item.before_hash != item.after_hash for item in timeline_command_audits)
     current = (await client.get(f"/api/v1/projects/{project_id}")).json()["data"]
     assert current["timeline_version"] == 1
     assert len((await client.get(f"/api/v1/projects/{project_id}/previews")).json()["data"]) == 2
