@@ -925,13 +925,36 @@ def _ensure_short_drama_engine_contract(engine: ShortDramaEngine) -> ShortDramaE
 
 
 def normalize_episode_script_draft(payload: dict[str, Any]) -> dict[str, Any]:
-    """去掉空台词场景，避免方舟返回空 lines 直接撞合同。"""
+    """去掉空台词场景，并钳制台词时长字段，避免方舟越界直接撞合同。"""
     normalized = json.loads(json.dumps(payload, ensure_ascii=False))
-    scenes = [
-        scene
-        for scene in normalized.get("scenes", [])
-        if isinstance(scene, dict) and isinstance(scene.get("lines"), list) and scene["lines"]
-    ]
+    scenes: list[dict[str, Any]] = []
+    for scene in normalized.get("scenes", []):
+        if not isinstance(scene, dict):
+            continue
+        lines = scene.get("lines")
+        if not isinstance(lines, list) or not lines:
+            continue
+        cleaned_lines: list[dict[str, Any]] = []
+        for line in lines:
+            if not isinstance(line, dict):
+                continue
+            pause_after_ms = line.get("pause_after_ms")
+            if isinstance(pause_after_ms, (int, float)):
+                line["pause_after_ms"] = max(0, min(3000, int(pause_after_ms)))
+            estimated_duration_ms = line.get("estimated_duration_ms")
+            if isinstance(estimated_duration_ms, (int, float)):
+                value = int(estimated_duration_ms)
+                line["estimated_duration_ms"] = 800 if value < 200 else min(20_000, value)
+            elif not estimated_duration_ms:
+                line["estimated_duration_ms"] = 800
+            speech_rate = line.get("speech_rate")
+            if isinstance(speech_rate, (int, float)):
+                line["speech_rate"] = max(0.7, min(1.4, float(speech_rate)))
+            cleaned_lines.append(line)
+        if not cleaned_lines:
+            continue
+        scene["lines"] = cleaned_lines
+        scenes.append(scene)
     if len(scenes) >= 2:
         normalized["scenes"] = scenes
     return normalized

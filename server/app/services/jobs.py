@@ -224,6 +224,11 @@ def release_entity_after_terminal_job(session: Session, job: Job, now: datetime)
         from app.services.character_visuals import mark_character_generation_failed
 
         mark_character_generation_failed(session, job)
+    if job.job_type == "GENERATE_STORYBOARD_TAKE":
+        from app.services.storyboards_v2 import revert_failed_storyboard_take
+
+        revert_failed_storyboard_take(session, job)
+        return
     if job.job_type != "GENERATE_SHOT_IMAGE":
         return
     shot = session.get(Shot, job.entity_id)

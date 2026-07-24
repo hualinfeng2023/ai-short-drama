@@ -404,8 +404,10 @@ summary:focus-visible,
 .popover--notification { width: min(300px, calc(100vw - 24px)); }
 .popover strong { font-size: var(--font-size-control); letter-spacing: -0.01em; }
 .popover p { color: var(--color-text-secondary); font-size: var(--font-size-caption); }
-.popover a { display: inline-flex; min-height: 32px; align-items: center; font-size: var(--font-size-caption); }
+.popover a:not(.popover__item) { display: inline-flex; min-height: 32px; align-items: center; font-size: var(--font-size-caption); }
 .popover__meta { border-bottom-color: var(--color-border); }
+.popover--account { width: 220px; }
+.popover__item { font-size: var(--font-size-caption); font-weight: 650; }
 
 @keyframes apple-popover-in {
   from { opacity: 0; transform: scale(0.96) translateY(-4px); }
@@ -1927,7 +1929,7 @@ summary:focus-visible,
   .short-drama-engine-detail { grid-template-columns: 1fr; }
   .relationship-canvas { min-width: 660px; }
   .relationship-editor__main { overflow-x: auto; }
-  .script-lines > div { grid-template-columns: 72px minmax(0, 1fr); }
+  .script-lines > div { grid-template-columns: minmax(88px, 140px) minmax(0, 1fr); }
   .script-lines small { grid-column: 2; text-align: left; }
   .audio-cue-list > div,
   .timeline-track-list > div { grid-template-columns: 1fr; }
@@ -2005,6 +2007,8 @@ summary:focus-visible,
   .popover,
   .modal[open] { transform: none !important; }
   .project-feature:hover .project-feature__image { transform: none; }
+  .storyboard-shot-grid article:hover { transform: none; }
+  .storyboard-shot-grid article:hover img { transform: none; }
   .brief-generative-field.is-generating::after { display: none; }
   .brief-generation-status,
   .brief-generation-status__icon,

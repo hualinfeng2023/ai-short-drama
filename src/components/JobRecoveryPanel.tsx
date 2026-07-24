@@ -8,7 +8,6 @@ import {
   MessageSquareText,
   Play,
   Save,
-  ShieldAlert,
 } from 'lucide-react'
 
 import type { Job, JobRecoveryAction, JobRecoveryRequest } from '../types'
@@ -59,15 +58,6 @@ export function JobRecoveryPanel({
         <ChevronDown size={15} />
       </button> : null}
     </header>
-
-    <div className="task-recovery-panel__reliability">
-      <ShieldAlert size={17} />
-      <div>
-        <strong>这些结果不可靠</strong>
-        <p>{plan.unreliableOutputs.join('；')}</p>
-        <small>{plan.reliabilityNote}</small>
-      </div>
-    </div>
 
     {expanded && !degraded ? <div className="task-recovery-panel__body">
       {plan.completedSteps.length > 0 ? <div className="task-recovery-panel__checkpoint">

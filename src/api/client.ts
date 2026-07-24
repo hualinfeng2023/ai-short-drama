@@ -3928,6 +3928,29 @@ export async function approveStoryboardVersion(
   return mapJob(result.job)
 }
 
+export async function regenerateStoryboardShot(
+  shotSpecId: string,
+  expectedVersion: number,
+  note?: string,
+): Promise<Job> {
+  const result = await requestJson<{ shot: { shot_spec_id: string; code: string }; job: ApiJob }>(
+    `/api/v1/shot-specs/${shotSpecId}/regenerate`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': crypto.randomUUID(),
+      },
+      body: JSON.stringify({
+        expected_version: expectedVersion,
+        actor: 'demo-user',
+        ...(note?.trim() ? { note: note.trim() } : {}),
+      }),
+    },
+  )
+  return mapJob(result.job)
+}
+
 export async function fetchAudioWorkspace(
   projectId: string,
   signal?: AbortSignal,

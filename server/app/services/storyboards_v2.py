@@ -15,6 +15,8 @@ from app.db.models import (
     Asset,
     Character,
     CharacterCandidate,
+    CharacterIdentityAsset,
+    CharacterLookVersion,
     Episode,
     Job,
     JobDependency,
@@ -107,6 +109,217 @@ def _line_character_keys(
     if not result and line.line_type in {"ACTION", "VOICE_OVER"}:
         result.extend(scene_character_keys)
     return result[:8]
+
+
+_IDENTITY_VIEW_PRIORITY = ("FRONT", "THREE_QUARTER", "FULL_BODY", "PROFILE")
+
+
+def _character_reference_asset_ids(session: Session, character: Character) -> list[str]:
+    """优先使用锁定身份档案正脸/全身图，回退到锁定候选图与造型参考。"""
+    asset_ids: list[str] = []
+    if character.locked_identity_version_id:
+        identity_assets = list(
+            session.scalars(
+                select(CharacterIdentityAsset).where(
+                    CharacterIdentityAsset.identity_version_id
+                    == character.locked_identity_version_id
+                )
+            ).all()
+        )
+        by_view = {
+            item.view_type: item.asset_id
+            for item in identity_assets
+            if item.asset_id and item.view_type != "EXPRESSIONS"
+        }
+        for view_type in _IDENTITY_VIEW_PRIORITY:
+            asset_id = by_view.get(view_type)
+            if asset_id and asset_id not in asset_ids:
+                asset_ids.append(asset_id)
+                break
+        full_body = by_view.get("FULL_BODY")
+        if full_body and full_body not in asset_ids:
+            asset_ids.append(full_body)
+    if not asset_ids and character.locked_candidate_id:
+        candidate = session.get(CharacterCandidate, character.locked_candidate_id)
+        if candidate is not None and candidate.asset_id:
+            asset_ids.append(candidate.asset_id)
+    if character.active_look_version_id:
+        look = session.get(CharacterLookVersion, character.active_look_version_id)
+        if look is not None:
+            try:
+                look_refs = json.loads(look.reference_asset_ids_json or "[]")
+            except json.JSONDecodeError:
+                look_refs = []
+            if isinstance(look_refs, list):
+                for item in look_refs:
+                    if isinstance(item, str) and item and item not in asset_ids:
+                        asset_ids.append(item)
+    return asset_ids[:3]
+
+
+def _storyboard_identity_prompt(characters: list[Character]) -> str:
+    if not characters:
+        return ""
+    references = "\n".join(
+        f"- 参考图对应角色：{character.name}（{character.role}）；"
+        f"{character.visual_brief.strip() or '沿用锁定身份五官与发型'}"
+        for character in characters
+    )
+    return "\n".join(
+        (
+            "角色身份锁定（硬约束）：",
+            references,
+            "- 输入参考图是每个角色唯一的身份基准。画面中的人物必须与参考图为同一人：",
+            "脸型、五官比例、瞳距、鼻梁、唇形、发型核心特征、发色、年龄感与辨识度保持一致。",
+            "- 允许改变表情、姿势、景别、光线与背景；禁止换脸、混脸、另造相似替身。",
+            "- 当前镜头未绑定的角色不要入镜；不要新增路人抢戏。",
+        )
+    )
+
+
+def _storyboard_photographic_direction(
+    *,
+    shot_size: str,
+    camera_movement: str,
+    time_of_day: str,
+    has_dialogue: bool,
+) -> str:
+    shot_language = {
+        "WS": "广角全景，用环境纵深交代人物位置，主体不必居中",
+        "MS": "中景，人物与环境信息平衡，身体有自然重心偏移",
+        "MCU": "中近景，上半身与微表情主导画面，视线可偏离镜头",
+        "CU": "近景特写，焦点在眼神与呼吸，允许轻微构图失衡",
+    }.get(shot_size, f"{shot_size} 景别")
+    movement = {
+        "STATIC": "机位克制稳定，像纪录片跟拍前的停顿",
+        "PAN": "画面边缘保留运动空间，仿佛刚停住的摇镜瞬间",
+        "DOLLY_IN": "透视略压缩，像推进中途截取的一帧",
+        "TRACK": "背景有轻微运动模糊倾向，主体清晰",
+        "HANDHELD": "极轻微手持呼吸感，避免过度晃动",
+    }.get(camera_movement, camera_movement)
+    time_lower = time_of_day.lower()
+    if any(token in time_lower for token in ("夜", "night", "晚", "凌晨")):
+        lighting = (
+            "以场景实景光为主：窗光、屏幕光或顶灯形成明确方向，"
+            "面部有明暗交界，拒绝平光美颜灯"
+        )
+    else:
+        lighting = (
+            "侧前方自然主光塑造体积，环境反光只补暗部，"
+            "保留真实阴影与材质反光，拒绝影棚环形灯效果"
+        )
+    expression = (
+        "人物处于说话或刚说完的间隙：口型、眼神与呼吸不同步于摆拍微笑，"
+        "表情克制、有情绪残留"
+        if has_dialogue
+        else "表情克制自然，靠眼神与肩颈微张力传情，禁止空眼神与塑料微笑"
+    )
+    return (
+        f"{shot_language}；{movement}。{expression}。{lighting}。"
+        "按电影剧照/实拍静帧理解，而非电商肖像或 LinkedIn 头像："
+        "非对称构图、前景轻微遮挡、空气透视与生活痕迹；"
+        "皮肤保留毛孔与细微瑕疵，衣料有真实褶皱，景深自然。"
+        "严禁：居中证件照构图、过度对称、磨皮美颜、塑料皮肤、"
+        "完美打光网红脸、假笑、眼神空洞、CGI 感、插画感。"
+    )
+
+
+def build_storyboard_take_prompt(
+    project: Project,
+    *,
+    description: str,
+    dialogue: str,
+    location: str,
+    time_of_day: str,
+    shot_size: str,
+    camera_movement: str,
+    characters: list[Character],
+    aspect_ratio: str | None = None,
+) -> str:
+    """为低成本分镜生成身份锁定 + 写实电影静帧提示词。"""
+    resolved_ratio = aspect_ratio or project.aspect_ratio
+    orientation_label = {
+        "1:1": "正方形",
+        "4:3": "横向标准画幅",
+        "3:4": "竖向标准画幅",
+        "16:9": "横屏宽画幅",
+        "9:16": "竖屏短视频画幅",
+        "3:2": "横向摄影画幅",
+        "2:3": "竖向摄影画幅",
+        "21:9": "超宽银幕画幅",
+    }.get(resolved_ratio, "指定画幅")
+    dialogue_hint = f"人物正在说：{dialogue}。" if dialogue.strip() else ""
+    identity_block = _storyboard_identity_prompt(characters)
+    cast_names = "、".join(character.name for character in characters) or "无具名角色"
+    photo_direction = _storyboard_photographic_direction(
+        shot_size=shot_size,
+        camera_movement=camera_movement,
+        time_of_day=time_of_day,
+        has_dialogue=bool(dialogue.strip()),
+    )
+    return (
+        f"{description.rstrip('。')}。{dialogue_hint}"
+        f"出镜角色：{cast_names}。地点：{location}，时间：{time_of_day}。"
+        f"{shot_size} 景别，{camera_movement} 运镜，{orientation_label} {resolved_ratio}。"
+        f"{photo_direction}"
+        f"整体风格延续{project.style}，色彩克制、层次丰富，避免画面文字、字幕、水印、边框和拼贴。"
+        f"{identity_block}"
+    )
+
+
+def resolve_storyboard_take_generation_inputs(
+    session: Session,
+    job: Job,
+    payload: dict[str, object],
+) -> tuple[str, list[str], int]:
+    """在出图时重建提示词与参考图，确保沿用锁定身份而非过期 JSON 提示。"""
+    shot = session.get(Shot, str(payload["shot_id"]))
+    project = session.get(Project, job.project_id)
+    if shot is None or project is None:
+        raise ValueError("分镜任务实体不存在")
+    try:
+        character_ids = json.loads(shot.character_ids_json or "[]")
+    except json.JSONDecodeError:
+        character_ids = []
+    if not isinstance(character_ids, list):
+        character_ids = []
+    ordered_ids = [item for item in character_ids if isinstance(item, str)]
+    characters_by_id = {
+        item.id: item
+        for item in session.scalars(
+            select(Character).where(
+                Character.project_id == project.id,
+                Character.id.in_(ordered_ids),
+            )
+        ).all()
+    } if ordered_ids else {}
+    characters = [characters_by_id[item_id] for item_id in ordered_ids if item_id in characters_by_id]
+    reference_asset_ids: list[str] = []
+    for character in characters:
+        for asset_id in _character_reference_asset_ids(session, character):
+            if asset_id not in reference_asset_ids:
+                reference_asset_ids.append(asset_id)
+    # 若绑定角色暂无参考，回退到任务入队时携带的 reference_asset_ids
+    if not reference_asset_ids:
+        reference_asset_ids = [
+            item for item in payload.get("reference_asset_ids", []) if isinstance(item, str)
+        ]
+    prompt = build_storyboard_take_prompt(
+        project,
+        description=shot.description,
+        dialogue=shot.dialogue,
+        location=shot.location,
+        time_of_day=shot.time_of_day,
+        shot_size=shot.shot_size,
+        camera_movement=shot.camera_movement,
+        characters=characters,
+        aspect_ratio=project.aspect_ratio,
+    )
+    note = payload.get("note")
+    if isinstance(note, str) and note.strip():
+        prompt = f"{prompt}\n导演修改意图：{note.strip()}。"
+    seed = int(payload.get("seed") or 0)
+    return prompt, reference_asset_ids[:8], seed
 
 
 def _create_workflow(
@@ -327,7 +540,7 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
             description = (
                 f"{script_scene.purpose}。{line.text}"
                 if line.line_type == "ACTION"
-                else f"{speaking_label}以{line.emotion}状态完成台词，保持空间连续性"
+                else f"{speaking_label}以{line.emotion}状态完成台词，保持与锁定身份参考图为同一人"
             )
             shot_size = ("WS", "MS", "MCU", "CU")[(shot_ordinal - 1) % 4]
             camera = ("STATIC", "TRACK", "DOLLY_IN", "PAN")[(shot_ordinal - 1) % 4]
@@ -358,6 +571,22 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
             )
             session.add(shot)
             session.flush()
+            reference_asset_ids: list[str] = []
+            for character in bound_characters:
+                for asset_id in _character_reference_asset_ids(session, character):
+                    if asset_id not in reference_asset_ids:
+                        reference_asset_ids.append(asset_id)
+            image_prompt = build_storyboard_take_prompt(
+                project,
+                description=description,
+                dialogue=dialogue,
+                location=script_scene.location,
+                time_of_day=script_scene.time_of_day,
+                shot_size=shot_size,
+                camera_movement=camera,
+                characters=bound_characters,
+                aspect_ratio=project.aspect_ratio,
+            )
             prompt_payload = {
                 "description": description,
                 "dialogue": dialogue,
@@ -373,6 +602,8 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
                 "character_story_state_version_ids": story_state_ids,
                 "location_version_id": location.id if location else None,
                 "prop_version_ids": [item.id for item in props],
+                "reference_asset_ids": reference_asset_ids,
+                "image_prompt": image_prompt,
             }
             spec = ShotSpec(
                 id=str(uuid4()),
@@ -395,26 +626,19 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
             )
             session.add(spec)
             session.flush()
-            reference_asset_ids: list[str] = []
-            for character in bound_characters:
-                if not character.locked_candidate_id:
-                    continue
-                candidate = session.get(CharacterCandidate, character.locked_candidate_id)
-                if candidate is not None:
-                    reference_asset_ids.append(candidate.asset_id)
             child, _ = enqueue_job(
                 session,
                 project_id=project.id,
                 job_type="GENERATE_STORYBOARD_TAKE",
                 entity_type="shot_spec",
                 entity_id=spec.id,
-                idempotency_key=f"{project.id}:GENERATE_STORYBOARD_TAKE:{spec.id}:v1",
+                idempotency_key=f"{project.id}:GENERATE_STORYBOARD_TAKE:{spec.id}:v2",
                 input_payload={
                     "storyboard_version_id": storyboard.id,
                     "workflow_run_id": workflow.id,
                     "shot_spec_id": spec.id,
                     "shot_id": shot.id,
-                    "prompt": canonical_json(prompt_payload),
+                    "prompt": image_prompt,
                     "reference_asset_ids": reference_asset_ids,
                     "seed": int(spec.content_hash[:8], 16),
                 },
@@ -577,14 +801,28 @@ def materialize_storyboard_take(
     storyboard = session.get(StoryboardVersion, str(payload["storyboard_version_id"]))
     if spec is None or shot is None or storyboard is None:
         raise ValueError("分镜任务实体不存在")
-    existing = session.scalar(
-        select(Take).where(Take.shot_id == shot.id, Take.kind == "STORYBOARD")
+    replace_existing = bool(payload.get("replace_existing"))
+    current_take = session.scalar(
+        select(Take).where(
+            Take.shot_id == shot.id,
+            Take.kind == "STORYBOARD",
+            Take.is_current.is_(True),
+        )
     )
-    if existing is not None:
-        asset = session.get(Asset, existing.asset_id)
-        if asset is None:
-            raise ValueError("分镜版本资产不存在")
-        return asset, existing, None
+    if current_take is not None:
+        current_asset = session.get(Asset, current_take.asset_id)
+        if current_asset is not None:
+            try:
+                metadata = json.loads(current_asset.metadata_json or "{}")
+            except json.JSONDecodeError:
+                metadata = {}
+            # 同一 job 重试时直接返回已登记结果，避免重复造 Take
+            if isinstance(metadata, dict) and metadata.get("job_id") == job.id:
+                return current_asset, current_take, None
+        if not replace_existing:
+            if current_asset is None:
+                raise ValueError("分镜版本资产不存在")
+            return current_asset, current_take, None
     tmp_dir = settings.data_dir / "tmp" / job.id / "storyboard-take"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     suffix = ".png" if image.mime == "image/png" else ".jpg"
@@ -612,23 +850,38 @@ def materialize_storyboard_take(
             "seed": payload["seed"],
             "storyboard_version_id": storyboard.id,
             "temporary": True,
+            "job_id": job.id,
+            "replace_existing": replace_existing,
+            "note": payload.get("note"),
         }
     )
     now = datetime.now(UTC)
+    identity_refs = [
+        item for item in payload.get("reference_asset_ids", []) if isinstance(item, str)
+    ]
+    next_version = 1
+    parent_take_id = None
+    if current_take is not None and replace_existing:
+        current_take.is_current = False
+        current_take.status = "SUPERSEDED"
+        parent_take_id = current_take.id
+        next_version = current_take.version + 1
     take = Take(
         id=take_id,
         shot_id=shot.id,
         kind="STORYBOARD",
-        version=1,
+        version=next_version,
         asset_id=asset.id,
         status="GENERATED",
         approval="APPROVED",
         is_current=True,
-        parent_take_id=None,
-        identity_status="NOT_APPLICABLE",
+        parent_take_id=parent_take_id,
+        identity_status="LOCKED_REFERENCE" if identity_refs else "NOT_APPLICABLE",
         identity_score=None,
-        identity_message=None,
-        identity_reference_asset_ids_json="[]",
+        identity_message=(
+            "分镜出图已绑定锁定身份参考图" if identity_refs else None
+        ),
+        identity_reference_asset_ids_json=canonical_json(identity_refs),
         identity_review_decision=None,
         identity_review_issues_json="[]",
         identity_review_note=None,
@@ -638,7 +891,7 @@ def materialize_storyboard_take(
         created_at=now,
     )
     session.add(take)
-    shot.current_take = 1
+    shot.current_take = next_version
     shot.current_take_id = take.id
     shot.status = "READY"
     shot.lock_version += 1
@@ -649,80 +902,12 @@ def materialize_storyboard_take(
         node.output_json = canonical_json({"take_id": take.id, "asset_id": asset.id})
         node.updated_at = now
     session.flush()
-    remaining = session.scalar(
-        select(func.count(ShotSpec.id)).where(
-            ShotSpec.storyboard_version_id == storyboard.id,
-            ShotSpec.status != "READY",
-        )
+    next_job = _enqueue_animatic_when_ready(
+        session,
+        job=job,
+        storyboard=storyboard,
+        now=now,
     )
-    next_job: Job | None = None
-    if remaining == 0:
-        next_job, _ = enqueue_job(
-            session,
-            project_id=job.project_id,
-            job_type="GENERATE_ANIMATIC",
-            entity_type="storyboard_version",
-            entity_id=storyboard.id,
-            idempotency_key=f"{job.project_id}:GENERATE_ANIMATIC:{storyboard.id}:v1",
-            input_payload={
-                "storyboard_version_id": storyboard.id,
-                "workflow_run_id": storyboard.workflow_run_id,
-                "temporary_audio": True,
-            },
-            label="分镜 · 临时声音节奏样片",
-            stage="等待生成带临时对白与音乐的节奏样片",
-            trace_id=job.trace_id,
-            estimated_seconds=12,
-            retryable=True,
-        )
-        storyboard.status = "ANIMATIC_RUNNING"
-        child_jobs = list(
-            session.scalars(
-                select(Job).where(
-                    Job.project_id == job.project_id,
-                    Job.job_type == "GENERATE_STORYBOARD_TAKE",
-                    Job.input_json.contains(storyboard.id),
-                )
-            ).all()
-        )
-        for child in child_jobs:
-            session.add(
-                JobDependency(
-                    id=str(uuid4()),
-                    job_id=next_job.id,
-                    depends_on_job_id=child.id,
-                    dependency_type="SUCCESS",
-                    created_at=now,
-                )
-            )
-        if storyboard.workflow_run_id:
-            session.add(
-                WorkflowNode(
-                    id=str(uuid4()),
-                    workflow_run_id=storyboard.workflow_run_id,
-                    node_key="animatic.render",
-                    node_type="FAN_IN",
-                    entity_type="storyboard_version",
-                    entity_id=storyboard.id,
-                    job_id=next_job.id,
-                    status="READY",
-                    dependency_keys_json=canonical_json(
-                        [
-                            f"storyboard.take.{item.ordinal}"
-                            for item in session.scalars(
-                                select(ShotSpec).where(
-                                    ShotSpec.storyboard_version_id == storyboard.id
-                                )
-                            ).all()
-                        ]
-                    ),
-                    output_json="{}",
-                    degraded=False,
-                    error_code=None,
-                    created_at=now,
-                    updated_at=now,
-                )
-            )
     append_event(
         session,
         project_id=job.project_id,
@@ -732,6 +917,375 @@ def materialize_storyboard_take(
     )
     session.flush()
     return asset, take, next_job
+
+
+def _current_storyboard_take_fingerprint(
+    session: Session, storyboard: StoryboardVersion
+) -> str:
+    specs = list(
+        session.scalars(
+            select(ShotSpec)
+            .where(ShotSpec.storyboard_version_id == storyboard.id)
+            .order_by(ShotSpec.ordinal)
+        ).all()
+    )
+    asset_ids: list[str] = []
+    for spec in specs:
+        take = session.scalar(
+            select(Take).where(
+                Take.shot_id == spec.shot_id,
+                Take.kind == "STORYBOARD",
+                Take.is_current.is_(True),
+            )
+        )
+        if take is not None:
+            asset_ids.append(take.asset_id)
+    return content_hash(asset_ids)[:16]
+
+
+def _enqueue_animatic_when_ready(
+    session: Session,
+    *,
+    job: Job,
+    storyboard: StoryboardVersion,
+    now: datetime,
+) -> Job | None:
+    remaining = session.scalar(
+        select(func.count(ShotSpec.id)).where(
+            ShotSpec.storyboard_version_id == storyboard.id,
+            ShotSpec.status != "READY",
+        )
+    )
+    if remaining != 0:
+        return None
+    fingerprint = _current_storyboard_take_fingerprint(session, storyboard)
+    next_job, _ = enqueue_job(
+        session,
+        project_id=job.project_id,
+        job_type="GENERATE_ANIMATIC",
+        entity_type="storyboard_version",
+        entity_id=storyboard.id,
+        idempotency_key=f"{job.project_id}:GENERATE_ANIMATIC:{storyboard.id}:{fingerprint}",
+        input_payload={
+            "storyboard_version_id": storyboard.id,
+            "workflow_run_id": storyboard.workflow_run_id,
+            "temporary_audio": True,
+            "take_fingerprint": fingerprint,
+        },
+        label="分镜 · 临时声音节奏样片",
+        stage="等待生成带临时对白与音乐的节奏样片",
+        trace_id=job.trace_id,
+        estimated_seconds=12,
+        retryable=True,
+    )
+    storyboard.status = "ANIMATIC_RUNNING"
+    storyboard.animatic_asset_id = None
+    if storyboard.workflow_run_id:
+        session.add(
+            WorkflowNode(
+                id=str(uuid4()),
+                workflow_run_id=storyboard.workflow_run_id,
+                node_key=f"animatic.render.{fingerprint}",
+                node_type="FAN_IN",
+                entity_type="storyboard_version",
+                entity_id=storyboard.id,
+                job_id=next_job.id,
+                status="READY",
+                dependency_keys_json=canonical_json([]),
+                output_json="{}",
+                degraded=False,
+                error_code=None,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    return next_job
+
+
+def regenerate_storyboard_shot(
+    session: Session,
+    *,
+    shot_spec_id: str,
+    expected_version: int,
+    actor: str,
+    trace_id: str,
+    note: str | None = None,
+) -> tuple[dict[str, object], JobRead, bool]:
+    spec = session.get(ShotSpec, shot_spec_id)
+    if spec is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "NOT_FOUND", "message": "分镜镜头不存在"},
+        )
+    storyboard = session.get(StoryboardVersion, spec.storyboard_version_id)
+    shot = session.get(Shot, spec.shot_id)
+    if storyboard is None or shot is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "NOT_FOUND", "message": "分镜版本或镜头不存在"},
+        )
+    project = project_or_404(session, storyboard.project_id)
+    if project.lock_version != expected_version:
+        raise version_conflict(project, expected_version)
+    if storyboard.status == "APPROVED" or project.status == "STORYBOARD_APPROVED":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "STORYBOARD_LOCKED",
+                "message": "第 4 阶段已批准，无法再重生成分镜",
+            },
+        )
+    if storyboard.status not in {"READY_FOR_REVIEW", "ANIMATIC_RUNNING", "TAKES_RUNNING"}:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "STORYBOARD_NOT_EDITABLE",
+                "message": f"当前分镜状态「{storyboard.status}」不可重生成",
+            },
+        )
+    active = session.scalar(
+        select(Job)
+        .where(
+            Job.job_type == "GENERATE_STORYBOARD_TAKE",
+            Job.entity_id == spec.id,
+            Job.status.in_({"PENDING", "RETRY_WAIT", "RUNNING", "CANCEL_REQUESTED"}),
+        )
+        .order_by(Job.created_at.desc())
+    )
+    if active is not None:
+        return (
+            {
+                "shot_spec_id": spec.id,
+                "shot_id": shot.id,
+                "code": shot.code,
+                "status": spec.status,
+            },
+            job_to_read(active),
+            True,
+        )
+    now = datetime.now(UTC)
+    revision = (spec.content_hash[:8] if spec.content_hash else "regen") + now.strftime("%H%M%S")
+    seed = int(content_hash(f"{spec.id}:{revision}:{note or ''}")[:8], 16) & 0x7FFFFFFF
+    characters: list[Character] = []
+    try:
+        character_ids = json.loads(shot.character_ids_json or "[]")
+    except json.JSONDecodeError:
+        character_ids = []
+    if isinstance(character_ids, list) and character_ids:
+        ordered = [item for item in character_ids if isinstance(item, str)]
+        by_id = {
+            item.id: item
+            for item in session.scalars(
+                select(Character).where(Character.id.in_(ordered))
+            ).all()
+        }
+        characters = [by_id[item_id] for item_id in ordered if item_id in by_id]
+    reference_asset_ids: list[str] = []
+    for character in characters:
+        for asset_id in _character_reference_asset_ids(session, character):
+            if asset_id not in reference_asset_ids:
+                reference_asset_ids.append(asset_id)
+    image_prompt = build_storyboard_take_prompt(
+        project,
+        description=shot.description,
+        dialogue=shot.dialogue,
+        location=shot.location,
+        time_of_day=shot.time_of_day,
+        shot_size=shot.shot_size,
+        camera_movement=shot.camera_movement,
+        characters=characters,
+        aspect_ratio=project.aspect_ratio,
+    )
+    cleaned_note = note.strip() if isinstance(note, str) and note.strip() else None
+    if cleaned_note:
+        image_prompt = f"{image_prompt}\n导演修改意图：{cleaned_note}。"
+    spec.status = "QUEUED"
+    shot.status = "QUEUED"
+    shot.lock_version += 1
+    storyboard.status = "TAKES_RUNNING"
+    storyboard.animatic_asset_id = None
+    project.status = "STORYBOARDING"
+    project.lock_version += 1
+    project.updated_at = now
+    child, replayed = enqueue_job(
+        session,
+        project_id=project.id,
+        job_type="GENERATE_STORYBOARD_TAKE",
+        entity_type="shot_spec",
+        entity_id=spec.id,
+        idempotency_key=f"{project.id}:GENERATE_STORYBOARD_TAKE:{spec.id}:regen:{revision}",
+        input_payload={
+            "storyboard_version_id": storyboard.id,
+            "workflow_run_id": storyboard.workflow_run_id,
+            "shot_spec_id": spec.id,
+            "shot_id": shot.id,
+            "prompt": image_prompt,
+            "reference_asset_ids": reference_asset_ids,
+            "seed": seed,
+            "replace_existing": True,
+            "note": cleaned_note,
+            "requested_by": actor,
+        },
+        label=f"{shot.code} · 重生成分镜",
+        stage="等待按修改意图重绘分镜",
+        trace_id=trace_id,
+        estimated_seconds=30,
+        retryable=True,
+    )
+    if storyboard.workflow_run_id and not replayed:
+        session.add(
+            WorkflowNode(
+                id=str(uuid4()),
+                workflow_run_id=storyboard.workflow_run_id,
+                node_key=f"storyboard.take.{spec.ordinal}.regen.{revision}",
+                node_type="JOB",
+                entity_type="shot_spec",
+                entity_id=spec.id,
+                job_id=child.id,
+                status="READY",
+                dependency_keys_json=canonical_json([]),
+                output_json="{}",
+                degraded=False,
+                error_code=None,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    append_event(
+        session,
+        project_id=project.id,
+        job_id=child.id,
+        event_type="storyboard.take_regenerate_requested",
+        payload={
+            "shot_spec_id": spec.id,
+            "shot_id": shot.id,
+            "code": shot.code,
+            "note": cleaned_note,
+            "actor": actor,
+        },
+    )
+    session.commit()
+    session.refresh(child)
+    return (
+        {
+            "shot_spec_id": spec.id,
+            "shot_id": shot.id,
+            "code": shot.code,
+            "status": spec.status,
+        },
+        job_to_read(child),
+        replayed,
+    )
+
+
+
+def revert_failed_storyboard_take(session: Session, job: Job) -> None:
+    """分镜重生成最终失败时回滚镜头状态，避免永久卡在「生成中」。"""
+    try:
+        payload = json.loads(job.input_json or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    spec_id = payload.get("shot_spec_id") or job.entity_id
+    spec = session.get(ShotSpec, str(spec_id)) if spec_id else None
+    shot_id = payload.get("shot_id") or (spec.shot_id if spec is not None else None)
+    shot = session.get(Shot, str(shot_id)) if shot_id else None
+    if spec is None or shot is None:
+        return
+    current_take = session.scalar(
+        select(Take).where(
+            Take.shot_id == shot.id,
+            Take.kind == "STORYBOARD",
+            Take.is_current.is_(True),
+        )
+    )
+    if current_take is not None:
+        spec.status = "READY"
+        shot.status = "READY"
+    else:
+        spec.status = "FAILED"
+        shot.status = "FAILED"
+    shot.lock_version += 1
+
+    storyboard_id = payload.get("storyboard_version_id") or spec.storyboard_version_id
+    storyboard = session.get(StoryboardVersion, str(storyboard_id)) if storyboard_id else None
+    if storyboard is None:
+        return
+    remaining = session.scalar(
+        select(func.count(ShotSpec.id)).where(
+            ShotSpec.storyboard_version_id == storyboard.id,
+            ShotSpec.status.notin_(["READY", "FAILED"]),
+        )
+    )
+    if remaining != 0:
+        return
+    storyboard.status = "READY_FOR_REVIEW"
+    project = session.get(Project, job.project_id)
+    if project is not None and project.status in {"STORYBOARDING", "STORYBOARD_READY"}:
+        project.status = "STORYBOARD_READY"
+        project.lock_version += 1
+        project.updated_at = datetime.now(UTC)
+
+
+def heal_stale_storyboard_take_queue(session: Session, storyboard: StoryboardVersion) -> bool:
+    """读取工作区时自愈：QUEUED 但已无活跃任务的镜头恢复为 READY/FAILED。"""
+    specs = list(
+        session.scalars(
+            select(ShotSpec).where(
+                ShotSpec.storyboard_version_id == storyboard.id,
+                ShotSpec.status == "QUEUED",
+            )
+        ).all()
+    )
+    if not specs:
+        return False
+    changed = False
+    for spec in specs:
+        active = session.scalar(
+            select(Job.id).where(
+                Job.job_type == "GENERATE_STORYBOARD_TAKE",
+                Job.entity_id == spec.id,
+                Job.status.in_({"PENDING", "RETRY_WAIT", "RUNNING", "CANCEL_REQUESTED"}),
+            )
+        )
+        if active is not None:
+            continue
+        shot = session.get(Shot, spec.shot_id)
+        if shot is None:
+            continue
+        current_take = session.scalar(
+            select(Take).where(
+                Take.shot_id == shot.id,
+                Take.kind == "STORYBOARD",
+                Take.is_current.is_(True),
+            )
+        )
+        if current_take is not None:
+            spec.status = "READY"
+            shot.status = "READY"
+        else:
+            spec.status = "FAILED"
+            shot.status = "FAILED"
+        shot.lock_version += 1
+        changed = True
+    if not changed:
+        return False
+    remaining = session.scalar(
+        select(func.count(ShotSpec.id)).where(
+            ShotSpec.storyboard_version_id == storyboard.id,
+            ShotSpec.status.notin_(["READY", "FAILED"]),
+        )
+    )
+    if remaining == 0 and storyboard.status in {"TAKES_RUNNING", "ANIMATIC_RUNNING"}:
+        storyboard.status = "READY_FOR_REVIEW"
+        project = session.get(Project, storyboard.project_id)
+        if project is not None and project.status == "STORYBOARDING":
+            project.status = "STORYBOARD_READY"
+            project.lock_version += 1
+            project.updated_at = datetime.now(UTC)
+    session.commit()
+    return True
 
 
 def animatic_inputs(
@@ -883,6 +1437,8 @@ def storyboard_workspace(session: Session, project_id: str) -> dict[str, object]
     )
     if storyboard is None:
         return {"storyboard": None, "shots": [], "workflow": None, "gate": None}
+    heal_stale_storyboard_take_queue(session, storyboard)
+    session.refresh(storyboard)
     specs = list(
         session.scalars(
             select(ShotSpec)
@@ -894,7 +1450,11 @@ def storyboard_workspace(session: Session, project_id: str) -> dict[str, object]
     for spec in specs:
         shot = session.get(Shot, spec.shot_id)
         take = session.scalar(
-            select(Take).where(Take.shot_id == spec.shot_id, Take.kind == "STORYBOARD")
+            select(Take).where(
+                Take.shot_id == spec.shot_id,
+                Take.kind == "STORYBOARD",
+                Take.is_current.is_(True),
+            )
         )
         shots.append(
             {
