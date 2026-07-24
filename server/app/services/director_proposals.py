@@ -285,3 +285,23 @@ def director_proposal_or_404(session: Session, proposal_id: str) -> dict[str, ob
     if "proposal" not in impact:
         raise _error(404, "DIRECTOR_PROPOSAL_NOT_FOUND", "该 ChangeSet 不是 Director Proposal")
     return director_proposal_to_read(change_set)
+
+
+def list_director_proposals(session: Session, *, project_id: str) -> list[dict[str, object]]:
+    project_or_404(session, project_id)
+    change_sets = list(
+        session.scalars(
+            select(ChangeSet)
+            .where(ChangeSet.project_id == project_id)
+            .order_by(ChangeSet.created_at.desc())
+        )
+    )
+    proposals: list[dict[str, object]] = []
+    for change_set in change_sets:
+        try:
+            impact = json.loads(change_set.impact_json)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(impact, dict) and "proposal" in impact:
+            proposals.append(director_proposal_to_read(change_set))
+    return proposals

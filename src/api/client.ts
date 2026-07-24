@@ -1940,6 +1940,295 @@ export interface StoryWorkspace {
   scriptVersions: ScriptVersionRecord[]
 }
 
+export type DirectorReviewIssueType =
+  | 'STORY_LOGIC'
+  | 'CHARACTER_MOTIVATION'
+  | 'AI_DIALOGUE'
+  | 'PACING'
+
+export type DirectorReviewStatus =
+  | 'PROPOSED'
+  | 'APPLIED_PENDING_APPROVAL'
+  | 'APPROVED'
+  | 'REJECTED'
+  | 'ROLLED_BACK'
+
+export interface DirectorReviewOption {
+  optionId: string
+  title: string
+  rationale: string
+  proposedChange: {
+    scope: 'SCENE' | 'LINE'
+    entityId: string
+    changes: Record<string, unknown>
+    before: Record<string, unknown>
+  }
+  estimatedTimeSeconds: number
+  estimatedCostUsd: number
+}
+
+export interface DirectorReviewProposal {
+  proposalId: string
+  projectId: string
+  issueType: DirectorReviewIssueType
+  observation: string
+  rationale: string
+  targetObjects: Array<{ type: string; id: string; versionId: string }>
+  alternatives: DirectorReviewOption[]
+  recommendedOption: string
+  confidence: number
+  affectedObjects: Array<{
+    type: string
+    id: string
+    nextStatus?: string
+    approvalPreserved?: boolean
+  }>
+  preservedObjects: Array<{
+    type: string
+    id: string
+    approval?: string
+  }>
+  estimatedTimeSeconds: number
+  estimatedCostUsd: number
+  requiresConfirmation: boolean
+  validationPlan: string[]
+  baseScriptVersionId: string
+  scriptSceneId: string
+  sceneOrdinal: number
+  provider: { provider: string; model: string; requestId?: string | null }
+  status: DirectorReviewStatus
+  resultScriptVersionId: string | null
+  rollbackScriptVersionId: string | null
+  comparison: {
+    before: Record<string, unknown>
+    after: Record<string, unknown>
+    estimatedDurationBeforeMs: number
+    estimatedDurationAfterMs: number
+    mediaGeneration: boolean
+  } | null
+  invalidated: Array<{ type: string; id: string; nextStatus?: string }>
+  approvalResult: { decision: string; actor: string; at: string } | null
+  createdAt: string
+}
+
+interface ApiDirectorReviewProposal {
+  proposal_id: string
+  project_id: string
+  issue_type: DirectorReviewIssueType
+  observation: string
+  rationale: string
+  target_objects: Array<{ type: string; id: string; version_id: string }>
+  alternatives: Array<{
+    option_id: string
+    title: string
+    rationale: string
+    proposed_change: {
+      scope: 'SCENE' | 'LINE'
+      entity_id: string
+      changes: Record<string, unknown>
+      before: Record<string, unknown>
+    }
+    estimated_time_seconds: number
+    estimated_cost_usd: number
+  }>
+  recommended_option: string
+  confidence: number
+  affected_objects: Array<{
+    type: string
+    id: string
+    next_status?: string
+    approval_preserved?: boolean
+  }>
+  preserved_objects: Array<{
+    type: string
+    id: string
+    approval?: string
+  }>
+  estimated_time_seconds: number
+  estimated_cost_usd: number
+  requires_confirmation: boolean
+  validation_plan: string[]
+  base_script_version_id: string
+  script_scene_id: string
+  scene_ordinal: number
+  provider: { provider: string; model: string; request_id?: string | null }
+  status: DirectorReviewStatus
+  result_script_version_id: string | null
+  rollback_script_version_id: string | null
+  comparison: {
+    before: Record<string, unknown>
+    after: Record<string, unknown>
+    estimated_duration_before_ms: number
+    estimated_duration_after_ms: number
+    media_generation: boolean
+  } | null
+  invalidated: Array<{ type: string; id: string; next_status?: string }>
+  approval_result: { decision: string; actor: string; at: string } | null
+  created_at: string
+}
+
+function mapDirectorReviewProposal(
+  proposal: ApiDirectorReviewProposal,
+): DirectorReviewProposal {
+  return {
+    proposalId: proposal.proposal_id,
+    projectId: proposal.project_id,
+    issueType: proposal.issue_type,
+    observation: proposal.observation,
+    rationale: proposal.rationale,
+    targetObjects: proposal.target_objects.map((item) => ({
+      type: item.type,
+      id: item.id,
+      versionId: item.version_id,
+    })),
+    alternatives: proposal.alternatives.map((item) => ({
+      optionId: item.option_id,
+      title: item.title,
+      rationale: item.rationale,
+      proposedChange: {
+        scope: item.proposed_change.scope,
+        entityId: item.proposed_change.entity_id,
+        changes: item.proposed_change.changes,
+        before: item.proposed_change.before,
+      },
+      estimatedTimeSeconds: item.estimated_time_seconds,
+      estimatedCostUsd: item.estimated_cost_usd,
+    })),
+    recommendedOption: proposal.recommended_option,
+    confidence: proposal.confidence,
+    affectedObjects: proposal.affected_objects.map((item) => ({
+      type: item.type,
+      id: item.id,
+      nextStatus: item.next_status,
+      approvalPreserved: item.approval_preserved,
+    })),
+    preservedObjects: proposal.preserved_objects,
+    estimatedTimeSeconds: proposal.estimated_time_seconds,
+    estimatedCostUsd: proposal.estimated_cost_usd,
+    requiresConfirmation: proposal.requires_confirmation,
+    validationPlan: proposal.validation_plan,
+    baseScriptVersionId: proposal.base_script_version_id,
+    scriptSceneId: proposal.script_scene_id,
+    sceneOrdinal: proposal.scene_ordinal,
+    provider: {
+      provider: proposal.provider.provider,
+      model: proposal.provider.model,
+      requestId: proposal.provider.request_id,
+    },
+    status: proposal.status,
+    resultScriptVersionId: proposal.result_script_version_id,
+    rollbackScriptVersionId: proposal.rollback_script_version_id,
+    comparison: proposal.comparison
+      ? {
+          before: proposal.comparison.before,
+          after: proposal.comparison.after,
+          estimatedDurationBeforeMs:
+            proposal.comparison.estimated_duration_before_ms,
+          estimatedDurationAfterMs:
+            proposal.comparison.estimated_duration_after_ms,
+          mediaGeneration: proposal.comparison.media_generation,
+        }
+      : null,
+    invalidated: proposal.invalidated.map((item) => ({
+      type: item.type,
+      id: item.id,
+      nextStatus: item.next_status,
+    })),
+    approvalResult: proposal.approval_result,
+    createdAt: proposal.created_at,
+  }
+}
+
+export async function fetchDirectorReviewProposals(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<DirectorReviewProposal[]> {
+  const result = await requestJson<ApiDirectorReviewProposal[]>(
+    `/api/v1/projects/${projectId}/director-review-proposals`,
+    { signal },
+  )
+  return result.map(mapDirectorReviewProposal)
+}
+
+export async function createDirectorReviewProposal(
+  projectId: string,
+  input: {
+    expectedVersion: number
+    targetId: string
+    issueTypes: DirectorReviewIssueType[]
+    instruction?: string
+  },
+): Promise<DirectorReviewProposal> {
+  const result = await requestJson<ApiDirectorReviewProposal>(
+    `/api/v1/projects/${projectId}/director-review-proposals`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': crypto.randomUUID(),
+      },
+      body: JSON.stringify({
+        expected_version: input.expectedVersion,
+        target_type: 'SCRIPT_SCENE',
+        target_id: input.targetId,
+        issue_types: input.issueTypes,
+        instruction: input.instruction,
+        actor: '创作者',
+      }),
+    },
+  )
+  return mapDirectorReviewProposal(result)
+}
+
+export async function executeDirectorReviewProposal(
+  proposalId: string,
+  input: { expectedVersion: number; optionId: string },
+): Promise<DirectorReviewProposal> {
+  const result = await requestJson<{
+    proposal: ApiDirectorReviewProposal
+    script: unknown
+  }>(`/api/v1/director-review-proposals/${proposalId}/execute`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': crypto.randomUUID(),
+    },
+    body: JSON.stringify({
+      expected_version: input.expectedVersion,
+      option_id: input.optionId,
+      actor: '创作者',
+      confirmed: true,
+    }),
+  })
+  return mapDirectorReviewProposal(result.proposal)
+}
+
+export async function decideDirectorReviewProposal(
+  proposalId: string,
+  input: {
+    expectedVersion: number
+    decision: 'APPROVE' | 'REJECT' | 'ROLLBACK'
+  },
+): Promise<DirectorReviewProposal> {
+  const result = await requestJson<ApiDirectorReviewProposal>(
+    `/api/v1/director-review-proposals/${proposalId}/decision`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': crypto.randomUUID(),
+      },
+      body: JSON.stringify({
+        expected_version: input.expectedVersion,
+        decision: input.decision,
+        actor: '创作者',
+        confirmed: true,
+      }),
+    },
+  )
+  return mapDirectorReviewProposal(result)
+}
+
 export type RelationshipType =
   | 'FAMILY'
   | 'ROMANTIC'

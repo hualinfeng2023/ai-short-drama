@@ -17,6 +17,7 @@ from app.domain.director import (
 )
 from app.services.director_proposals import (
     director_proposal_or_404,
+    list_director_proposals,
     prepare_director_proposal,
 )
 from app.services.domain_commands import dispatch_domain_command
@@ -120,6 +121,14 @@ def get_director_proposal(
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
     return success(director_proposal_or_404(session, proposal_id))
+
+
+@router.get("/projects/{project_id}/director-review-proposals")
+def get_project_director_proposals(
+    project_id: str,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return success(list_director_proposals(session, project_id=project_id))
 
 
 @router.post("/director-review-proposals/{proposal_id}/execute")

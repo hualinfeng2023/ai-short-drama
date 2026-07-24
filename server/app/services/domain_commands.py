@@ -1408,6 +1408,7 @@ def _execute_create_director_proposal(
         "validation_plan": review.validation_plan,
         "base_script_version_id": script.id,
         "script_scene_id": scene.id,
+        "scene_ordinal": scene.ordinal,
         "requested_by": payload.get("requested_by"),
         "provider": provider,
     }

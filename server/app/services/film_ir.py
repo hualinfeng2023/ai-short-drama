@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import (
     Asset,
+    ChangeSet,
     Character,
     CharacterIdentityVersion,
     CharacterLookVersion,
@@ -753,6 +754,75 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
                 "PRODUCED_TAKE",
                 inferred=False,
                 evidence="takes.generation_record_id",
+            )
+
+    director_change_sets = list(
+        session.scalars(
+            select(ChangeSet)
+            .where(ChangeSet.project_id == project.id)
+            .order_by(ChangeSet.created_at)
+        )
+    )
+    for change_set in director_change_sets:
+        impact = _json(change_set.impact_json, {})
+        proposal = impact.get("proposal") if isinstance(impact, dict) else None
+        if not isinstance(proposal, dict):
+            continue
+        graph.add_object(
+            object_type="DirectorProposal",
+            object_id=change_set.id,
+            version_id=None,
+            canonical_kind="DERIVED",
+            status=change_set.status,
+            table=ChangeSet.__tablename__,
+            row_id=change_set.id,
+            attributes={
+                "issue_type": proposal.get("issue_type"),
+                "recommended_option": proposal.get("recommended_option"),
+                "confidence": proposal.get("confidence"),
+                "result_script_version_id": impact.get("result_script_version_id"),
+                "rollback_script_version_id": impact.get("rollback_script_version_id"),
+            },
+        )
+        for target in proposal.get("target_objects", []):
+            if not isinstance(target, dict):
+                continue
+            target_type = str(target.get("type", ""))
+            target_id = str(target.get("id", ""))
+            if target_type == "ScriptScene":
+                target_id = script_scene_logical_ids.get(target_id, target_id)
+            graph.add_edge(
+                "DirectorProposal",
+                change_set.id,
+                target_type,
+                target_id,
+                "PROPOSES_CHANGE_TO",
+                inferred=False,
+                evidence="change_sets.impact_json.proposal.target_objects",
+            )
+        for affected in impact.get("invalidated", []):
+            if not isinstance(affected, dict):
+                continue
+            graph.add_edge(
+                "DirectorProposal",
+                change_set.id,
+                str(affected.get("type", "")),
+                str(affected.get("id", "")),
+                "INVALIDATES",
+                inferred=False,
+                evidence="change_sets.impact_json.invalidated",
+            )
+        for preserved in proposal.get("preserved_objects", []):
+            if not isinstance(preserved, dict):
+                continue
+            graph.add_edge(
+                "DirectorProposal",
+                change_set.id,
+                str(preserved.get("type", "")),
+                str(preserved.get("id", "")),
+                "PRESERVES",
+                inferred=False,
+                evidence="change_sets.impact_json.proposal.preserved_objects",
             )
 
     timeline = (

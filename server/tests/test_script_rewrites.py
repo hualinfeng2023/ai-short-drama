@@ -443,6 +443,12 @@ async def test_director_proposal_review_execute_compare_and_rollback(
     assert proposal["provider"]["model"] == "deterministic-director-evaluator-v1"
     assert proposal["preserved_objects"]
 
+    proposal_list = await client.get(f"/api/v1/projects/{PROJECT_ID}/director-review-proposals")
+    assert proposal_list.status_code == 200
+    assert [item["proposal_id"] for item in proposal_list.json()["data"]] == [
+        proposal["proposal_id"]
+    ]
+
     replayed = await client.post(
         f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
         json=create_payload,
@@ -491,6 +497,17 @@ async def test_director_proposal_review_execute_compare_and_rollback(
     assert result["proposal"]["comparison"]["media_generation"] is False
     assert result["proposal"]["comparison"]["base_script_version_id"] == SCRIPT_ID
     revised_script_id = result["script"]["id"]
+    film_ir = (await client.get(f"/api/v1/projects/{PROJECT_ID}/film-ir")).json()["data"]
+    proposal_node = next(
+        item
+        for item in film_ir["objects"]
+        if item["type"] == "DirectorProposal" and item["id"] == proposal["proposal_id"]
+    )
+    assert proposal_node["canonical_kind"] == "DERIVED"
+    assert proposal_node["canonical_status"] == "APPLIED_PENDING_APPROVAL"
+    assert ("PRESERVES", False) in {
+        (edge["relation"], edge["inferred"]) for edge in film_ir["edges"]
+    }
 
     execute_replay = await client.post(
         f"/api/v1/director-review-proposals/{proposal['proposal_id']}/execute",

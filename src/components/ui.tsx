@@ -19,7 +19,7 @@ import {
   type ReactNode,
 } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertCircle, AlertTriangle, Check, CheckCircle2, ChevronDown, CircleDot, Info, LoaderCircle, LockKeyhole, Search, X } from 'lucide-react'
+import { AlertCircle, AlertTriangle, Check, CheckCircle2, ChevronDown, CircleDot, Info, LoaderCircle, LockKeyhole, RotateCcw, Search, X } from 'lucide-react'
 
 export function Button({
   variant = 'primary',
@@ -712,6 +712,10 @@ export function SelectControl({
 
 const statusMeta: Record<string, { label: string; tone: string; icon: ReactNode }> = {
   DRAFT: { label: '草稿', tone: 'neutral', icon: <CircleDot size={12} /> },
+  PROPOSED: { label: '待选择', tone: 'warning', icon: <AlertTriangle size={12} /> },
+  APPLIED_PENDING_APPROVAL: { label: '修改版待批准', tone: 'warning', icon: <AlertTriangle size={12} /> },
+  REJECTED: { label: '已拒绝', tone: 'neutral', icon: <X size={12} /> },
+  ROLLED_BACK: { label: '已回退', tone: 'neutral', icon: <RotateCcw size={12} /> },
   BRIEF_LOCKED: { label: '设定已锁定', tone: 'neutral', icon: <LockKeyhole size={12} /> },
   READY: { label: '待开始', tone: 'neutral', icon: <CircleDot size={12} /> },
   QUEUED: { label: '排队中', tone: 'info', icon: <LoaderCircle size={12} /> },
