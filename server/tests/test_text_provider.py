@@ -621,8 +621,16 @@ async def test_story_package_provider_uses_three_scoped_generation_contracts(
     package = deterministic_story_package(BRIEF, direction)
     validators: list[str] = []
 
-    async def fake_ark_json(_settings, *, prompt, validator, transport=None):  # noqa: ANN001
-        del prompt, transport
+    async def fake_ark_json(  # noqa: ANN001
+        _settings,
+        *,
+        prompt,
+        validator,
+        transport=None,
+        payload_normalizer=None,
+        thinking_type=None,
+    ):
+        del payload_normalizer, prompt, thinking_type, transport
         validators.append(validator.__name__)
         if validator is StoryFoundation:
             payload = StoryFoundation(

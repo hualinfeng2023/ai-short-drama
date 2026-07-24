@@ -158,9 +158,7 @@ def request_story_directions(
         stage="等待生成差异化故事方向",
         trace_id=trace_id,
         estimated_seconds=(
-            max(5, round(settings.ark_request_timeout_seconds))
-            if settings.ark_api_key
-            else 5
+            max(5, round(settings.ark_request_timeout_seconds)) if settings.ark_api_key else 5
         ),
         max_attempts=2,
         retryable=True,
@@ -1189,6 +1187,8 @@ def revise_script(
     scope: str,
     entity_id: str,
     changes: dict[str, object],
+    commit: bool = True,
+    allow_director_revision: bool = False,
 ) -> dict[str, object]:
     source = session.get(ScriptVersion, script_id)
     if source is None:
@@ -1199,7 +1199,12 @@ def revise_script(
     project = project_or_404(session, source.project_id)
     if project.lock_version != expected_version:
         raise version_conflict(project, expected_version)
-    if project.status != "SCRIPT_READY" or source.status != "READY_FOR_REVIEW":
+    editable = project.status == "SCRIPT_READY" and source.status == "READY_FOR_REVIEW"
+    director_editable = allow_director_revision and source.status in {
+        "READY_FOR_REVIEW",
+        "APPROVED",
+    }
+    if not editable and not director_editable:
         raise HTTPException(
             status_code=409,
             detail={
@@ -1343,7 +1348,10 @@ def revise_script(
             "entity_id": entity_id,
         },
     )
-    session.commit()
+    if commit:
+        session.commit()
+    else:
+        session.flush()
     return {
         "id": revised.id,
         "version": revised.version,
@@ -1361,6 +1369,7 @@ def approve_script(
     expected_version: int,
     actor: str,
     trace_id: str,
+    commit: bool = True,
 ) -> tuple[dict[str, object], JobRead, bool]:
     script = session.get(ScriptVersion, script_id)
     if script is None:
@@ -1442,6 +1451,8 @@ def approve_script(
         event_type="script.approved",
         payload={"script_id": script.id, "episode_ordinal": script.episode_ordinal},
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     session.refresh(job)
     return _version_payload(script), job_to_read(job), replayed

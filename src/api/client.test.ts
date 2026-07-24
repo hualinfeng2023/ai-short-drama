@@ -14,6 +14,7 @@ import {
   fetchStoryWorkspace,
   fetchBriefVersions,
   fetchDirectorProposals,
+  fetchDirectorReviewProposals,
   generateShotTake,
   mapWorkspace,
   recoverPersistedJob,
@@ -351,6 +352,95 @@ describe('legacy director proposal compatibility', () => {
     expect(proposal.directorStatement).toBe('')
     expect(proposal.assumptions).toEqual([])
     expect(proposal.scenes[0]).toMatchObject({ purpose: '', shots: [] })
+  })
+})
+
+describe('director review proposal client', () => {
+  it('maps structured options, impact protection, and low-cost comparison', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: [{
+        proposal_id: '44444444-4444-4444-8444-444444444444',
+        project_id: apiProject.id,
+        issue_type: 'AI_DIALOGUE',
+        observation: '对白在解释剧情。',
+        rationale: '人物需要采取语言行动。',
+        target_objects: [{
+          type: 'ScriptScene',
+          id: '55555555-5555-4555-8555-555555555555',
+          version_id: '66666666-6666-4666-8666-666666666666',
+        }],
+        alternatives: [{
+          option_id: 'dialogue-concise',
+          title: '压缩解释性对白',
+          rationale: '保留行动，删除填充。',
+          proposed_change: {
+            scope: 'LINE',
+            entity_id: '77777777-7777-4777-8777-777777777777',
+            changes: { text: '现在离开。' },
+            before: { text: '其实我觉得，你现在应该离开。' },
+          },
+          estimated_time_seconds: 1,
+          estimated_cost_usd: 0,
+        }, {
+          option_id: 'pacing',
+          title: '收紧节奏',
+          rationale: '缩短停顿。',
+          proposed_change: {
+            scope: 'LINE',
+            entity_id: '77777777-7777-4777-8777-777777777777',
+            changes: { pause_after_ms: 100 },
+            before: { pause_after_ms: 300 },
+          },
+          estimated_time_seconds: 1,
+          estimated_cost_usd: 0,
+        }],
+        recommended_option: 'dialogue-concise',
+        confidence: 0.82,
+        affected_objects: [{ type: 'Shot', id: 'shot-id', next_status: 'SUSPECT' }],
+        preserved_objects: [{ type: 'Take', id: 'take-id', approval: 'APPROVED' }],
+        estimated_time_seconds: 2,
+        estimated_cost_usd: 0,
+        requires_confirmation: true,
+        validation_plan: ['比较人物目标'],
+        base_script_version_id: '66666666-6666-4666-8666-666666666666',
+        script_scene_id: '55555555-5555-4555-8555-555555555555',
+        scene_ordinal: 1,
+        provider: { provider: 'mock', model: 'director-v1', request_id: null },
+        status: 'APPLIED_PENDING_APPROVAL',
+        result_script_version_id: '88888888-8888-4888-8888-888888888888',
+        rollback_script_version_id: null,
+        comparison: {
+          before: { text: '其实我觉得，你现在应该离开。' },
+          after: { text: '现在离开。' },
+          estimated_duration_before_ms: 3200,
+          estimated_duration_after_ms: 1800,
+          media_generation: false,
+        },
+        invalidated: [{ type: 'Shot', id: 'shot-id', next_status: 'SUSPECT' }],
+        approval_result: null,
+        created_at: '2026-07-25T00:00:00Z',
+      }],
+      trace_id: 'trace-director-review',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })))
+
+    const [proposal] = await fetchDirectorReviewProposals(apiProject.id)
+
+    expect(proposal).toMatchObject({
+      issueType: 'AI_DIALOGUE',
+      recommendedOption: 'dialogue-concise',
+      sceneOrdinal: 1,
+      status: 'APPLIED_PENDING_APPROVAL',
+      estimatedCostUsd: 0,
+    })
+    expect(proposal.alternatives[0].proposedChange.changes).toEqual({
+      text: '现在离开。',
+    })
+    expect(proposal.comparison).toMatchObject({
+      estimatedDurationBeforeMs: 3200,
+      estimatedDurationAfterMs: 1800,
+      mediaGeneration: false,
+    })
+    expect(proposal.preservedObjects[0].approval).toBe('APPROVED')
   })
 })
 

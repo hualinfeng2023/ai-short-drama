@@ -25,10 +25,11 @@ from app.db.models import (
 )
 from app.services.assets import register_file, resolve_asset_path
 from app.services.events import append_event
+from app.services.generation_records import ensure_generation_record
 from app.services.image_provider import GeneratedImage
 from app.services.jobs import enqueue_job
 from app.services.media_staging import seedream_fast_path_expires_at
-from app.services.projects import canonical_json, content_hash, version_conflict
+from app.services.projects import canonical_json, version_conflict
 from app.services.video_provider import GeneratedVideo
 from app.services.videos import materialize_generated_video
 from app.services.workspace import project_or_404
@@ -149,38 +150,23 @@ def _record_generation(
     status: str = "SUCCEEDED",
     metadata: dict[str, object] | None = None,
 ) -> GenerationRecord:
-    existing = session.scalar(select(GenerationRecord).where(GenerationRecord.job_id == job.id))
-    if existing is not None:
-        return existing
-    now = datetime.now(UTC)
-    record = GenerationRecord(
-        id=str(uuid4()),
-        project_id=job.project_id,
-        job_id=job.id,
-        entity_type=job.entity_type,
-        entity_id=job.entity_id,
+    return ensure_generation_record(
+        session,
+        job=job,
         capability=capability,
         provider=provider,
         model=model,
         config_version="generation-v1",
-        prompt_hash=content_hash(prompt),
-        seed=str(seed) if seed is not None else None,
-        reference_asset_ids_json=canonical_json(reference_asset_ids),
+        prompt=prompt,
+        seed=seed,
+        reference_asset_ids=reference_asset_ids,
         provider_request_id=provider_request_id,
         provider_task_id=provider_task_id,
+        output_asset_id=output_asset_id,
         status=status,
         latency_ms=latency_ms,
-        input_units=None,
-        output_units=None,
-        estimated_cost_usd=None,
-        output_asset_id=output_asset_id,
-        metadata_json=canonical_json(metadata or {}),
-        created_at=now,
-        completed_at=now,
+        metadata=metadata,
     )
-    session.add(record)
-    session.flush()
-    return record
 
 
 def _generic_image_qc(

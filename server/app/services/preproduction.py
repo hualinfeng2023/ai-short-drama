@@ -27,6 +27,7 @@ from app.schemas import CharacterRead, JobRead
 from app.services.assets import register_file
 from app.services.character_image_qc import CharacterImageQualityReport
 from app.services.events import append_event
+from app.services.generation_records import ensure_generation_record
 from app.services.image_provider import GeneratedImage
 from app.services.jobs import enqueue_job, job_to_read
 from app.services.production import list_characters
@@ -234,6 +235,38 @@ def materialize_character_candidate(
     if character is None:
         raise ValueError("角色不存在")
     ordinal = int(payload["ordinal"])
+
+    def trace_generation(
+        asset: Asset,
+        candidate: CharacterCandidate,
+        *,
+        quality_status: str,
+        reused: bool,
+    ) -> None:
+        ensure_generation_record(
+            session,
+            job=job,
+            capability="PREPRODUCTION_CHARACTER_CANDIDATE",
+            provider=asset.provider,
+            model=image.model,
+            config_version="preproduction-character-v1",
+            prompt=str(payload.get("prompt", "")),
+            seed=payload.get("seed"),
+            reference_asset_ids=[],
+            provider_request_id=image.request_id,
+            provider_task_id=None,
+            output_asset_id=asset.id,
+            entity_type="character_candidate",
+            entity_id=candidate.id,
+            estimated_cost_usd=0.0 if asset.provider == "mock" else None,
+            metadata={
+                "character_id": character.id,
+                "ordinal": ordinal,
+                "quality_status": quality_status,
+                "reused_existing_output": reused,
+            },
+        )
+
     existing = session.scalar(
         select(CharacterCandidate).where(
             CharacterCandidate.character_id == character.id,
@@ -244,6 +277,12 @@ def materialize_character_candidate(
         asset = session.get(Asset, existing.asset_id)
         if asset is None:
             raise ValueError("角色候选资产不存在")
+        trace_generation(
+            asset,
+            existing,
+            quality_status=existing.status,
+            reused=True,
+        )
         return asset, existing
     tmp_dir = settings.data_dir / "tmp" / job.id / "character-candidate"
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -296,6 +335,12 @@ def materialize_character_candidate(
         created_at=now,
     )
     session.add(candidate)
+    trace_generation(
+        asset,
+        candidate,
+        quality_status=quality_status,
+        reused=False,
+    )
     session.flush()
     materialized_count = session.scalar(
         select(func.count(CharacterCandidate.id)).where(

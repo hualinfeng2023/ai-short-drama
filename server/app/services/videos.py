@@ -14,6 +14,7 @@ from app.config import Settings, get_settings
 from app.db.models import Asset, Job, Shot, Take
 from app.schemas import JobRead, ShotVideoGenerateRequest
 from app.services.events import append_event
+from app.services.generation_records import ensure_generation_record
 from app.services.jobs import ACTIVE_STATUSES, QUEUED_STATUSES, enqueue_job, job_to_read
 from app.services.media_staging import (
     media_staging_configured,
@@ -209,6 +210,37 @@ def materialize_generated_video(
 ) -> tuple[Asset, Take]:
     job_input = json.loads(job.input_json)
     take_version = int(job_input["take_version"])
+
+    def trace_generation(asset: Asset, take: Take) -> None:
+        reference_asset_ids = [
+            item
+            for item in [job_input.get("source_asset_id")]
+            if isinstance(item, str) and item
+        ]
+        record = ensure_generation_record(
+            session,
+            job=job,
+            capability="SHOT_VIDEO",
+            provider=asset.provider,
+            model=video.model,
+            config_version="shot-video-v1",
+            prompt=str(job_input.get("prompt", "")),
+            seed=None,
+            reference_asset_ids=reference_asset_ids,
+            provider_request_id=video.request_id,
+            provider_task_id=video.provider_task_id,
+            output_asset_id=asset.id,
+            entity_type="take",
+            entity_id=take.id,
+            metadata={
+                "take_kind": take.kind,
+                "take_version": take.version,
+                "source_url_kind": job_input.get("source_url_kind"),
+                "source_asset_id": job_input.get("source_asset_id"),
+            },
+        )
+        take.generation_record_id = record.id
+
     existing_take = session.scalar(
         select(Take).where(
             Take.shot_id == job.entity_id,
@@ -220,6 +252,7 @@ def materialize_generated_video(
         asset = session.get(Asset, existing_take.asset_id)
         if asset is None:
             raise RuntimeError("视频版本引用的资产不存在")
+        trace_generation(asset, existing_take)
         return asset, existing_take
 
     digest = sha256(video.content).hexdigest()
@@ -282,6 +315,7 @@ def materialize_generated_video(
         created_at=datetime.now(UTC),
     )
     session.add(take)
+    trace_generation(asset, take)
     append_event(
         session,
         project_id=job.project_id,

@@ -513,19 +513,29 @@ export function AppShell() {
                 <ChevronDown className="account-button__chevron" size={15} />
               </button>
               {accountOpen ? (
-                <div className="popover" id="account-popover" role="menu">
+                <div className="popover popover--account" id="account-popover" role="menu">
                   <p className="popover__meta">本地单用户模式</p>
-                  <Link role="menuitem" to="/settings" onClick={() => setAccountOpen(false)}>打开系统设置</Link>
-                  <button
-                    role="menuitem"
-                    onClick={() => {
-                      setAccountOpen(false)
-                      setOnboardingOpen(true)
-                    }}
-                    type="button"
-                  >
-                    查看新手引导
-                  </button>
+                  <div className="popover__menu">
+                    <Link
+                      className="popover__item"
+                      role="menuitem"
+                      to="/settings"
+                      onClick={() => setAccountOpen(false)}
+                    >
+                      打开系统设置
+                    </Link>
+                    <button
+                      className="popover__item"
+                      role="menuitem"
+                      onClick={() => {
+                        setAccountOpen(false)
+                        setOnboardingOpen(true)
+                      }}
+                      type="button"
+                    >
+                      查看新手引导
+                    </button>
+                  </div>
                 </div>
               ) : null}
             </div>

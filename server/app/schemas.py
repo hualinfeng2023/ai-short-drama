@@ -751,6 +751,14 @@ class StoryPackageGenerateRequest(BaseModel):
     actor: str = Field(default="demo-user", min_length=1, max_length=80)
 
 
+class StoryboardShotRegenerateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    expected_version: int = Field(ge=1)
+    actor: str = Field(default="demo-user", min_length=1, max_length=80)
+    note: str | None = Field(default=None, max_length=500)
+
+
 class ScriptApprovalRequest(BaseModel):
     expected_version: int = Field(ge=1)
     actor: str = Field(default="demo-user", min_length=1, max_length=80)

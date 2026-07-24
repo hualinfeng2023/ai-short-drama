@@ -131,7 +131,7 @@ export function PreproductionPage() {
     </section>
 
     <Surface className="story-section">
-      <div className="section-heading"><div><p className="eyebrow">角色形象</p><h2>已锁定身份引用</h2><p>角色身份已在剧本生成前人工锁定；本阶段只读取身份与基础 Look Version，不会替换候选或覆盖既有镜头。</p></div></div>
+      <div className="section-heading"><div><h2>已锁定身份引用</h2><p>角色身份已在剧本生成前人工锁定；本阶段只读取身份与基础 Look Version，不会替换候选或覆盖既有镜头。</p></div></div>
       <div className="preproduction-character-list">{workspace.characters.map((character) => {
         const lockedReferenceUrl = character.lockedCandidateId && activeProject.id === projectId
           ? activeProject.shots.find((shot) => (
@@ -139,20 +139,40 @@ export function PreproductionPage() {
             && (!shot.characterIds?.length || shot.characterIds.includes(character.id))
           ))?.currentImageUrl ?? activeProject.shots.find((shot) => shot.currentImageUrl)?.currentImageUrl
           : undefined
+        const lockedCandidate = character.lockedCandidateId
+          ? character.candidates.find((candidate) => candidate.id === character.lockedCandidateId)
+          : undefined
+        const lockedImageUrl = lockedReferenceUrl || lockedCandidate?.assetUrl
         return <article key={character.id}>
         <header><div><p className="eyebrow">{localizeCharacterRole(character.role)}</p><h3>{character.name}</h3><p>{character.visualBrief}</p></div><StatusBadge status={character.status} /></header>
-        <div className="character-candidate-grid">{character.candidates.map((candidate) => {
-          const active = selected[character.id] === candidate.id
-          const usesProjectFrame = candidate.id === character.lockedCandidateId && Boolean(lockedReferenceUrl)
-          return <button className={`character-candidate ${active ? 'character-candidate--selected' : ''}`} disabled={Boolean(character.lockedCandidateId)} key={candidate.id} onClick={() => setSelected((value) => ({ ...value, [character.id]: candidate.id }))}><img alt={`${character.name} 候选 ${candidate.ordinal}`} src={usesProjectFrame ? lockedReferenceUrl : candidate.assetUrl} /><span><strong>候选 {candidate.ordinal}</strong><small>{usesProjectFrame ? '已锁定形象 · 项目参考镜头' : `生成种子 · ${candidate.seed}`}</small></span>{active ? <em><Check size={15} />{character.lockedCandidateId ? '已锁定' : '已选择'}</em> : null}</button>
-        })}</div>
-        <footer>{character.lockedCandidateId ? <span><LockKeyhole size={16} />角色形象已冻结</span> : <Button disabled={!selected[character.id] || busy !== null} onClick={() => void lockCharacter(character.id)}>{busy === character.id ? <LoaderCircle className="spin" size={16} /> : <LockKeyhole size={16} />}锁定 {character.name}</Button>}</footer>
+        {lockedCandidate && lockedImageUrl ? (
+          <div className="preproduction-locked-look">
+            <img alt={`${character.name} 已锁定形象`} src={lockedImageUrl} />
+            <div>
+              <strong>已锁定形象</strong>
+              <small>候选 {lockedCandidate.ordinal}{lockedReferenceUrl ? ' · 项目参考镜头' : ''}</small>
+            </div>
+          </div>
+        ) : (
+          <div className="character-candidate-grid">{character.candidates.map((candidate) => {
+            const active = selected[character.id] === candidate.id
+            return <button className={`character-candidate ${active ? 'character-candidate--selected' : ''}`} key={candidate.id} onClick={() => setSelected((value) => ({ ...value, [character.id]: candidate.id }))}><img alt={`${character.name} 候选 ${candidate.ordinal}`} src={candidate.assetUrl} /><span><strong>候选 {candidate.ordinal}</strong><small>生成种子 · {candidate.seed}</small></span>{active ? <em><Check size={15} />已选择</em> : null}</button>
+          })}</div>
+        )}
+        {character.lockedCandidateId ? null : (
+          <footer>
+            <Button disabled={!selected[character.id] || busy !== null} onClick={() => void lockCharacter(character.id)}>
+              {busy === character.id ? <LoaderCircle className="spin" size={16} /> : <LockKeyhole size={16} />}
+              锁定 {character.name}
+            </Button>
+          </footer>
+        )}
       </article>
       })}</div>
     </Surface>
 
     <section className="preproduction-assets">
-      <article><p className="eyebrow">造型版本</p><h2>{workspace.looks.length} 个已生成版本</h2>{workspace.looks.map((look) => <div key={look.id}><strong>{localizeDisplayText(look.label)}</strong><span>第 {look.version} 版 · {localizeDisplayText(look.usageScope)}</span><StatusBadge status={look.status} /></div>)}</article>
+      <article><p className="eyebrow">造型版本</p><h2>{workspace.looks.length} 个已生成版本</h2>{workspace.looks.map((look) => <div key={look.id}><strong>{localizeDisplayText(look.label)}</strong><StatusBadge status={look.status} /><span>第 {look.version} 版 · {localizeDisplayText(look.usageScope)}</span></div>)}</article>
       <article><p className="eyebrow">声音安全</p><h2>声音档案</h2>{workspace.voices.map((voice) => <div key={voice.id}><Mic2 size={15} /><strong>{voice.voiceKey}</strong><span>{getStatusLabel(voice.consentStatus)}</span><small>{voice.cloningEnabled ? '已开启克隆' : '真人声音克隆关闭'}</small></div>)}</article>
       <article><p className="eyebrow">世界资产</p><h2>场景与道具</h2>{workspace.locations.map((location) => <div key={location.id}><strong>{location.name}</strong><span>场景第 {location.version} 版</span></div>)}{workspace.props.map((prop) => <div key={prop.id}><strong>{prop.name}</strong><span>道具第 {prop.version} 版</span></div>)}</article>
     </section>

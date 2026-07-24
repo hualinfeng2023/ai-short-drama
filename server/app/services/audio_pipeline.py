@@ -14,7 +14,6 @@ from app.db.models import (
     AudioCue,
     AudioTake,
     Character,
-    GenerationRecord,
     Job,
     JobDependency,
     LipSyncTake,
@@ -31,6 +30,7 @@ from app.db.models import (
 )
 from app.services.assets import register_file
 from app.services.events import append_event
+from app.services.generation_records import ensure_generation_record
 from app.services.jobs import enqueue_job
 from app.services.projects import canonical_json, content_hash
 from app.services.workspace import project_or_404
@@ -328,6 +328,25 @@ def materialize_audio_take(
         select(AudioTake).where(AudioTake.audio_cue_id == cue.id, AudioTake.version == 1)
     )
     if existing is not None:
+        if existing.generation_record_id is None:
+            record = ensure_generation_record(
+                session,
+                job=job,
+                capability=f"AUDIO_{cue.cue_type}",
+                provider="mock-audio",
+                model="deterministic-wave-v1",
+                config_version="audio-pipeline-v1",
+                prompt=str(payload["prompt"]),
+                seed=payload["seed"],
+                reference_asset_ids=[],
+                output_asset_id=existing.asset_id,
+                entity_type="audio_take",
+                entity_id=existing.id,
+                latency_ms=0,
+                estimated_cost_usd=0.0,
+                metadata={"rights_status": "SYNTHETIC_OWNED", "reused_existing_output": True},
+            )
+            existing.generation_record_id = record.id
         return existing, None
     output = settings.data_dir / "tmp" / job.id / "audio" / f"{cue.cue_type.lower()}.wav"
     write_deterministic_wav(output, cue.duration_ms, str(payload["seed"]), cue.cue_type)
@@ -353,33 +372,25 @@ def materialize_audio_take(
         }
     )
     now = datetime.now(UTC)
-    record = GenerationRecord(
-        id=str(uuid4()),
-        project_id=job.project_id,
-        job_id=job.id,
-        entity_type="audio_cue",
-        entity_id=cue.id,
+    record = ensure_generation_record(
+        session,
+        job=job,
         capability=f"AUDIO_{cue.cue_type}",
         provider="mock-audio",
         model="deterministic-wave-v1",
         config_version="audio-pipeline-v1",
-        prompt_hash=content_hash(str(payload["prompt"])),
-        seed=str(payload["seed"]),
-        reference_asset_ids_json="[]",
+        prompt=str(payload["prompt"]),
+        seed=payload["seed"],
+        reference_asset_ids=[],
         provider_request_id=None,
         provider_task_id=None,
-        status="SUCCEEDED",
-        latency_ms=0,
-        input_units=None,
-        output_units=None,
-        estimated_cost_usd=0.0,
         output_asset_id=asset.id,
-        metadata_json=canonical_json({"rights_status": "SYNTHETIC_OWNED"}),
-        created_at=now,
-        completed_at=now,
+        entity_type="audio_take",
+        entity_id=take_id,
+        latency_ms=0,
+        estimated_cost_usd=0.0,
+        metadata={"rights_status": "SYNTHETIC_OWNED"},
     )
-    session.add(record)
-    session.flush()
     for check_type, score, evidence in (
         ("AUDIO_DURATION", 1.0, {"expected_ms": cue.duration_ms, "actual_ms": cue.duration_ms}),
         ("AUDIO_CLIPPING", 1.0, {"peak_dbfs": -7.2}),
@@ -546,35 +557,29 @@ def create_lip_sync_batch(session: Session, job: Job) -> tuple[list[LipSyncTake]
         if audio_take is None or video_take is None:
             continue
         fallback = "VOICE_OVER" if cue.cue_type == "VOICE_OVER" else "SOURCE_VIDEO_UNCHANGED"
-        record = GenerationRecord(
-            id=str(uuid4()),
-            project_id=job.project_id,
-            job_id=job.id,
-            entity_type="shot",
-            entity_id=cue.shot_id,
+        lip_id = str(uuid4())
+        record = ensure_generation_record(
+            session,
+            job=job,
             capability="LIP_SYNC",
             provider="explicit-fallback",
             model="source-video-unchanged-v1",
             config_version="lip-sync-v1",
-            prompt_hash=cue.content_hash,
+            prompt=cue.content_hash,
             seed=None,
-            reference_asset_ids_json=canonical_json([video_take.asset_id, audio_take.asset_id]),
+            reference_asset_ids=[video_take.asset_id, audio_take.asset_id],
             provider_request_id=None,
             provider_task_id=None,
             status="DEGRADED",
-            latency_ms=0,
-            input_units=None,
-            output_units=None,
-            estimated_cost_usd=0.0,
             output_asset_id=video_take.asset_id,
-            metadata_json=canonical_json({"fallback_strategy": fallback}),
-            created_at=now,
-            completed_at=now,
+            entity_type="lip_sync_take",
+            entity_id=lip_id,
+            latency_ms=0,
+            estimated_cost_usd=0.0,
+            metadata={"fallback_strategy": fallback},
         )
-        session.add(record)
-        session.flush()
         lip = LipSyncTake(
-            id=str(uuid4()),
+            id=lip_id,
             project_id=job.project_id,
             shot_id=cue.shot_id,
             video_take_id=video_take.id,

@@ -8,6 +8,7 @@ import httpx
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from app.config import Settings
+from app.domain.director import DirectorReviewOutput
 from app.domain.narrative_targeting import (
     EmotionalReward,
     NarrativeProtagonist,
@@ -782,6 +783,189 @@ class ScriptExcerptRewriteOutput(BaseModel):
     rationale: str = Field(min_length=1, max_length=500)
 
 
+def _deterministic_director_review(
+    *,
+    scene_context: dict[str, Any],
+    issue_types: list[str],
+) -> DirectorReviewOutput:
+    lines = list(scene_context.get("lines", []))
+    first_line = lines[0] if lines else None
+    issue_type = issue_types[0]
+    options: list[dict[str, Any]] = []
+    if isinstance(first_line, dict):
+        text = str(first_line["text"])
+        concise = text
+        for filler in ("其实", "我觉得", "真的", "就是说", "你知道"):
+            concise = concise.replace(filler, "")
+        concise = concise.replace("，，", "，").lstrip("，")
+        if concise == text:
+            concise = text.rstrip("。！？!?") + "。"
+        conflict = text.replace("请", "必须").replace("可以", "休想")
+        if conflict == text:
+            conflict = text.rstrip("。！？!?") + "——别再回避！"
+        options.extend(
+            [
+                {
+                    "option_id": "dialogue-concise",
+                    "title": "压缩解释性对白",
+                    "rationale": "删掉口语填充和自我解释，让人物直接采取语言行动。",
+                    "proposed_change": {
+                        "scope": "LINE",
+                        "entity_id": first_line["id"],
+                        "changes": {"text": concise},
+                        "before": {"text": text},
+                    },
+                    "estimated_time_seconds": 1,
+                    "estimated_cost_usd": 0,
+                },
+                {
+                    "option_id": "dialogue-conflict",
+                    "title": "提高对白对抗压力",
+                    "rationale": "把说明句改成带明确压力的行动句，强化人物当下目标。",
+                    "proposed_change": {
+                        "scope": "LINE",
+                        "entity_id": first_line["id"],
+                        "changes": {"text": conflict},
+                        "before": {"text": text},
+                    },
+                    "estimated_time_seconds": 1,
+                    "estimated_cost_usd": 0,
+                },
+                {
+                    "option_id": "pacing-pause",
+                    "title": "收紧停顿与语速",
+                    "rationale": "不改叙事事实，只缩短语言窗口以检验节奏是否更利落。",
+                    "proposed_change": {
+                        "scope": "LINE",
+                        "entity_id": first_line["id"],
+                        "changes": {
+                            "speech_rate": min(
+                                1.25, max(1.05, float(first_line["speech_rate"]) + 0.1)
+                            ),
+                            "pause_after_ms": max(0, int(first_line["pause_after_ms"]) - 150),
+                        },
+                        "before": {
+                            "speech_rate": first_line["speech_rate"],
+                            "pause_after_ms": first_line["pause_after_ms"],
+                        },
+                    },
+                    "estimated_time_seconds": 1,
+                    "estimated_cost_usd": 0,
+                },
+            ]
+        )
+    else:
+        purpose = str(scene_context["purpose"])
+        emotion = str(scene_context["emotion"])
+        options = [
+            {
+                "option_id": "purpose-action",
+                "title": "把场景目的改成可验证行动",
+                "rationale": "用人物可见行动表达场景推进目标。",
+                "proposed_change": {
+                    "scope": "SCENE",
+                    "entity_id": scene_context["id"],
+                    "changes": {"purpose": f"{purpose}，并以一个不可撤回的行动结束"},
+                    "before": {"purpose": purpose},
+                },
+                "estimated_time_seconds": 1,
+                "estimated_cost_usd": 0,
+            },
+            {
+                "option_id": "emotion-turn",
+                "title": "明确情绪转折",
+                "rationale": "让场景出口状态区别于入口状态。",
+                "proposed_change": {
+                    "scope": "SCENE",
+                    "entity_id": scene_context["id"],
+                    "changes": {"emotion": f"{emotion}后转为决绝"},
+                    "before": {"emotion": emotion},
+                },
+                "estimated_time_seconds": 1,
+                "estimated_cost_usd": 0,
+            },
+        ]
+    return DirectorReviewOutput(
+        issue_type=issue_type,
+        observation=(
+            "当前场景的意图存在，但对白仍包含解释性表达，人物行动和节奏可以更明确。"
+            if first_line
+            else "当前场景有目的描述，但缺少可直接检验的语言行动。"
+        ),
+        rationale="优先在不改变故事事实和范围外资产的前提下，提高因果、动机或节奏可读性。",
+        options=options,
+        recommended_option_id=options[0]["option_id"],
+        confidence=0.78,
+        validation_plan=[
+            "比较修改前后人物目标是否更清楚",
+            "确认场景叙事事实没有变化",
+            "比较对白估算时长与节奏窗口",
+        ],
+    )
+
+
+async def generate_director_scene_review(
+    settings: Settings,
+    *,
+    scene_context: dict[str, Any],
+    issue_types: list[str],
+    instruction: str | None,
+) -> "TextGenerationResult":
+    if not settings.ark_api_key:
+        output = _deterministic_director_review(
+            scene_context=scene_context,
+            issue_types=issue_types,
+        )
+        return TextGenerationResult(
+            payload=output.model_dump(mode="json"),
+            provider="mock",
+            model="deterministic-director-evaluator-v1",
+            request_id=None,
+            repair_attempts=0,
+        )
+
+    prompt = (
+        "你是短剧导演与剧本评估者。先判断创作问题，再给出 2 至 3 个互斥修复方案。"
+        "你不是聊天助手：每个方案必须映射到给定 Scene 或 Line ID，并给出可执行字段修改。"
+        "不得改变未列入目标的故事事实、角色身份、关系或已批准资产；"
+        "不得建议或触发图片、视频、配音、音乐生成；不得引入套路化身份设定。"
+        f"\n审查问题类型：{json.dumps(issue_types, ensure_ascii=False)}"
+        f"\n用户补充要求：{instruction or '无'}"
+        f"\n结构化场景上下文：{json.dumps(scene_context, ensure_ascii=False)}"
+        "\nLINE 仅允许修改 text、emotion、speech_rate、pause_after_ms；"
+        "SCENE 仅允许修改 purpose、emotion、bgm_intent、sfx_intents。"
+        "\n输出必须符合 JSON Schema：\n"
+        f"{json.dumps(DirectorReviewOutput.model_json_schema(), ensure_ascii=False)}"
+    )
+
+    allowed_targets = {
+        str(scene_context["id"]),
+        *{str(item["id"]) for item in scene_context.get("lines", [])},
+    }
+
+    def validate_targets(candidate: BaseModel) -> None:
+        review = DirectorReviewOutput.model_validate(candidate.model_dump(mode="json"))
+        invalid = [
+            option.proposed_change.entity_id
+            for option in review.options
+            if option.proposed_change.entity_id not in allowed_targets
+        ]
+        if invalid:
+            raise ModelOutputSemanticError(
+                "DIRECTOR_TARGET_INVALID",
+                "Director 返回了场景范围外的修改目标",
+                repair_message="所有 proposed_change.entity_id 必须来自给定场景上下文。",
+                details={"invalid_target_ids": invalid},
+            )
+
+    return await _ark_json(
+        settings,
+        prompt=prompt,
+        validator=DirectorReviewOutput,
+        semantic_validator=validate_targets,
+    )
+
+
 @dataclass(frozen=True)
 class TextGenerationResult:
     payload: dict[str, Any]
@@ -925,13 +1109,36 @@ def _ensure_short_drama_engine_contract(engine: ShortDramaEngine) -> ShortDramaE
 
 
 def normalize_episode_script_draft(payload: dict[str, Any]) -> dict[str, Any]:
-    """去掉空台词场景，避免方舟返回空 lines 直接撞合同。"""
+    """去掉空台词场景，并钳制台词时长字段，避免方舟越界直接撞合同。"""
     normalized = json.loads(json.dumps(payload, ensure_ascii=False))
-    scenes = [
-        scene
-        for scene in normalized.get("scenes", [])
-        if isinstance(scene, dict) and isinstance(scene.get("lines"), list) and scene["lines"]
-    ]
+    scenes: list[dict[str, Any]] = []
+    for scene in normalized.get("scenes", []):
+        if not isinstance(scene, dict):
+            continue
+        lines = scene.get("lines")
+        if not isinstance(lines, list) or not lines:
+            continue
+        cleaned_lines: list[dict[str, Any]] = []
+        for line in lines:
+            if not isinstance(line, dict):
+                continue
+            pause_after_ms = line.get("pause_after_ms")
+            if isinstance(pause_after_ms, (int, float)):
+                line["pause_after_ms"] = max(0, min(3000, int(pause_after_ms)))
+            estimated_duration_ms = line.get("estimated_duration_ms")
+            if isinstance(estimated_duration_ms, (int, float)):
+                value = int(estimated_duration_ms)
+                line["estimated_duration_ms"] = 800 if value < 200 else min(20_000, value)
+            elif not estimated_duration_ms:
+                line["estimated_duration_ms"] = 800
+            speech_rate = line.get("speech_rate")
+            if isinstance(speech_rate, (int, float)):
+                line["speech_rate"] = max(0.7, min(1.4, float(speech_rate)))
+            cleaned_lines.append(line)
+        if not cleaned_lines:
+            continue
+        scene["lines"] = cleaned_lines
+        scenes.append(scene)
     if len(scenes) >= 2:
         normalized["scenes"] = scenes
     return normalized
@@ -2384,9 +2591,7 @@ class RoutedTextProvider:
             raise
 
         route_errors: dict[str, dict[str, Any]] = {}
-        for (direction_key, _, _), result in zip(
-            pending_routes, task_results, strict=True
-        ):
+        for (direction_key, _, _), result in zip(pending_routes, task_results, strict=True):
             if isinstance(result, BaseException):
                 if isinstance(result, TextProviderError):
                     route_errors[direction_key] = {
@@ -2452,10 +2657,7 @@ class RoutedTextProvider:
                 },
             )
 
-        results = [
-            results_by_key[direction_key]
-            for direction_key, _, _ in DIRECTION_ROUTES
-        ]
+        results = [results_by_key[direction_key] for direction_key, _, _ in DIRECTION_ROUTES]
         batch = StoryDirectionBatch.model_validate(
             {"directions": [result.payload for result in results]}
         )
@@ -2619,9 +2821,7 @@ class RoutedTextProvider:
             "story_bible": story_bible,
             "outlines": outlines.payload.get("outlines", []),
         }
-        script = await self.generate_episode_script(
-            settings, brief, direction, foundation_context
-        )
+        script = await self.generate_episode_script(settings, brief, direction, foundation_context)
         review = await self.generate_narrative_review(
             settings,
             brief,

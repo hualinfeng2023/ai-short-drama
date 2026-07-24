@@ -31,6 +31,7 @@ from app.schemas import JobRead
 from app.services.assets import register_file, resolve_asset_path
 from app.services.character_image_qc import CharacterImageQualityReport
 from app.services.events import append_event
+from app.services.generation_records import ensure_generation_record
 from app.services.image_provider import GeneratedImage, normalize_ark_image_seed
 from app.services.jobs import enqueue_job, job_to_read
 from app.services.projects import canonical_json, content_hash, version_conflict
@@ -1667,7 +1668,15 @@ def character_visual_workspace(session: Session, project_id: str) -> dict[str, o
                             or (
                                 f"{_as_text(_json(item.prompt_snapshot_json).get('prompt'), '')}"
                                 "。候选方向："
-                                f"{_as_text(dict(_json(item.prompt_snapshot_json).get('candidate_variant', {})).get('instruction'), '')}"
+                            f"{_as_text(
+                                dict(
+                                    _json(item.prompt_snapshot_json).get(
+                                        'candidate_variant',
+                                        {},
+                                    )
+                                ).get('instruction'),
+                                '',
+                            )}"
                             )
                             if isinstance(_json(item.prompt_snapshot_json), dict)
                             else ""
@@ -1720,6 +1729,7 @@ def update_visual_profile(
     expected_version: int,
     changes: dict[str, object],
     actor: str,
+    commit: bool = True,
 ) -> dict[str, object]:
     project_or_404(session, project_id)
     character = session.get(Character, character_id)
@@ -1775,7 +1785,9 @@ def update_visual_profile(
         event_type="character.visual_profile_reviewed",
         payload={"character_id": character.id, "profile_version_id": record.id, "actor": actor},
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     return _profile_to_read(record)
 
 
@@ -1787,6 +1799,7 @@ def confirm_visual_profile(
     profile_version_id: str,
     expected_version: int,
     actor: str,
+    commit: bool = True,
 ) -> dict[str, object]:
     character = session.get(Character, character_id)
     if character is None or character.project_id != project_id:
@@ -1830,7 +1843,9 @@ def confirm_visual_profile(
         event_type="character.visual_baseline_confirmed",
         payload={"character_id": character.id, "profile_version_id": profile.id, "actor": actor},
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     return _profile_to_read(profile)
 
 
@@ -1915,7 +1930,11 @@ def assemble_character_prompt(
     prompt = "。".join(
         [
             prompt_opening,
-            *([] if entity_kind == "DIGITAL_ENTITY" else [f"选角规则：{CASTING_INFERENCE_GUARDRAIL}"]),
+            *(
+                []
+                if entity_kind == "DIGITAL_ENTITY"
+                else [f"选角规则：{CASTING_INFERENCE_GUARDRAIL}"]
+            ),
             *fragments,
             f"负面约束：{negatives}",
             (
@@ -2235,6 +2254,44 @@ def materialize_visual_candidate(
     if character is None or batch is None:
         raise ValueError("角色候选批次不存在")
     ordinal = int(payload["ordinal"])
+
+    def trace_generation(
+        asset: Asset,
+        candidate: CharacterCandidate,
+        *,
+        quality_status: str,
+        reused: bool,
+    ) -> None:
+        reference_asset_ids = [
+            item
+            for item in payload.get("reference_asset_ids", [])
+            if isinstance(item, str)
+        ]
+        ensure_generation_record(
+            session,
+            job=job,
+            capability="CHARACTER_VISUAL_CANDIDATE",
+            provider=asset.provider,
+            model=image.model,
+            config_version="character-visual-v1",
+            prompt=str(payload.get("prompt", "")),
+            seed=payload.get("seed"),
+            reference_asset_ids=reference_asset_ids,
+            provider_request_id=image.request_id,
+            provider_task_id=None,
+            output_asset_id=asset.id,
+            entity_type="character_candidate",
+            entity_id=candidate.id,
+            estimated_cost_usd=0.0 if asset.provider == "mock" else None,
+            metadata={
+                "batch_id": batch.id,
+                "character_id": character.id,
+                "ordinal": ordinal,
+                "quality_status": quality_status,
+                "reused_existing_output": reused,
+            },
+        )
+
     existing = session.scalar(
         select(CharacterCandidate).where(
             CharacterCandidate.character_id == character.id,
@@ -2245,6 +2302,12 @@ def materialize_visual_candidate(
         asset = session.get(Asset, existing.asset_id)
         if asset is None:
             raise ValueError("角色候选资产不存在")
+        trace_generation(
+            asset,
+            existing,
+            quality_status=existing.status,
+            reused=True,
+        )
         return asset, existing
     tmp_dir = settings.data_dir / "tmp" / job.id / "character-visual"
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -2300,6 +2363,12 @@ def materialize_visual_candidate(
         created_at=datetime.now(UTC),
     )
     session.add(candidate)
+    trace_generation(
+        asset,
+        candidate,
+        quality_status=quality_status,
+        reused=False,
+    )
     session.flush()
     materialized_count = session.scalar(
         select(func.count(CharacterCandidate.id)).where(CharacterCandidate.batch_id == batch.id)
@@ -2850,6 +2919,44 @@ def materialize_identity_asset(
     if identity is None or character is None:
         raise ValueError("角色身份版本不存在")
     view_type = str(payload["view_type"])
+
+    def trace_generation(
+        asset: Asset,
+        record: CharacterIdentityAsset,
+        *,
+        quality_status: str,
+        reused: bool,
+    ) -> None:
+        reference_asset_ids = [
+            item
+            for item in payload.get("reference_asset_ids", [])
+            if isinstance(item, str)
+        ]
+        ensure_generation_record(
+            session,
+            job=job,
+            capability="CHARACTER_IDENTITY_VIEW",
+            provider=asset.provider,
+            model=image.model,
+            config_version="character-identity-v1",
+            prompt=str(payload.get("prompt", "")),
+            seed=payload.get("seed"),
+            reference_asset_ids=reference_asset_ids,
+            provider_request_id=image.request_id,
+            provider_task_id=None,
+            output_asset_id=asset.id,
+            entity_type="character_identity_asset",
+            entity_id=record.id,
+            estimated_cost_usd=0.0 if asset.provider == "mock" else None,
+            metadata={
+                "character_id": character.id,
+                "identity_version_id": identity.id,
+                "view_type": view_type,
+                "quality_status": quality_status,
+                "reused_existing_output": reused,
+            },
+        )
+
     existing = session.scalar(
         select(CharacterIdentityAsset).where(
             CharacterIdentityAsset.identity_version_id == identity.id,
@@ -2861,6 +2968,12 @@ def materialize_identity_asset(
         asset = session.get(Asset, existing.asset_id)
         if asset is None:
             raise ValueError("角色身份资产不存在")
+        trace_generation(
+            asset,
+            existing,
+            quality_status=existing.status,
+            reused=True,
+        )
         return asset, existing
     if replace_record_id and (existing is None or existing.id != str(replace_record_id)):
         raise ValueError("待替换的角色身份视图已变化，请刷新后重试")
@@ -2930,6 +3043,12 @@ def materialize_identity_asset(
             created_at=datetime.now(UTC),
         )
         session.add(record)
+    trace_generation(
+        asset,
+        record,
+        quality_status=quality_status,
+        reused=False,
+    )
     session.flush()
     materialized_count = session.scalar(
         select(func.count(CharacterIdentityAsset.id)).where(
@@ -3038,6 +3157,7 @@ def lock_character_identity(
     expected_version: int,
     actor: str,
     trace_id: str,
+    commit: bool = True,
 ) -> tuple[dict[str, object], JobRead | None]:
     project = project_or_404(session, project_id)
     character = session.get(Character, character_id)
@@ -3125,7 +3245,9 @@ def lock_character_identity(
             "script_started": script_job is not None,
         },
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     return {
         "character_id": character.id,
         "identity_version_id": identity.id,
@@ -3144,6 +3266,7 @@ def restore_character_identity(
     identity_version_id: str,
     expected_version: int,
     actor: str,
+    commit: bool = True,
 ) -> dict[str, object]:
     character = session.get(Character, character_id)
     identity = session.get(CharacterIdentityVersion, identity_version_id)
@@ -3228,7 +3351,9 @@ def restore_character_identity(
             "actor": actor,
         },
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     return {
         "character_id": character.id,
         "identity_version_id": identity.id,

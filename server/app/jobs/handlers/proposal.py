@@ -389,9 +389,10 @@ async def generate_script_package(
                 story_bible,
                 relationship_graph,
             ),
-            initial_progress=15,
-            ceiling=35,
+            initial_progress=12,
+            ceiling=32,
             stage="正在生成关系驱动的分集大纲",
+            interval_seconds=3.0,
         )
         foundation_context = {
             "story_bible": story_bible,
@@ -407,9 +408,10 @@ async def generate_script_package(
                 direction,
                 foundation_context,
             ),
-            initial_progress=35,
-            ceiling=55,
+            initial_progress=34,
+            ceiling=58,
             stage="正在生成首集结构化剧本",
+            interval_seconds=3.0,
         )
         review = await _await_with_progress(
             context,
@@ -422,9 +424,10 @@ async def generate_script_package(
                 script_draft.payload,
                 relationship_graph=relationship_graph,
             ),
-            initial_progress=55,
-            ceiling=72,
+            initial_progress=60,
+            ceiling=88,
             stage="正在生成叙事引擎与结构质检",
+            interval_seconds=3.0,
         )
         assembled = assemble_script_package(outlines, script_draft, review)
         package = apply_relationship_context_to_script_package(

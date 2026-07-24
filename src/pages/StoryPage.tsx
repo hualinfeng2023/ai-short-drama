@@ -35,8 +35,11 @@ import {
   applyScriptExcerptRewrite,
   approveScriptVersion,
   confirmCharacterRevision,
+  createDirectorReviewProposal,
   createScriptExcerptRewrite,
+  decideDirectorReviewProposal,
   fetchBriefVersions,
+  fetchDirectorReviewProposals,
   fetchProject,
   fetchScriptExcerptRewrites,
   fetchStoryPackageEstimate,
@@ -44,9 +47,11 @@ import {
   generateStoryDirections,
   generateStoryPackage,
   mergeStoryDirections,
+  executeDirectorReviewProposal,
   reviewCharacterRevision,
   type CharacterRevisionChanges,
   type CharacterRevisionReview,
+  type DirectorReviewProposal,
   type StoryWorkspace,
   type StoryPackageEstimate,
   type RelationshipGraphVersionRecord,
@@ -201,6 +206,40 @@ interface ScriptTextSelection {
 }
 
 type ScriptRewriteMenuMode = 'ACTIONS' | 'TONE' | 'CUSTOM'
+
+type DirectorReviewAction =
+  | { type: 'EXECUTE'; proposal: DirectorReviewProposal; optionId: string }
+  | {
+      type: 'DECIDE'
+      proposal: DirectorReviewProposal
+      decision: 'APPROVE' | 'REJECT' | 'ROLLBACK'
+    }
+
+const DIRECTOR_ISSUE_LABELS: Record<DirectorReviewProposal['issueType'], string> = {
+  STORY_LOGIC: '故事逻辑',
+  CHARACTER_MOTIVATION: '人物动机',
+  AI_DIALOGUE: '对白自然度',
+  PACING: '场景节奏',
+}
+
+const DIRECTOR_FIELD_LABELS: Record<string, string> = {
+  text: '对白',
+  purpose: '场景目的',
+  emotion: '情绪',
+  speech_rate: '语速',
+  pause_after_ms: '句后停顿',
+  bgm_intent: '背景音乐意图',
+  sfx_intents: '音效意图',
+}
+
+function directorValues(value: Record<string, unknown>): string {
+  return Object.entries(value)
+    .map(([key, item]) => {
+      const display = Array.isArray(item) ? item.join('、') : String(item)
+      return `${DIRECTOR_FIELD_LABELS[key] ?? key}：${display}`
+    })
+    .join('；')
+}
 
 const SCRIPT_REWRITE_ACTION_LABELS: Record<ScriptExcerptRewriteAction, string> = {
   REWRITE: '改写',
@@ -474,6 +513,11 @@ export function StoryPage() {
   const [activeScriptRewrite, setActiveScriptRewrite] = useState<ScriptExcerptRewrite | null>(null)
   const [scriptRewriteVersions, setScriptRewriteVersions] = useState<ScriptExcerptRewrite[]>([])
   const [scriptRewriteVersionsOpen, setScriptRewriteVersionsOpen] = useState(false)
+  const [directorReviewProposals, setDirectorReviewProposals] = useState<DirectorReviewProposal[]>([])
+  const [directorReviewBusyScene, setDirectorReviewBusyScene] = useState<number | null>(null)
+  const [directorReviewError, setDirectorReviewError] = useState<string | null>(null)
+  const [directorOptionSelections, setDirectorOptionSelections] = useState<Record<string, string>>({})
+  const [directorReviewAction, setDirectorReviewAction] = useState<DirectorReviewAction | null>(null)
   const [relationshipFocus, setRelationshipFocus] = useState<{
     graphId: string
     relationshipKey: string
@@ -483,16 +527,24 @@ export function StoryPage() {
 
   const load = useCallback(async (signal?: AbortSignal) => {
     if (!projectId) return
-    const [nextProject, nextWorkspace, briefVersions, nextPackageEstimate] = await Promise.all([
+    const [
+      nextProject,
+      nextWorkspace,
+      briefVersions,
+      nextPackageEstimate,
+      nextDirectorReviewProposals,
+    ] = await Promise.all([
       fetchProject(projectId, signal),
       fetchStoryWorkspace(projectId, signal),
       fetchBriefVersions(projectId, signal),
       fetchStoryPackageEstimate(projectId, signal).catch(() => DEFAULT_PACKAGE_ESTIMATE),
+      fetchDirectorReviewProposals(projectId, signal),
     ])
     setProject(nextProject)
     setWorkspace(nextWorkspace)
     setBrief(briefVersions[0] ?? null)
     setPackageEstimate(nextPackageEstimate)
+    setDirectorReviewProposals(nextDirectorReviewProposals)
   }, [projectId])
 
   useEffect(() => {
@@ -582,6 +634,89 @@ export function StoryPage() {
       }
     } finally {
       setActing(false)
+    }
+  }
+
+  function upsertDirectorProposal(next: DirectorReviewProposal) {
+    setDirectorReviewProposals((current) => [
+      next,
+      ...current.filter((item) => item.proposalId !== next.proposalId),
+    ])
+    setDirectorOptionSelections((current) => ({
+      ...current,
+      [next.proposalId]: current[next.proposalId] ?? next.recommendedOption,
+    }))
+  }
+
+  async function reviewScriptScene(scene: NonNullable<typeof latestScript>['scenes'][number]) {
+    if (!project || !projectId) return
+    setDirectorReviewBusyScene(scene.ordinal)
+    setDirectorReviewError(null)
+    try {
+      const proposal = await createDirectorReviewProposal(projectId, {
+        expectedVersion: project.lockVersion,
+        targetId: scene.id,
+        issueTypes: [
+          'STORY_LOGIC',
+          'CHARACTER_MOTIVATION',
+          'AI_DIALOGUE',
+          'PACING',
+        ],
+        instruction: '检查故事因果、人物当下目标、对白 AI 味和场景节奏。',
+      })
+      upsertDirectorProposal(proposal)
+      setNotice(`Director 已完成第 ${scene.ordinal} 场审查，请选择修复方案。`)
+    } catch (reason) {
+      setDirectorReviewError(
+        reason instanceof ApiError && reason.code === 'VERSION_CONFLICT'
+          ? '项目版本已经变化，请刷新后重新审查。'
+          : reason instanceof Error
+            ? reason.message
+            : 'Director 审查失败',
+      )
+    } finally {
+      setDirectorReviewBusyScene(null)
+    }
+  }
+
+  async function confirmDirectorReviewAction() {
+    if (!directorReviewAction || !project) return
+    const action = directorReviewAction
+    setDirectorReviewBusyScene(action.proposal.sceneOrdinal)
+    setDirectorReviewError(null)
+    try {
+      const next = action.type === 'EXECUTE'
+        ? await executeDirectorReviewProposal(action.proposal.proposalId, {
+            expectedVersion: project.lockVersion,
+            optionId: action.optionId,
+          })
+        : await decideDirectorReviewProposal(action.proposal.proposalId, {
+            expectedVersion: project.lockVersion,
+            decision: action.decision,
+          })
+      upsertDirectorProposal(next)
+      setDirectorReviewAction(null)
+      await load()
+      await refreshProjects()
+      setNotice(
+        action.type === 'EXECUTE'
+          ? '修改版剧本已创建；受影响下游对象已标记为需要复核。'
+          : action.decision === 'APPROVE'
+            ? 'Director 修改版已批准。'
+            : action.decision === 'ROLLBACK'
+              ? '已创建恢复版本，旧版本和修改版均保留。'
+              : 'Director 建议已拒绝，剧本未发生变化。',
+      )
+    } catch (reason) {
+      setDirectorReviewError(
+        reason instanceof ApiError && reason.code === 'VERSION_CONFLICT'
+          ? '项目版本已经变化，请刷新后重新确认。'
+          : reason instanceof Error
+            ? reason.message
+            : 'Director 操作失败',
+      )
+    } finally {
+      setDirectorReviewBusyScene(null)
     }
   }
 
@@ -907,6 +1042,180 @@ export function StoryPage() {
     return scriptRelationshipGraph?.graph.beats.find(
       (beat) => beat.episodeOrdinal === latestScript?.episodeOrdinal
         && beat.sceneOrdinal === sceneOrdinal,
+    )
+  }
+
+  function renderDirectorReview(
+    scene: NonNullable<typeof latestScript>['scenes'][number],
+  ) {
+    const proposal = directorReviewProposals.find(
+      (item) => item.sceneOrdinal === scene.ordinal,
+    )
+    const busy = directorReviewBusyScene === scene.ordinal
+    if (!proposal) {
+      return (
+        <section className="director-review-entry">
+          <div>
+            <span><WandSparkles size={14} />AI Director</span>
+            <strong>审查这一场的逻辑、动机、对白与节奏</strong>
+            <p>先给出判断和方案，不会自动修改剧本或触发媒体生成。</p>
+          </div>
+          <Button
+            disabled={busy}
+            onClick={() => void reviewScriptScene(scene)}
+            size="sm"
+            variant="secondary"
+          >
+            {busy ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}
+            开始审查
+          </Button>
+        </section>
+      )
+    }
+    const selectedOptionId =
+      directorOptionSelections[proposal.proposalId] ?? proposal.recommendedOption
+    const selectedOption =
+      proposal.alternatives.find((item) => item.optionId === selectedOptionId)
+      ?? proposal.alternatives[0]
+    const finalStatus = ['APPROVED', 'REJECTED', 'ROLLED_BACK'].includes(proposal.status)
+    return (
+      <section className={`director-review director-review--${proposal.status.toLowerCase()}`}>
+        <header>
+          <div>
+            <span><WandSparkles size={14} />AI Director · {DIRECTOR_ISSUE_LABELS[proposal.issueType]}</span>
+            <strong>{proposal.observation}</strong>
+          </div>
+          <StatusBadge status={proposal.status} />
+        </header>
+        <p>{proposal.rationale}</p>
+        <div className="director-review__meta">
+          <span>判断置信度 {Math.round(proposal.confidence * 100)}%</span>
+          <span>{proposal.estimatedCostUsd === 0 ? '不触发媒体生成' : `预计成本 $${proposal.estimatedCostUsd}`}</span>
+          <span>影响 {proposal.affectedObjects.length} 项 · 保留 {proposal.preservedObjects.length} 项</span>
+        </div>
+
+        {proposal.status === 'PROPOSED' ? (
+          <>
+            <div className="director-review__options" role="radiogroup" aria-label="Director 修复方案">
+              {proposal.alternatives.map((option) => {
+                const selected = option.optionId === selectedOption?.optionId
+                return (
+                  <button
+                    aria-checked={selected}
+                    className={selected ? 'is-selected' : ''}
+                    key={option.optionId}
+                    onClick={() => setDirectorOptionSelections((current) => ({
+                      ...current,
+                      [proposal.proposalId]: option.optionId,
+                    }))}
+                    role="radio"
+                    type="button"
+                  >
+                    <span>
+                      <strong>{option.title}</strong>
+                      {option.optionId === proposal.recommendedOption ? <em>推荐</em> : null}
+                    </span>
+                    <p>{option.rationale}</p>
+                    <small>{directorValues(option.proposedChange.changes)}</small>
+                  </button>
+                )
+              })}
+            </div>
+            <footer>
+              <Button
+                disabled={busy}
+                onClick={() => setDirectorReviewAction({
+                  type: 'DECIDE',
+                  proposal,
+                  decision: 'REJECT',
+                })}
+                size="sm"
+                variant="ghost"
+              >
+                <X size={14} />拒绝建议
+              </Button>
+              <Button
+                disabled={busy || !selectedOption}
+                onClick={() => selectedOption && setDirectorReviewAction({
+                  type: 'EXECUTE',
+                  proposal,
+                  optionId: selectedOption.optionId,
+                })}
+                size="sm"
+              >
+                <Check size={14} />采用所选方案
+              </Button>
+            </footer>
+          </>
+        ) : null}
+
+        {proposal.comparison ? (
+          <div className="director-review__comparison">
+            <article>
+              <span>修改前</span>
+              <p>{directorValues(proposal.comparison.before)}</p>
+            </article>
+            <article>
+              <span>修改后</span>
+              <p>{directorValues(proposal.comparison.after)}</p>
+            </article>
+            <small>
+              估算对白窗口：
+              {(proposal.comparison.estimatedDurationBeforeMs / 1000).toFixed(1)} 秒
+              {' → '}
+              {(proposal.comparison.estimatedDurationAfterMs / 1000).toFixed(1)} 秒
+            </small>
+          </div>
+        ) : null}
+
+        {proposal.status === 'APPLIED_PENDING_APPROVAL' ? (
+          <footer>
+            <Button
+              disabled={busy}
+              onClick={() => setDirectorReviewAction({
+                type: 'DECIDE',
+                proposal,
+                decision: 'ROLLBACK',
+              })}
+              size="sm"
+              variant="secondary"
+            >
+              <RotateCcw size={14} />回退修改
+            </Button>
+            <Button
+              disabled={busy}
+              onClick={() => setDirectorReviewAction({
+                type: 'DECIDE',
+                proposal,
+                decision: 'APPROVE',
+              })}
+              size="sm"
+            >
+              <Check size={14} />批准修改版
+            </Button>
+          </footer>
+        ) : null}
+
+        {finalStatus ? (
+          <footer>
+            <span>
+              {proposal.status === 'APPROVED'
+                ? '修改版已批准，审计记录已保存。'
+                : proposal.status === 'ROLLED_BACK'
+                  ? '恢复版本已创建，两个版本均可追溯。'
+                  : '建议已拒绝，没有修改剧本。'}
+            </span>
+            <Button
+              disabled={busy}
+              onClick={() => void reviewScriptScene(scene)}
+              size="sm"
+              variant="ghost"
+            >
+              <RefreshCw size={14} />重新审查
+            </Button>
+          </footer>
+        ) : null}
+      </section>
     )
   }
 
@@ -1300,6 +1609,7 @@ export function StoryPage() {
                     <small>{(scene.durationMs / 1000).toFixed(1)} 秒</small>
                   </header>
                   <p className="script-purpose">{scene.purpose}</p>
+                  {renderDirectorReview(scene)}
                   <div className="script-lines">
                     {scene.lines.map((line) => (
                       <div className="script-line" key={line.id}>
@@ -1337,6 +1647,11 @@ export function StoryPage() {
               )
             })}
           </div>
+          {directorReviewError ? (
+            <div className="director-review-error" role="alert">
+              <AlertTriangle size={14} />{directorReviewError}
+            </div>
+          ) : null}
           <div className="story-direction-actions"><span>{workspace.relationshipGraphStale ? '关系修改版尚未批准，当前剧本已过期。' : '批准后锁定第 2 阶段，并让全部剧本角色进入前期制作。'}</span><Button disabled={acting || workspace.relationshipGraphStale || latestScript.status !== 'READY_FOR_REVIEW' || project.status !== 'SCRIPT_READY'} onClick={() => setApproveScriptOpen(true)}><Check size={16} />{workspace.relationshipGraphStale ? '关系更新后才能批准' : '批准首集剧本'}</Button></div>
         </section>
       </> : null}
@@ -1355,6 +1670,62 @@ export function StoryPage() {
         open={approveScriptOpen}
         subtitle="确认剧本、关系基线与角色设定无误后再继续。"
         title="批准首集剧本？"
+      />
+
+      <ImpactConfirmModal
+        cancelLabel="暂不处理"
+        confirmLabel={
+          directorReviewAction?.type === 'EXECUTE'
+            ? '确认创建修改版'
+            : directorReviewAction?.decision === 'APPROVE'
+              ? '批准修改版'
+              : directorReviewAction?.decision === 'ROLLBACK'
+                ? '创建恢复版本'
+                : '拒绝建议'
+        }
+        confirmVariant={
+          directorReviewAction?.type === 'DECIDE'
+          && directorReviewAction.decision === 'REJECT'
+            ? 'danger'
+            : 'primary'
+        }
+        items={directorReviewAction ? [
+          {
+            icon: <GitMerge size={16} />,
+            title: directorReviewAction.type === 'EXECUTE' ? '创建新剧本版本' : '记录明确决策',
+            detail: directorReviewAction.type === 'EXECUTE'
+              ? '原剧本不会被覆盖；所选修改将写入新的 ScriptVersion。'
+              : '本次批准、拒绝或回退会进入 Proposal 与 Command 审计记录。',
+          },
+          {
+            icon: <AlertTriangle size={16} />,
+            title: `影响 ${directorReviewAction.proposal.affectedObjects.length} 项下游对象`,
+            detail: directorReviewAction.proposal.affectedObjects.length
+              ? '作用域内镜头、Take 与时间线片段会标记为需要复核。'
+              : '当前尚无绑定的生产资产，不需要触发重生成。',
+          },
+          {
+            icon: <LockKeyhole size={16} />,
+            title: `保护 ${directorReviewAction.proposal.preservedObjects.length} 项范围外资产`,
+            detail: '范围外 Approved Take 将通过状态哈希校验保持不变。',
+          },
+        ] : []}
+        loading={directorReviewBusyScene !== null}
+        onClose={() => {
+          if (directorReviewBusyScene === null) setDirectorReviewAction(null)
+        }}
+        onConfirm={() => void confirmDirectorReviewAction()}
+        open={directorReviewAction !== null}
+        subtitle="该操作只修改已展示的影响范围，不会触发正式视频、配音或音乐生成。"
+        title={
+          directorReviewAction?.type === 'EXECUTE'
+            ? '采用 Director 修复方案？'
+            : directorReviewAction?.decision === 'APPROVE'
+              ? '批准这次修改？'
+              : directorReviewAction?.decision === 'ROLLBACK'
+                ? '回退到修改前内容？'
+                : '拒绝这条 Director 建议？'
+        }
       />
 
       {scriptRewriteMenuOpen && scriptSelection ? createPortal((

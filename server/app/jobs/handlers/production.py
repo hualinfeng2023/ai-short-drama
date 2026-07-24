@@ -36,12 +36,14 @@ from app.services.production import (
     preview_inputs,
     register_preview,
 )
+from app.services.projects import canonical_json
 from app.services.storyboards_v2 import (
     animatic_inputs,
     create_dynamic_storyboard,
     materialize_storyboard_take,
     reference_data_urls,
     register_animatic,
+    resolve_storyboard_take_generation_inputs,
 )
 
 
@@ -307,19 +309,32 @@ async def generate_storyboard_take(
     job: Job,
     payload: dict[str, object],
 ) -> dict[str, object]:
-    await context.checkpoint(session, job, 12, "加载角色造型、场景与道具引用")
-    reference_asset_ids = [
-        item for item in payload.get("reference_asset_ids", []) if isinstance(item, str)
-    ]
-    references = reference_data_urls(session, context.settings, reference_asset_ids)
+    await context.checkpoint(session, job, 12, "加载角色锁定身份与场景引用")
+    prompt, reference_asset_ids, seed = resolve_storyboard_take_generation_inputs(
+        session, job, payload
+    )
+    # 回写解析后的提示词与参考图，供登记 Take 时追溯
+    resolved_payload = {
+        **payload,
+        "prompt": prompt,
+        "reference_asset_ids": reference_asset_ids,
+        "seed": seed,
+    }
+    job.input_json = canonical_json(resolved_payload)
+    references = reference_data_urls(
+        session,
+        context.settings,
+        reference_asset_ids,
+        detect_and_mask_character_watermark=True,
+    )
     generation = asyncio.create_task(
         context.generate_image(
             context.settings,
-            str(payload["prompt"]),
+            prompt,
             model=context.settings.ark_image_model,
             size="2K",
             reference_images=references,
-            seed=int(payload["seed"]),
+            seed=seed,
         )
     )
     try:
@@ -327,7 +342,7 @@ async def generate_storyboard_take(
             done, _pending = await asyncio.wait({generation}, timeout=4)
             if done:
                 break
-            await context.checkpoint(session, job, 58, "正在生成低成本分镜版本")
+            await context.checkpoint(session, job, 58, "正在生成身份锁定分镜版本")
             context.heartbeat(session, "RUNNING", job.id)
         try:
             image = await generation
@@ -348,6 +363,7 @@ async def generate_storyboard_take(
         "take_id": take.id,
         "next_job_id": next_job.id if next_job else None,
         "model": image.model,
+        "reference_asset_count": len(reference_asset_ids),
     }
 
 

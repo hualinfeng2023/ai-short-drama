@@ -2,22 +2,29 @@ import json
 from datetime import UTC, datetime
 
 import pytest
+from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.orm import sessionmaker
+
 from app.config import get_settings
 from app.db.models import (
+    Asset,
+    AuditLog,
     EpisodeOutlineVersion,
+    EventLog,
+    GenerationRecord,
     Project,
     ScriptLine,
     ScriptScene,
     ScriptVersion,
+    Shot,
     StoryBibleVersion,
     StoryVersion,
+    Take,
 )
 from app.db.session import get_engine
 from app.seed import PROJECT_ID
 from app.services.projects import canonical_json, content_hash
-from httpx import AsyncClient
-from sqlalchemy import select
-from sqlalchemy.orm import sessionmaker
 
 STORY_ID = "93000000-0000-4000-8000-000000000001"
 BIBLE_ID = "93000000-0000-4000-8000-000000000002"
@@ -194,6 +201,35 @@ def prepare_script() -> int:
                 localization_json="{}",
             )
         )
+        preserved_shot = session.scalar(select(Shot).limit(1))
+        preserved_asset = session.scalar(select(Asset).limit(1))
+        assert preserved_shot is not None and preserved_asset is not None
+        session.add(
+            Take(
+                id="93000000-0000-4000-8000-000000000007",
+                shot_id=preserved_shot.id,
+                kind="DIRECTOR_TEST",
+                version=1,
+                asset_id=preserved_asset.id,
+                status="SUCCEEDED",
+                approval="APPROVED",
+                is_current=False,
+                parent_take_id=None,
+                generation_record_id=None,
+                quality_status="PASSED",
+                identity_status="NOT_APPLICABLE",
+                identity_score=None,
+                identity_message=None,
+                identity_reference_asset_ids_json="[]",
+                identity_review_decision=None,
+                identity_review_issues_json="[]",
+                identity_review_note=None,
+                identity_review_actor=None,
+                identity_reviewed_at=None,
+                identity_review_look_version=None,
+                created_at=now,
+            )
+        )
         session.commit()
     return line_text.index("你现在")
 
@@ -284,3 +320,406 @@ async def test_excerpt_rewrite_retry_history_and_apply(client: AsyncClient) -> N
     )
     assert stale.status_code == 409
     assert stale.json()["error"]["code"] == "SCRIPT_REWRITE_SOURCE_CHANGED"
+
+
+@pytest.mark.anyio
+async def test_domain_command_revises_script_idempotently(client: AsyncClient) -> None:
+    prepare_script()
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        source = session.get(ScriptVersion, SCRIPT_ID)
+        assert source is not None
+        source_hash = source.content_hash
+
+    command = {
+        "command_id": "94000000-0000-4000-8000-000000000001",
+        "command_type": "REVISE_SCRIPT",
+        "actor": {"type": "USER", "id": "test-writer"},
+        "target_object_id": SCRIPT_ID,
+        "target_version_id": SCRIPT_ID,
+        "expected_version": {
+            "project_lock_version": 8,
+            "target_version_id": SCRIPT_ID,
+            "target_hash": source_hash,
+        },
+        "payload": {
+            "scope": "LINE",
+            "entity_id": LINE_ID,
+            "changes": {"text": "灯灭以后，我只等你十秒。"},
+        },
+        "idempotency_key": "revise-script-command-v1",
+    }
+    executed = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/commands",
+        json=command,
+    )
+    assert executed.status_code == 200, executed.text
+    assert executed.headers["Idempotency-Replayed"] == "false"
+    execution = executed.json()["data"]
+    assert execution["command_id"] == command["command_id"]
+    assert execution["status"] == "SUCCEEDED"
+    assert execution["result"]["version"] == 2
+
+    replayed = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/commands",
+        json=command,
+    )
+    assert replayed.status_code == 200, replayed.text
+    assert replayed.headers["Idempotency-Replayed"] == "true"
+    assert replayed.json()["data"]["result"] == execution["result"]
+
+    conflict = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/commands",
+        json={
+            **command,
+            "command_id": "94000000-0000-4000-8000-000000000002",
+            "payload": {
+                **command["payload"],
+                "changes": {"text": "这次提交使用了不同的正文。"},
+            },
+        },
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+
+    with factory() as session:
+        audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.action == "REVISE_SCRIPT",
+                )
+            ).all()
+        )
+        assert len(audits) == 1
+        assert audits[0].actor == "test-writer"
+        assert audits[0].before_hash == source_hash
+        assert audits[0].after_hash == execution["result"]["content_hash"]
+        events = list(
+            session.scalars(
+                select(EventLog).where(
+                    EventLog.project_id == PROJECT_ID,
+                    EventLog.event_type == "domain_command.executed",
+                )
+            ).all()
+        )
+        assert len(events) == 1
+        event_payload = json.loads(events[0].payload_json)
+        assert event_payload["command_id"] == command["command_id"]
+
+
+@pytest.mark.anyio
+async def test_director_proposal_review_execute_compare_and_rollback(
+    client: AsyncClient,
+) -> None:
+    prepare_script()
+    create_payload = {
+        "expected_version": 8,
+        "target_type": "SCRIPT_SCENE",
+        "target_id": SCENE_ID,
+        "issue_types": ["AI_DIALOGUE", "CHARACTER_MOTIVATION", "PACING"],
+        "instruction": "检查人物是否在解释剧情，而不是采取行动。",
+        "actor": "test-director",
+    }
+    proposed = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json=create_payload,
+        headers={"Idempotency-Key": "director-proposal-create-v1"},
+    )
+    assert proposed.status_code == 201, proposed.text
+    assert proposed.headers["Idempotency-Replayed"] == "false"
+    proposal = proposed.json()["data"]
+    assert proposal["status"] == "PROPOSED"
+    assert proposal["issue_type"] == "AI_DIALOGUE"
+    assert len(proposal["alternatives"]) == 3
+    assert proposal["recommended_option"] in {
+        item["option_id"] for item in proposal["alternatives"]
+    }
+    assert proposal["requires_confirmation"] is True
+    assert proposal["estimated_cost_usd"] == 0
+    assert proposal["provider"]["model"] == "deterministic-director-evaluator-v1"
+    assert proposal["preserved_objects"]
+
+    proposal_list = await client.get(f"/api/v1/projects/{PROJECT_ID}/director-review-proposals")
+    assert proposal_list.status_code == 200
+    assert [item["proposal_id"] for item in proposal_list.json()["data"]] == [
+        proposal["proposal_id"]
+    ]
+
+    replayed = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json=create_payload,
+        headers={"Idempotency-Key": "director-proposal-create-v1"},
+    )
+    assert replayed.status_code == 201
+    assert replayed.headers["Idempotency-Replayed"] == "true"
+    assert replayed.json()["data"]["proposal_id"] == proposal["proposal_id"]
+
+    replay_conflict = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json={**create_payload, "instruction": "同一幂等键下的不同审查要求。"},
+        headers={"Idempotency-Key": "director-proposal-create-v1"},
+    )
+    assert replay_conflict.status_code == 409
+    assert replay_conflict.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+
+    unconfirmed = await client.post(
+        f"/api/v1/director-review-proposals/{proposal['proposal_id']}/execute",
+        json={
+            "expected_version": 8,
+            "option_id": proposal["recommended_option"],
+            "actor": "test-director",
+            "confirmed": False,
+        },
+        headers={"Idempotency-Key": "director-proposal-apply-unconfirmed-v1"},
+    )
+    assert unconfirmed.status_code == 409
+    assert unconfirmed.json()["error"]["code"] == "USER_CONFIRMATION_REQUIRED"
+
+    executed = await client.post(
+        f"/api/v1/director-review-proposals/{proposal['proposal_id']}/execute",
+        json={
+            "expected_version": 8,
+            "option_id": proposal["recommended_option"],
+            "actor": "test-director",
+            "confirmed": True,
+        },
+        headers={"Idempotency-Key": "director-proposal-apply-v1"},
+    )
+    assert executed.status_code == 200, executed.text
+    assert executed.headers["Idempotency-Replayed"] == "false"
+    result = executed.json()["data"]
+    assert result["proposal"]["status"] == "APPLIED_PENDING_APPROVAL"
+    assert result["script"]["version"] == 2
+    assert result["proposal"]["comparison"]["media_generation"] is False
+    assert result["proposal"]["comparison"]["base_script_version_id"] == SCRIPT_ID
+    revised_script_id = result["script"]["id"]
+    film_ir = (await client.get(f"/api/v1/projects/{PROJECT_ID}/film-ir")).json()["data"]
+    proposal_node = next(
+        item
+        for item in film_ir["objects"]
+        if item["type"] == "DirectorProposal" and item["id"] == proposal["proposal_id"]
+    )
+    assert proposal_node["canonical_kind"] == "DERIVED"
+    assert proposal_node["canonical_status"] == "APPLIED_PENDING_APPROVAL"
+    assert ("PRESERVES", False) in {
+        (edge["relation"], edge["inferred"]) for edge in film_ir["edges"]
+    }
+
+    execute_replay = await client.post(
+        f"/api/v1/director-review-proposals/{proposal['proposal_id']}/execute",
+        json={
+            "expected_version": 8,
+            "option_id": proposal["recommended_option"],
+            "actor": "test-director",
+            "confirmed": True,
+        },
+        headers={"Idempotency-Key": "director-proposal-apply-v1"},
+    )
+    assert execute_replay.status_code == 200
+    assert execute_replay.headers["Idempotency-Replayed"] == "true"
+    assert execute_replay.json()["data"] == result
+
+    rolled_back = await client.post(
+        f"/api/v1/director-review-proposals/{proposal['proposal_id']}/decision",
+        json={
+            "expected_version": 9,
+            "decision": "ROLLBACK",
+            "actor": "test-director",
+            "confirmed": True,
+        },
+        headers={"Idempotency-Key": "director-proposal-rollback-v1"},
+    )
+    assert rolled_back.status_code == 200, rolled_back.text
+    rollback = rolled_back.json()["data"]
+    assert rollback["status"] == "ROLLED_BACK"
+    assert rollback["result_script_version_id"] == revised_script_id
+    assert rollback["rollback_script_version_id"]
+
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        rollback_script = session.get(ScriptVersion, rollback["rollback_script_version_id"])
+        assert rollback_script is not None
+        rollback_scene = session.scalar(
+            select(ScriptScene).where(ScriptScene.script_version_id == rollback_script.id)
+        )
+        assert rollback_scene is not None
+        rollback_line = session.scalar(
+            select(ScriptLine).where(ScriptLine.script_scene_id == rollback_scene.id)
+        )
+        assert rollback_line is not None
+        assert rollback_line.text == "其实我觉得，你现在必须离开这里。"
+        generation_records = list(
+            session.scalars(
+                select(GenerationRecord).where(
+                    GenerationRecord.project_id == PROJECT_ID,
+                    GenerationRecord.capability == "DIRECTOR_SCENE_REVIEW",
+                )
+            )
+        )
+        assert len(generation_records) == 1
+        assert generation_records[0].output_asset_id is None
+        command_audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.action.in_(
+                        {
+                            "CREATE_DIRECTOR_PROPOSAL",
+                            "APPLY_DIRECTOR_PROPOSAL",
+                            "DECIDE_DIRECTOR_PROPOSAL",
+                        }
+                    ),
+                )
+            )
+        )
+        assert len(command_audits) == 3
+
+
+@pytest.mark.anyio
+async def test_director_proposal_reject_and_approve_state_paths(
+    client: AsyncClient,
+) -> None:
+    prepare_script()
+    request = {
+        "expected_version": 8,
+        "target_type": "SCRIPT_SCENE",
+        "target_id": SCENE_ID,
+        "issue_types": ["STORY_LOGIC"],
+        "actor": "test-director",
+    }
+    rejected_proposal = (
+        await client.post(
+            f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+            json=request,
+            headers={"Idempotency-Key": "director-reject-create-v1"},
+        )
+    ).json()["data"]
+    rejected = await client.post(
+        f"/api/v1/director-review-proposals/{rejected_proposal['proposal_id']}/decision",
+        json={
+            "expected_version": 8,
+            "decision": "REJECT",
+            "actor": "test-director",
+            "confirmed": True,
+        },
+        headers={"Idempotency-Key": "director-reject-decision-v1"},
+    )
+    assert rejected.status_code == 200, rejected.text
+    assert rejected.json()["data"]["status"] == "REJECTED"
+
+    approved_proposal = (
+        await client.post(
+            f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+            json=request,
+            headers={"Idempotency-Key": "director-approve-create-v1"},
+        )
+    ).json()["data"]
+    applied = await client.post(
+        f"/api/v1/director-review-proposals/{approved_proposal['proposal_id']}/execute",
+        json={
+            "expected_version": 8,
+            "option_id": approved_proposal["recommended_option"],
+            "actor": "test-director",
+            "confirmed": True,
+        },
+        headers={"Idempotency-Key": "director-approve-apply-v1"},
+    )
+    assert applied.status_code == 200, applied.text
+    applied_data = applied.json()["data"]
+    approved = await client.post(
+        f"/api/v1/director-review-proposals/{approved_proposal['proposal_id']}/decision",
+        json={
+            "expected_version": 9,
+            "decision": "APPROVE",
+            "actor": "test-director",
+            "confirmed": True,
+        },
+        headers={"Idempotency-Key": "director-approve-decision-v1"},
+    )
+    assert approved.status_code == 200, approved.text
+    approved_data = approved.json()["data"]
+    assert approved_data["status"] == "APPROVED"
+    assert approved_data["result_script_version_id"] == applied_data["script"]["id"]
+    assert approved_data["approval_result"]["decision"] == "APPROVE"
+
+
+@pytest.mark.anyio
+async def test_script_patch_adapter_replays_by_idempotency_key(client: AsyncClient) -> None:
+    prepare_script()
+    request = {
+        "expected_version": 8,
+        "text": "灯灭以后，我只等你十秒。",
+    }
+    headers = {"Idempotency-Key": "script-line-patch-v1"}
+    endpoint = f"/api/v1/scripts/{SCRIPT_ID}/lines/{LINE_ID}"
+
+    executed = await client.patch(endpoint, json=request, headers=headers)
+    assert executed.status_code == 200, executed.text
+    assert executed.headers["Idempotency-Replayed"] == "false"
+
+    replayed = await client.patch(endpoint, json=request, headers=headers)
+    assert replayed.status_code == 200, replayed.text
+    assert replayed.headers["Idempotency-Replayed"] == "true"
+    assert replayed.json()["data"] == executed.json()["data"]
+
+    conflict = await client.patch(
+        endpoint,
+        json={**request, "text": "相同幂等键不能提交不同内容。"},
+        headers=headers,
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+
+
+@pytest.mark.anyio
+async def test_approval_command_requires_explicit_user_actor(client: AsyncClient) -> None:
+    prepare_script()
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        source = session.get(ScriptVersion, SCRIPT_ID)
+        assert source is not None
+        source_hash = source.content_hash
+
+    rejected = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/commands",
+        json={
+            "command_id": "94000000-0000-4000-8000-000000000010",
+            "command_type": "APPROVE_SCRIPT",
+            "actor": {"type": "DIRECTOR", "id": "director-orchestrator"},
+            "target_object_id": SCRIPT_ID,
+            "target_version_id": SCRIPT_ID,
+            "expected_version": {
+                "project_lock_version": 8,
+                "target_version_id": SCRIPT_ID,
+                "target_hash": source_hash,
+            },
+            "payload": {"confirmed": True},
+            "idempotency_key": "director-cannot-approve-v1",
+        },
+    )
+    assert rejected.status_code == 409
+    assert rejected.json()["error"]["code"] == "USER_CONFIRMATION_REQUIRED"
+
+    with factory() as session:
+        source = session.get(ScriptVersion, SCRIPT_ID)
+        assert source is not None
+        assert source.status == "READY_FOR_REVIEW"
+        assert (
+            session.scalar(
+                select(AuditLog).where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.action == "APPROVE_SCRIPT",
+                )
+            )
+            is None
+        )

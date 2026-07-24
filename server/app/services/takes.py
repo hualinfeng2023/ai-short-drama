@@ -29,6 +29,7 @@ from app.db.models import (
 from app.schemas import JobRead
 from app.services.assets import resolve_asset_path
 from app.services.events import append_event
+from app.services.generation_records import ensure_generation_record
 from app.services.identity_consistency import IdentityEvaluation, image_data_url
 from app.services.image_provider import GeneratedImage
 from app.services.jobs import ACTIVE_STATUSES, QUEUED_STATUSES, enqueue_job, job_to_read
@@ -202,6 +203,7 @@ def create_shot_image_job(
     aspect_ratio: str | None,
     request_idempotency_key: str,
     trace_id: str,
+    commit: bool = True,
 ) -> tuple[JobRead, bool]:
     shot = shot_or_404(session, shot_id)
     project = _shot_project(session, shot)
@@ -336,7 +338,9 @@ def create_shot_image_job(
             "seed": stable_seed,
         },
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     session.refresh(job)
     return job_to_read(job), False
 
@@ -358,6 +362,33 @@ def materialize_generated_take(
     reference_asset_ids = [
         item for item in input_payload.get("reference_asset_ids", []) if isinstance(item, str)
     ]
+
+    def trace_generation(asset: Asset, take: Take) -> None:
+        record = ensure_generation_record(
+            session,
+            job=job,
+            capability="SHOT_IMAGE",
+            provider=asset.provider,
+            model=image.model,
+            config_version="shot-image-v1",
+            prompt=str(input_payload.get("prompt", "")),
+            seed=input_payload.get("seed"),
+            reference_asset_ids=reference_asset_ids,
+            provider_request_id=image.request_id,
+            provider_task_id=None,
+            output_asset_id=asset.id,
+            entity_type="take",
+            entity_id=take.id,
+            estimated_cost_usd=0.0 if asset.provider == "mock" else None,
+            metadata={
+                "take_kind": take.kind,
+                "take_version": take.version,
+                "identity_status": identity.status,
+                "identity_score": identity.score,
+            },
+        )
+        take.generation_record_id = record.id
+
     existing_take = session.scalar(
         select(Take).where(
             Take.shot_id == job.entity_id,
@@ -369,6 +400,7 @@ def materialize_generated_take(
         asset = session.get(Asset, existing_take.asset_id)
         if asset is None:
             raise RuntimeError("素材版本引用的资产不存在")
+        trace_generation(asset, existing_take)
         return asset, existing_take
 
     digest = sha256(image.content).hexdigest()
@@ -447,6 +479,7 @@ def materialize_generated_take(
         created_at=datetime.now(UTC),
     )
     session.add(take)
+    trace_generation(asset, take)
     shot.candidate_take = take_version
     shot.status = "PENDING_REVIEW"
     shot.lock_version += 1
@@ -475,6 +508,7 @@ def set_shot_character_bindings(
     expected_version: int,
     character_ids: list[str],
     look_version: str,
+    commit: bool = True,
 ) -> Shot:
     shot = shot_or_404(session, shot_id)
     if shot.lock_version != expected_version:
@@ -509,7 +543,9 @@ def set_shot_character_bindings(
             "character_look_version": look_version,
         },
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     session.refresh(shot)
     return shot
 
@@ -639,6 +675,7 @@ def review_candidate_identity(
     actor: str,
     request_idempotency_key: str,
     trace_id: str,
+    commit: bool = True,
 ) -> tuple[Shot, JobRead | None]:
     if decision == "REGENERATE" and not issues:
         raise HTTPException(
@@ -703,7 +740,9 @@ def review_candidate_identity(
             else f"已由 {actor} 说明原因后应用"
         )
         _apply_candidate_state(session, shot, candidate)
-        session.commit()
+        session.flush()
+        if commit:
+            session.commit()
         session.refresh(shot)
         return shot, None
 
@@ -727,12 +766,32 @@ def review_candidate_identity(
         aspect_ratio=aspect_ratio,
         request_idempotency_key=f"identity-review:{request_idempotency_key}",
         trace_id=trace_id,
+        commit=False,
     )
+    session.flush()
+    if commit:
+        session.commit()
+    session.refresh(shot)
     return shot, job
 
 
-def apply_candidate_take(session: Session, shot_id: str) -> Shot:
+def apply_candidate_take(
+    session: Session,
+    shot_id: str,
+    *,
+    expected_version: int | None = None,
+    commit: bool = True,
+) -> Shot:
     shot = shot_or_404(session, shot_id)
+    if expected_version is not None and shot.lock_version != expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "VERSION_CONFLICT",
+                "message": "这个镜头刚刚发生了变化，请刷新后再确认",
+                "details": {"expected": expected_version, "actual": shot.lock_version},
+            },
+        )
     candidate = _candidate_take_or_conflict(session, shot)
     if candidate.identity_status not in {"PASSED", "NOT_APPLICABLE"}:
         raise HTTPException(
@@ -750,6 +809,8 @@ def apply_candidate_take(session: Session, shot_id: str) -> Shot:
             },
         )
     _apply_candidate_state(session, shot, candidate)
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     session.refresh(shot)
     return shot
