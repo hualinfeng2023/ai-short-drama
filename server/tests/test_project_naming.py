@@ -3,6 +3,7 @@ from dataclasses import replace
 
 import httpx
 import pytest
+
 from app.config import get_settings
 from app.services.project_naming import ProjectNamingError, _call_ark, suggest_project_name
 

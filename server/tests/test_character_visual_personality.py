@@ -3,8 +3,8 @@ from types import SimpleNamespace
 
 from app.services.character_visuals import (
     LEGACY_PERSONALITY_VISUALIZATION,
-    _entity_kind,
     _enrich_legacy_personality_visualization,
+    _entity_kind,
     _visualize_personality,
     assemble_character_prompt,
 )

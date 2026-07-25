@@ -2,6 +2,7 @@ import json
 from dataclasses import replace
 
 import pytest
+
 from app.config import get_settings
 from app.services.relationship_assistant import generate_upbringing_suggestion
 from app.services.text_provider import TextGenerationResult

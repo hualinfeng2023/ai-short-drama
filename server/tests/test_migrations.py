@@ -3,8 +3,9 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from app.config import SERVER_ROOT
 from sqlalchemy import create_engine, inspect, text
+
+from app.config import SERVER_ROOT
 
 
 def test_v1_upgrade_recovers_from_partial_sqlite_ddl(

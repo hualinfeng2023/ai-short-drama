@@ -201,6 +201,18 @@
   }
 }
 
+@media (max-width: 1024px) {
+  :root {
+    --layout-content-inline-padding: var(--space-6);
+  }
+}
+
+@media (max-width: 760px) {
+  :root {
+    --layout-content-inline-padding: var(--space-4);
+  }
+}
+
 @media (prefers-contrast: more) {
   :root {
     --color-border: color-mix(in srgb, var(--color-text-primary) 25%, transparent);
