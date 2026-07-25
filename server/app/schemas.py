@@ -1,6 +1,7 @@
 import json
 from datetime import UTC, datetime
 from typing import Literal
+from uuid import UUID
 
 from pydantic import (
     AliasPath,
@@ -1344,6 +1345,14 @@ class AssetRead(OrmModel):
     def serialize_asset_datetime(self, value: datetime) -> str:
         aware = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
         return aware.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+class ReferenceAssetUploadCommandPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    stage_token: UUID
+    filename: str = Field(min_length=1, max_length=255)
+    declared_content_type: str | None = Field(default=None, max_length=255)
 
 
 class TimelineRead(BaseModel):

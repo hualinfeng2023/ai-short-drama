@@ -62,6 +62,13 @@ pytestmark = pytest.mark.anyio
             },
         ),
         (
+            "UPLOAD_REFERENCE_ASSET",
+            {
+                "project_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
             "APPLY_CHARACTER_CHANGE",
             {
                 "object_lock_version": 1,

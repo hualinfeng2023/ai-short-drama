@@ -1,3 +1,4 @@
+import hashlib
 import io
 import zipfile
 from urllib.parse import quote
@@ -6,11 +7,12 @@ import pytest
 from docx import Document
 from httpx import AsyncClient
 from pypdf import PdfWriter
-from sqlalchemy import select
+from sqlalchemy import event, select
+from sqlalchemy.orm import Session as OrmSession
 from sqlalchemy.orm import sessionmaker
 
 from app.config import get_settings
-from app.db.models import AuditLog
+from app.db.models import Asset, AuditLog
 from app.db.session import get_engine
 from app.services.media import deterministic_png_bytes
 
@@ -47,15 +49,19 @@ async def _upload(
     content_type: str,
     *,
     rights: bool = True,
+    idempotency_key: str | None = None,
 ):  # noqa: ANN202
+    headers = {
+        "Content-Type": content_type,
+        "X-Filename": quote(filename, safe=""),
+        "X-Rights-Confirmed": str(rights).lower(),
+    }
+    if idempotency_key is not None:
+        headers["Idempotency-Key"] = idempotency_key
     return await client.post(
         f"/api/v1/projects/{project_id}/assets",
         content=content,
-        headers={
-            "Content-Type": content_type,
-            "X-Filename": quote(filename, safe=""),
-            "X-Rights-Confirmed": str(rights).lower(),
-        },
+        headers=headers,
     )
 
 
@@ -72,8 +78,17 @@ async def test_text_upload_deduplicates_and_links_to_immutable_brief(
     assert rights_blocked.status_code == 423
     assert rights_blocked.json()["error"]["code"] == "RIGHTS_REQUIRED"
 
-    created = await _upload(client, project_id, "人物小传.txt", content, "text/plain")
+    upload_key = "upload-reference-text-v1"
+    created = await _upload(
+        client,
+        project_id,
+        "人物小传.txt",
+        content,
+        "text/plain",
+        idempotency_key=upload_key,
+    )
     assert created.status_code == 201
+    assert created.headers["Idempotency-Replayed"] == "false"
     asset = created.json()["data"]
     assert asset["kind"] == "REFERENCE_TEXT"
     assert asset["metadata"]["parse_status"] == "READY"
@@ -81,9 +96,21 @@ async def test_text_upload_deduplicates_and_links_to_immutable_brief(
     assert asset["rights_status"] == "USER_CONFIRMED"
     assert asset["is_temporary"] is False
 
-    replay = await _upload(client, project_id, "人物小传.txt", content, "text/plain")
+    replay = await _upload(
+        client,
+        project_id,
+        "人物小传.txt",
+        content,
+        "text/plain",
+        idempotency_key=upload_key,
+    )
     assert replay.status_code == 201
+    assert replay.headers["Idempotency-Replayed"] == "true"
     assert replay.json()["data"]["id"] == asset["id"]
+    deduplicated = await _upload(client, project_id, "人物小传.txt", content, "text/plain")
+    assert deduplicated.status_code == 201
+    assert deduplicated.headers["Idempotency-Replayed"] == "false"
+    assert deduplicated.json()["data"]["id"] == asset["id"]
     listed = (await client.get(f"/api/v1/projects/{project_id}/assets")).json()["data"]
     assert [item["id"] for item in listed] == [asset["id"]]
     downloaded = await client.get(asset["content_url"])
@@ -117,6 +144,17 @@ async def test_text_upload_deduplicates_and_links_to_immutable_brief(
     assert (await client.get(deletable_asset["content_url"])).status_code == 404
     factory = sessionmaker(bind=get_engine(get_settings().database_url), expire_on_commit=False)
     with factory() as session:
+        upload_audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == project_id,
+                    AuditLog.action == "UPLOAD_REFERENCE_ASSET",
+                    AuditLog.entity_id == asset["id"],
+                )
+            ).all()
+        )
+        assert len(upload_audits) == 2
+        assert sum(audit.before_hash != audit.after_hash for audit in upload_audits) == 1
         audits = list(
             session.scalars(
                 select(AuditLog).where(
@@ -146,6 +184,38 @@ async def test_text_upload_deduplicates_and_links_to_immutable_brief(
     assert linked.status_code == 200
     blocked_delete = await client.delete(f"/api/v1/assets/{asset['id']}")
     assert blocked_delete.status_code == 409
+
+
+async def test_upload_commit_failure_removes_unreferenced_final_file(
+    client: AsyncClient,
+) -> None:
+    project = await _project(client, "upload-project-rollback-v1")
+    project_id = str(project["id"])
+    content = "事务失败时不能留下孤立素材。".encode()
+    digest = hashlib.sha256(content).hexdigest()
+    destination = get_settings().data_dir / "assets" / digest[:2] / f"{digest}.txt"
+
+    def fail_asset_commit(_session: OrmSession) -> None:
+        raise RuntimeError("simulated asset commit failure")
+
+    event.listen(OrmSession, "before_commit", fail_asset_commit)
+    try:
+        with pytest.raises(RuntimeError, match="simulated asset commit failure"):
+            await _upload(
+                client,
+                project_id,
+                "回滚测试.txt",
+                content,
+                "text/plain",
+                idempotency_key="upload-reference-rollback-v1",
+            )
+    finally:
+        event.remove(OrmSession, "before_commit", fail_asset_commit)
+
+    assert destination.exists() is False
+    factory = sessionmaker(bind=get_engine(get_settings().database_url), expire_on_commit=False)
+    with factory() as session:
+        assert session.scalar(select(Asset.id).where(Asset.sha256 == digest)) is None
 
 
 async def test_document_and_image_upload_parsing(client: AsyncClient) -> None:

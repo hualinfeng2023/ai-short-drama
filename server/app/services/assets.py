@@ -12,6 +12,31 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.db.models import Asset, BriefVersion
+from app.schemas import AssetRead
+
+
+def asset_to_read(asset: Asset) -> AssetRead:
+    return AssetRead(
+        id=asset.id,
+        project_id=asset.project_id,
+        kind=asset.kind,
+        sha256=asset.sha256,
+        mime=asset.mime,
+        size_bytes=asset.size_bytes,
+        status=asset.status,
+        provider=asset.provider,
+        is_temporary=asset.is_temporary,
+        width=asset.width,
+        height=asset.height,
+        duration_ms=asset.duration_ms,
+        original_filename=asset.original_filename,
+        metadata=json.loads(asset.metadata_json or "{}"),
+        rights_status=asset.rights_status,
+        source_entity_type=asset.source_entity_type,
+        source_entity_id=asset.source_entity_id,
+        created_at=asset.created_at,
+        content_url=f"/api/v1/assets/{asset.id}/content",
+    )
 
 
 def asset_or_404(session: Session, asset_id: str) -> Asset:
@@ -51,6 +76,7 @@ def register_file(
     width: int | None = None,
     height: int | None = None,
     duration_ms: int | None = None,
+    created_files: list[Path] | None = None,
 ) -> Asset:
     digest = sha256_file(source)
     existing = session.scalar(
@@ -73,6 +99,8 @@ def register_file(
         source.unlink()
     else:
         os.replace(source, destination)
+        if created_files is not None:
+            created_files.append(destination)
     asset = Asset(
         id=str(uuid4()),
         project_id=project_id,
@@ -94,6 +122,22 @@ def register_file(
     session.add(asset)
     session.flush()
     return asset
+
+
+def cleanup_unreferenced_asset_files(
+    session: Session,
+    settings: Settings,
+    paths: tuple[Path, ...],
+) -> None:
+    assets_root = (settings.data_dir / "assets").resolve()
+    for candidate in paths:
+        path = candidate.resolve()
+        if not path.is_relative_to(assets_root):
+            continue
+        storage_key = str(path.relative_to(settings.data_dir.resolve()))
+        referenced = session.scalar(select(Asset.id).where(Asset.storage_key == storage_key))
+        if referenced is None:
+            path.unlink(missing_ok=True)
 
 
 def resolve_asset_path(settings: Settings, asset: Asset) -> Path:

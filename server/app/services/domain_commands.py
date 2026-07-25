@@ -51,6 +51,7 @@ from app.schemas import (
     CharacterVisualProfileConfirmRequest,
     CharacterVisualProfileUpdateRequest,
     IdentityReviewRequest,
+    ReferenceAssetUploadCommandPayload,
     RevisionCreateRequest,
     ScriptEpisodeUpdateRequest,
     ScriptLineUpdateRequest,
@@ -60,7 +61,12 @@ from app.schemas import (
     ShotVideoGenerateRequest,
     StoryboardShotRegenerateRequest,
 )
-from app.services.assets import delete_reference_asset
+from app.services.assets import (
+    asset_to_read,
+    cleanup_unreferenced_asset_files,
+    delete_reference_asset,
+    sha256_file,
+)
 from app.services.character_visuals import (
     apply_character_change,
     confirm_visual_profile,
@@ -84,6 +90,7 @@ from app.services.takes import (
     review_candidate_identity,
     set_shot_character_bindings,
 )
+from app.services.uploads import upload_rule, validate_and_register_upload
 from app.services.videos import create_shot_video_job
 from app.services.workspace import shot_or_404, shot_to_read
 
@@ -117,6 +124,7 @@ class MutationResult:
     before_hash: str
     after_hash: str
     post_commit: Callable[[], None] | None = None
+    rollback_action: Callable[[], None] | None = None
 
 
 def _run_post_commit_action(mutation: MutationResult) -> None:
@@ -127,6 +135,19 @@ def _run_post_commit_action(mutation: MutationResult) -> None:
     except OSError:
         logger.exception(
             "领域命令已提交，但提交后清理失败：entity_type=%s entity_id=%s",
+            mutation.entity_type,
+            mutation.entity_id,
+        )
+
+
+def _run_rollback_action(mutation: MutationResult) -> None:
+    if mutation.rollback_action is None:
+        return
+    try:
+        mutation.rollback_action()
+    except Exception:
+        logger.exception(
+            "领域命令已回滚，但回滚清理失败：entity_type=%s entity_id=%s",
             mutation.entity_type,
             mutation.entity_id,
         )
@@ -819,6 +840,127 @@ def _reference_asset_state_hash(
                 else None
             ),
         }
+    )
+
+
+def _reference_assets_state_hash(session: Session, project: Project) -> str:
+    assets = list(
+        session.scalars(
+            select(Asset)
+            .where(
+                Asset.project_id == project.id,
+                Asset.kind.like("REFERENCE_%"),
+            )
+            .order_by(Asset.id)
+        ).all()
+    )
+    return content_hash(
+        {
+            "project_id": project.id,
+            "project_lock_version": project.lock_version,
+            "assets": [
+                {
+                    "id": asset.id,
+                    "kind": asset.kind,
+                    "sha256": asset.sha256,
+                    "storage_key": asset.storage_key,
+                    "status": asset.status,
+                    "rights_status": asset.rights_status,
+                }
+                for asset in assets
+            ],
+        }
+    )
+
+
+def _execute_reference_asset_upload(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    _require_explicit_user_confirmation(command)
+    project = session.get(Project, project_id)
+    if project is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "PROJECT_NOT_FOUND", "message": "项目不存在"},
+        )
+    _validate_target(
+        command,
+        object_id=project.id,
+        version_id=command.target_version_id,
+    )
+    expected_version = command.expected_version.project_lock_version
+    if expected_version is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "PROJECT_VERSION_REQUIRED",
+                "message": "素材上传命令必须提供项目锁版本",
+            },
+        )
+    if project.lock_version != expected_version:
+        raise version_conflict(project, expected_version)
+    validated = ReferenceAssetUploadCommandPayload(
+        **{key: value for key, value in command.payload.items() if key != "confirmed"}
+    )
+    stage_token = str(validated.stage_token)
+    if stage_token != command.target_version_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "COMMAND_TARGET_VERSION_MISMATCH",
+                "message": "上传暂存令牌与命令目标不一致",
+            },
+        )
+    extension, _limit, _mime, _kind = upload_rule(validated.filename)
+    settings = get_settings()
+    upload_root = (settings.data_dir / "tmp" / "uploads").resolve()
+    staged_path = (upload_root / f"{stage_token}{extension}").resolve()
+    if not staged_path.is_relative_to(upload_root) or not staged_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "STAGED_UPLOAD_NOT_FOUND",
+                "message": "上传暂存文件不存在或已经失效",
+            },
+        )
+    staged_hash = sha256_file(staged_path)
+    if (
+        command.expected_version.target_hash is not None
+        and command.expected_version.target_hash != staged_hash
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "TARGET_CONTENT_CHANGED",
+                "message": "上传暂存文件内容已经变化，请重新上传",
+            },
+        )
+    before_hash = _reference_assets_state_hash(session, project)
+    asset, created_files = validate_and_register_upload(
+        session,
+        settings,
+        project_id=project.id,
+        source=staged_path,
+        filename=validated.filename,
+        declared_content_type=validated.declared_content_type,
+        commit=False,
+    )
+    return MutationResult(
+        result=asset_to_read(asset).model_dump(mode="json"),
+        entity_type="asset",
+        entity_id=asset.id,
+        before_hash=before_hash,
+        after_hash=_reference_assets_state_hash(session, project),
+        rollback_action=(
+            lambda paths=created_files: cleanup_unreferenced_asset_files(
+                session,
+                settings,
+                paths,
+            )
+        ),
     )
 
 
@@ -2732,6 +2874,12 @@ def dispatch_domain_command(
                 project_id=project_id,
                 command=command,
             )
+        elif command.command_type == "UPLOAD_REFERENCE_ASSET":
+            mutation = _execute_reference_asset_upload(
+                session,
+                project_id=project_id,
+                command=command,
+            )
         elif command.command_type == "APPLY_CHARACTER_CHANGE":
             mutation = _execute_character_change(
                 session,
@@ -2865,6 +3013,7 @@ def dispatch_domain_command(
         session.commit()
     except IntegrityError:
         session.rollback()
+        _run_rollback_action(mutation)
         winner = session.scalar(
             select(IdempotencyKey).where(
                 IdempotencyKey.scope == scope,
@@ -2874,5 +3023,9 @@ def dispatch_domain_command(
         if winner is None:
             raise
         return _replay(winner, command=command, request_hash=request_hash)
+    except Exception:
+        session.rollback()
+        _run_rollback_action(mutation)
+        raise
     _run_post_commit_action(mutation)
     return execution
