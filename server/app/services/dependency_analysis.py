@@ -1,5 +1,7 @@
 import json
 from collections.abc import Iterable
+from datetime import UTC, datetime
+from uuid import NAMESPACE_URL, uuid5
 
 from fastapi import HTTPException
 from sqlalchemy import or_, select
@@ -9,6 +11,7 @@ from app.db.models import (
     Asset,
     AudioCue,
     AudioTake,
+    DependencyEdge,
     Episode,
     GenerationRecord,
     Scene,
@@ -67,6 +70,74 @@ def _edge(
         "evidence": evidence,
         "inferred": inferred,
     }
+
+
+def _edge_reference(value: object) -> tuple[str, str, str | None]:
+    if not isinstance(value, dict):
+        raise ValueError("依赖边必须包含 source 与 target 引用")
+    object_type = value.get("type")
+    object_id = value.get("id")
+    version_id = value.get("version_id")
+    if not isinstance(object_type, str) or not isinstance(object_id, str):
+        raise ValueError("依赖边引用必须包含字符串 type 与 id")
+    return (
+        object_type,
+        object_id,
+        version_id if isinstance(version_id, str) else None,
+    )
+
+
+def persist_dependency_edges(
+    session: Session,
+    *,
+    project_id: str,
+    change_set_id: str,
+    edges: object,
+) -> int:
+    if not isinstance(edges, list):
+        return 0
+    persisted = 0
+    seen: set[tuple[object, ...]] = set()
+    for edge in edges:
+        if not isinstance(edge, dict):
+            raise ValueError("依赖边必须是对象")
+        source = _edge_reference(edge.get("source"))
+        target = _edge_reference(edge.get("target"))
+        relation = edge.get("relation")
+        evidence = edge.get("evidence")
+        if not isinstance(relation, str) or not isinstance(evidence, str):
+            raise ValueError("依赖边必须包含字符串 relation 与 evidence")
+        key = (*source, *target, relation)
+        if key in seen:
+            continue
+        seen.add(key)
+        edge_hash = content_hash(
+            {
+                "change_set_id": change_set_id,
+                "source": source,
+                "target": target,
+                "relation": relation,
+            }
+        )
+        session.add(
+            DependencyEdge(
+                id=str(uuid5(NAMESPACE_URL, f"dependency-edge:{edge_hash}")),
+                project_id=project_id,
+                change_set_id=change_set_id,
+                source_type=source[0],
+                source_id=source[1],
+                source_version_id=source[2],
+                target_type=target[0],
+                target_id=target[1],
+                target_version_id=target[2],
+                relation=relation,
+                evidence=evidence,
+                inferred=bool(edge.get("inferred", False)),
+                created_at=datetime.now(UTC),
+            )
+        )
+        persisted += 1
+    return persisted
 
 
 def _take_hash(take: Take) -> str:

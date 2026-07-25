@@ -118,7 +118,10 @@ from app.services.creative_story import (
     revise_script,
 )
 from app.services.delivery import create_export_matrix, create_export_profile
-from app.services.dependency_analysis import apply_dependency_invalidation
+from app.services.dependency_analysis import (
+    apply_dependency_invalidation,
+    persist_dependency_edges,
+)
 from app.services.director_proposals import director_proposal_to_read
 from app.services.events import append_event
 from app.services.exports import create_export
@@ -3878,6 +3881,13 @@ def _execute_create_director_proposal(
         created_at=datetime.now(UTC),
     )
     session.add(change_set)
+    stored_impact["dependency_edge_count"] = persist_dependency_edges(
+        session,
+        project_id=project.id,
+        change_set_id=change_set.id,
+        edges=impact_payload.get("dependency_edges"),
+    )
+    change_set.impact_json = canonical_json(stored_impact)
     session.add(
         GenerationRecord(
             id=str(uuid4()),

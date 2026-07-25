@@ -18,6 +18,7 @@ from app.db.models import (
     Character,
     CharacterCandidate,
     CharacterIdentityAsset,
+    DependencyEdge,
     Episode,
     ExportArtifact,
     ExportRecord,
@@ -1333,6 +1334,16 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
             "DRIVES_AUDIO",
             "GENERATED_AUDIO_TAKE",
         } <= dependency_relations
+        persisted_edges = list(
+            session.scalars(
+                select(DependencyEdge).where(
+                    DependencyEdge.project_id == project_id,
+                    DependencyEdge.change_set_id == change_set.id,
+                )
+            )
+        )
+        assert {edge.relation for edge in persisted_edges} == dependency_relations
+        assert all(edge.evidence for edge in persisted_edges)
         affected_types = {item["type"] for item in dependency_impact["affected_objects"]}
         assert {"ShotSpec", "Shot", "Take", "AudioCue", "AudioTake", "Asset"} <= affected_types
         affected_take_ids = {
