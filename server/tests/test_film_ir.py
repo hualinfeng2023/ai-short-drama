@@ -78,6 +78,14 @@ async def test_canvas_projection_reuses_film_ir_and_exposes_only_view_state_cont
     assert {"Project", "Scene", "Shot", "Character"} <= {
         node["ref"]["type"] for node in canvas["nodes"]
     }
+    nodes_by_type = {}
+    for node in canvas["nodes"]:
+        nodes_by_type.setdefault(node["ref"]["type"], []).append(node)
+    assert nodes_by_type["Project"][0]["detail_route"] == f"/projects/{PROJECT_ID}"
+    assert nodes_by_type["Shot"][0]["detail_route"] == f"/projects/{PROJECT_ID}/storyboard"
+    assert nodes_by_type["Scene"][0]["detail_route"].startswith(
+        f"/projects/{PROJECT_ID}/episodes/"
+    )
     for edge in canvas["edges"]:
         assert (edge["source"]["type"], edge["source"]["id"]) in canvas_refs
         assert (edge["target"]["type"], edge["target"]["id"]) in canvas_refs

@@ -3760,6 +3760,232 @@ p {
   .identity-version-gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
+/* Film Canvas is a read-only projection. Domain data remains in the existing APIs. */
+.page--film-canvas {
+  width: 100%;
+  max-width: none;
+}
+
+.film-canvas-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.film-canvas-summary > div {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-surface);
+}
+
+.film-canvas-summary span {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-caption);
+}
+
+.film-canvas-summary strong {
+  font-size: var(--font-size-body-lg);
+}
+
+.film-canvas-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: var(--space-4);
+  align-items: stretch;
+}
+
+.film-canvas-stage {
+  height: min(68vh, 780px);
+  min-height: 560px;
+  overflow: hidden;
+}
+
+.film-canvas-stage .react-flow {
+  background: var(--color-surface-subtle);
+}
+
+.film-canvas-stage .react-flow__edge-path {
+  stroke: var(--color-border-strong);
+  stroke-width: 1.5;
+}
+
+.film-canvas-stage .react-flow__edge-text {
+  fill: var(--color-text-tertiary);
+  font-size: var(--font-size-caption);
+}
+
+.film-canvas-stage .react-flow__edge-textbg {
+  fill: var(--color-surface);
+}
+
+.film-canvas-stage .react-flow__controls,
+.film-canvas-stage .react-flow__minimap {
+  overflow: hidden;
+  background: var(--color-material-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-control);
+}
+
+.film-canvas-stage .react-flow__controls-button {
+  color: var(--color-text-primary);
+  background: transparent;
+  border-bottom-color: var(--color-border);
+}
+
+.film-canvas-stage .react-flow__controls-button:hover {
+  background: var(--color-action-primary-soft);
+}
+
+.film-canvas-stage .react-flow__controls-button svg {
+  fill: currentColor;
+}
+
+.film-canvas-stage .react-flow__minimap-mask {
+  fill: var(--color-overlay-media-soft);
+}
+
+.film-canvas-stage .react-flow__minimap-node {
+  fill: var(--color-action-primary);
+}
+
+.film-canvas-stage .react-flow__attribution {
+  color: var(--color-text-tertiary);
+  background: var(--color-material-surface);
+}
+
+.film-canvas-node {
+  display: grid;
+  width: 232px;
+  min-height: 108px;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  color: var(--color-text-primary);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-control);
+  transition: border-color var(--motion-duration-fast) var(--motion-ease-standard), box-shadow var(--motion-duration-fast) var(--motion-ease-standard);
+}
+
+.film-canvas-node.is-selected {
+  border-color: var(--color-action-primary);
+  box-shadow: var(--shadow-focus);
+}
+
+.film-canvas-node header,
+.film-canvas-node footer {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.film-canvas-node header > span:first-child,
+.film-canvas-node footer {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-caption);
+}
+
+.film-canvas-node > strong {
+  overflow: hidden;
+  font-size: var(--font-size-card-title);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.film-canvas-node footer small {
+  overflow: hidden;
+  color: var(--color-text-tertiary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.film-canvas-node__handle {
+  width: 8px;
+  height: 8px;
+  background: var(--color-action-primary);
+  border-color: var(--color-surface);
+}
+
+.film-canvas-inspector {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.film-canvas-inspector h2 {
+  overflow-wrap: anywhere;
+  font-size: var(--font-size-section-title);
+}
+
+.film-canvas-inspector p,
+.film-canvas-inspector > small {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-caption);
+  line-height: var(--line-height-copy);
+}
+
+.film-canvas-inspector dl {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.film-canvas-inspector dl > div {
+  display: grid;
+  gap: var(--space-1);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.film-canvas-inspector dt {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-caption);
+}
+
+.film-canvas-inspector dd {
+  overflow-wrap: anywhere;
+  font-size: var(--font-size-control);
+}
+
+.film-canvas-inspector__empty {
+  display: grid;
+  gap: var(--space-2);
+}
+
+@media (max-width: 1023px) {
+  .film-canvas-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .film-canvas-stage {
+    height: 64vh;
+    min-height: 480px;
+  }
+}
+
+@media (max-width: 640px) {
+  .film-canvas-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .film-canvas-stage {
+    height: 58vh;
+    min-height: 420px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   :is(.character-candidate-empty, .character-candidate-collection).is-generating .character-candidate-placeholder__portrait::before,
   :is(.character-candidate-empty, .character-candidate-collection).is-generating .character-candidate-placeholder__portrait::after,

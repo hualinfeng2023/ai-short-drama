@@ -12,6 +12,7 @@ import {
   ListChecks,
   LockKeyhole,
   Menu,
+  Network,
   PanelLeftClose,
   PanelLeftOpen,
   Rocket,
@@ -71,6 +72,7 @@ function breadcrumb(pathname: string, projectName: string, projectHref: string):
   if (pathname === '/projects/new') return [{ label: '短剧库', to: '/projects' }, { label: '新建项目' }]
   if (pathname.includes('/scenes/')) return [{ label: projectName, to: projectHref }, { label: '第 1 集', to: projectHref }, { label: '场景工作台' }]
   if (pathname.endsWith('/preview')) return [{ label: projectName, to: projectHref }, { label: '第 1 集', to: projectHref }, { label: '完整小样' }]
+  if (pathname.endsWith('/canvas')) return [{ label: projectName, to: projectHref }, { label: '创作画布' }]
   if (pathname.endsWith('/story')) return [{ label: projectName, to: projectHref }, { label: '故事剧本' }]
   if (pathname.endsWith('/characters')) return [{ label: projectName, to: projectHref }, { label: '角色形象生成与锁定' }]
   if (pathname.endsWith('/preproduction')) return [{ label: projectName, to: projectHref }, { label: '前期资产' }]
@@ -90,6 +92,7 @@ function projectSubnavItems(
 ) {
   return ([
     { label: '样片工作台', to: currentProjectLink, icon: Film, offlineReady: true },
+    { label: '创作画布', to: `/projects/${routeProjectId}/canvas`, icon: Network, offlineReady: false },
     { label: '故事剧本', to: `/projects/${routeProjectId}/story`, icon: BookOpenText, offlineReady: false },
     { label: '角色', to: `/projects/${routeProjectId}/characters`, icon: Users, offlineReady: false },
     { label: '前期资产', to: `/projects/${routeProjectId}/preproduction`, icon: Boxes, offlineReady: false },

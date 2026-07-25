@@ -49,21 +49,22 @@ def _group_key(item: FilmIRObject) -> str:
 
 
 def _detail_route(project_id: str, item: FilmIRObject) -> str:
+    if item.type == "Scene":
+        return f"/projects/{project_id}/episodes/{item.attributes['episode_id']}"
     routes = {
-        "Project": f"/projects/{project_id}/brief",
+        "Project": f"/projects/{project_id}",
         "Story": f"/projects/{project_id}/story",
-        "Script": f"/projects/{project_id}/script",
-        "Beat": f"/projects/{project_id}/script",
-        "ScriptScene": f"/projects/{project_id}/script",
-        "DialogueLine": f"/projects/{project_id}/script",
-        "Scene": f"/projects/{project_id}/episodes/current",
+        "Script": f"/projects/{project_id}/story",
+        "Beat": f"/projects/{project_id}/story",
+        "ScriptScene": f"/projects/{project_id}/story",
+        "DialogueLine": f"/projects/{project_id}/story",
         "Character": f"/projects/{project_id}/characters",
         "Location": f"/projects/{project_id}/preproduction",
         "Prop": f"/projects/{project_id}/preproduction",
         "Storyboard": f"/projects/{project_id}/storyboard",
-        "Shot": f"/projects/{project_id}/shots/{item.id}",
+        "Shot": f"/projects/{project_id}/storyboard",
         "Timeline": f"/projects/{project_id}/production",
-        "DirectorProposal": f"/projects/{project_id}/script",
+        "DirectorProposal": f"/projects/{project_id}/story",
     }
     return routes[item.type]
 

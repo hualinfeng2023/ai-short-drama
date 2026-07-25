@@ -92,6 +92,76 @@ interface ApiProjectSummary extends ApiProject {
   shot_count: number
 }
 
+interface ApiCanvasReference {
+  type: string
+  id: string
+  version_id: string | null
+}
+
+interface ApiCanvasProjection {
+  schema_version: 'film-canvas-projection-v1'
+  project_id: string
+  project_lock_version: number
+  source_projection: 'film-ir-projection-v1'
+  nodes: Array<{
+    ref: ApiCanvasReference
+    canonical_kind: string
+    canonical_status: string
+    approval_status: string
+    label: string
+    group_key: string
+    detail_route: string
+    read_only: boolean
+  }>
+  edges: Array<{
+    source: ApiCanvasReference
+    target: ApiCanvasReference
+    relation: string
+    inferred: boolean
+  }>
+  view_state_contract: {
+    schema_version: 'film-canvas-view-state-v1'
+    persistence: 'CLIENT_LOCAL'
+    allowed_fields: string[]
+    forbidden_business_fields: string[]
+  }
+}
+
+export interface CanvasReference {
+  type: string
+  id: string
+  versionId: string | null
+}
+
+export interface CanvasProjection {
+  schemaVersion: 'film-canvas-projection-v1'
+  projectId: string
+  projectLockVersion: number
+  sourceProjection: 'film-ir-projection-v1'
+  nodes: Array<{
+    ref: CanvasReference
+    canonicalKind: string
+    canonicalStatus: string
+    approvalStatus: string
+    label: string
+    groupKey: string
+    detailRoute: string
+    readOnly: true
+  }>
+  edges: Array<{
+    source: CanvasReference
+    target: CanvasReference
+    relation: string
+    inferred: boolean
+  }>
+  viewStateContract: {
+    schemaVersion: 'film-canvas-view-state-v1'
+    persistence: 'CLIENT_LOCAL'
+    allowedFields: string[]
+    forbiddenBusinessFields: string[]
+  }
+}
+
 interface ApiProjectReadiness {
   project_id: string
   workflow_mode: ProjectReadiness['workflowMode']
@@ -1561,6 +1631,49 @@ export async function fetchProjects(signal?: AbortSignal): Promise<ProjectSummar
 export async function fetchProject(projectId: string, signal?: AbortSignal) {
   const project = await requestJson<ApiProject>(`/api/v1/projects/${projectId}`, { signal })
   return mapProject(project)
+}
+
+export async function fetchCanvasProjection(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<CanvasProjection> {
+  const projection = await requestJson<ApiCanvasProjection>(
+    `/api/v1/projects/${projectId}/canvas-projection`,
+    { signal },
+  )
+  const mapReference = (ref: ApiCanvasReference): CanvasReference => ({
+    type: ref.type,
+    id: ref.id,
+    versionId: ref.version_id,
+  })
+  return {
+    schemaVersion: projection.schema_version,
+    projectId: projection.project_id,
+    projectLockVersion: projection.project_lock_version,
+    sourceProjection: projection.source_projection,
+    nodes: projection.nodes.map((node) => ({
+      ref: mapReference(node.ref),
+      canonicalKind: node.canonical_kind,
+      canonicalStatus: node.canonical_status,
+      approvalStatus: node.approval_status,
+      label: node.label,
+      groupKey: node.group_key,
+      detailRoute: node.detail_route,
+      readOnly: true,
+    })),
+    edges: projection.edges.map((edge) => ({
+      source: mapReference(edge.source),
+      target: mapReference(edge.target),
+      relation: edge.relation,
+      inferred: edge.inferred,
+    })),
+    viewStateContract: {
+      schemaVersion: projection.view_state_contract.schema_version,
+      persistence: projection.view_state_contract.persistence,
+      allowedFields: projection.view_state_contract.allowed_fields,
+      forbiddenBusinessFields: projection.view_state_contract.forbidden_business_fields,
+    },
+  }
 }
 
 export async function fetchProjectReadiness(

@@ -7,6 +7,7 @@ import {
   deleteCharacterVisualCandidate,
   deleteProjectRecord,
   enhanceShotPrompt,
+  fetchCanvasProjection,
   fetchJobs,
   fetchProviderSettings,
   fetchProjectReadiness,
@@ -85,6 +86,30 @@ const apiProject = {
   export_ready: false,
   created_at: '2026-07-13T12:00:00Z',
   updated_at: '2026-07-13T12:00:00Z',
+} as const
+
+const apiCanvasProjection = {
+  schema_version: 'film-canvas-projection-v1',
+  project_id: apiProject.id,
+  project_lock_version: 3,
+  source_projection: 'film-ir-projection-v1',
+  nodes: [{
+    ref: { type: 'Scene', id: 'scene-1', version_id: 'scene-v2' },
+    canonical_kind: 'CANONICAL',
+    canonical_status: 'ACTIVE',
+    approval_status: 'DRAFT',
+    label: '便利店停电',
+    group_key: 'episode:1',
+    detail_route: `/projects/${apiProject.id}/episodes/episode-1`,
+    read_only: true,
+  }],
+  edges: [],
+  view_state_contract: {
+    schema_version: 'film-canvas-view-state-v1',
+    persistence: 'CLIENT_LOCAL',
+    allowed_fields: ['x', 'y', 'viewport.zoom'],
+    forbidden_business_fields: ['approval_status', 'domain_payload'],
+  },
 } as const
 
 const apiRelationshipGraph = {
@@ -288,6 +313,39 @@ describe('project readiness client', () => {
     expect(readiness).toMatchObject({ workflowMode: 'CLASSIC', activeStageKey: 'SHOTS' })
     expect(readiness.blockers[0]).toEqual({
       code: 'TEST', message: '需要处理', actionLabel: '查看', actionHref: '/tasks',
+    })
+  })
+})
+
+describe('canvas projection client', () => {
+  it('maps the read-only Film IR projection without changing its stable references', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: apiCanvasProjection,
+      trace_id: 'trace-canvas',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const canvas = await fetchCanvasProjection(apiProject.id)
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      `/api/v1/projects/${apiProject.id}/canvas-projection`,
+    )
+    expect(canvas).toMatchObject({
+      schemaVersion: 'film-canvas-projection-v1',
+      sourceProjection: 'film-ir-projection-v1',
+      projectId: apiProject.id,
+      projectLockVersion: 3,
+    })
+    expect(canvas.nodes[0]).toMatchObject({
+      ref: { type: 'Scene', id: 'scene-1', versionId: 'scene-v2' },
+      approvalStatus: 'DRAFT',
+      readOnly: true,
+    })
+    expect(canvas.viewStateContract).toEqual({
+      schemaVersion: 'film-canvas-view-state-v1',
+      persistence: 'CLIENT_LOCAL',
+      allowedFields: ['x', 'y', 'viewport.zoom'],
+      forbiddenBusinessFields: ['approval_status', 'domain_payload'],
     })
   })
 })
