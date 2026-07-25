@@ -575,9 +575,41 @@ class ShotCharacterBindingUpdate(BaseModel):
     look_version: str = Field(default="Look V1", min_length=1, max_length=40)
 
 
+class ShotSpecUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    expected_version: int = Field(ge=1)
+    description: str | None = Field(default=None, min_length=1, max_length=4000)
+    dialogue: str | None = Field(default=None, max_length=4000)
+    shot_size: Literal["WS", "MS", "MCU", "CU"] | None = None
+    camera_movement: Literal["STATIC", "PAN", "DOLLY_IN", "TRACK", "HANDHELD"] | None = None
+    actor: str = Field(default="创作者", min_length=1, max_length=80)
+
+    @model_validator(mode="after")
+    def require_change(self) -> "ShotSpecUpdateRequest":
+        if not self.model_fields_set.difference({"expected_version", "actor"}):
+            raise ValueError("至少提供一个镜头修改字段")
+        return self
+
+
+class SceneShotOrderRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    expected_version: int = Field(ge=1)
+    shot_ids: list[str] = Field(min_length=1)
+    actor: str = Field(default="创作者", min_length=1, max_length=80)
+
+    @model_validator(mode="after")
+    def require_unique_shots(self) -> "SceneShotOrderRequest":
+        if len(self.shot_ids) != len(set(self.shot_ids)):
+            raise ValueError("镜头排序不能包含重复镜头")
+        return self
+
+
 class LegacyIdentityReviewRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
+    expected_version: int | None = Field(default=None, ge=1)
     actor: str = Field(default="demo-user", min_length=1, max_length=80)
 
 

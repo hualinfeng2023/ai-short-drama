@@ -321,16 +321,8 @@ def materialize_character_candidate(
         ordinal=ordinal,
         asset_id=asset.id,
         seed=str(payload["seed"]),
-        status=(
-            "READY"
-            if quality_status != "FAILED"
-            else "QC_FAILED"
-        ),
-        review_status=(
-            "PENDING_SELECTION"
-            if quality_status == "PASSED"
-            else "QC_REVIEW_REQUIRED"
-        ),
+        status=("READY" if quality_status != "FAILED" else "QC_FAILED"),
+        review_status=("PENDING_SELECTION" if quality_status == "PASSED" else "QC_REVIEW_REQUIRED"),
         selected=False,
         created_at=now,
     )
@@ -393,6 +385,7 @@ def lock_character_for_preproduction(
     expected_version: int,
     actor: str,
     trace_id: str,
+    commit: bool = True,
 ) -> tuple[CharacterRead, JobRead, bool]:
     business_key = (
         f"{project.id}:GENERATE_CHARACTER_LOOKS:{character.id}:candidate-{candidate.id}:looks-v1"
@@ -451,7 +444,9 @@ def lock_character_for_preproduction(
         event_type="character.reference_locked",
         payload={"character_id": character.id, "candidate_id": candidate.id},
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     session.refresh(job)
     current = next(item for item in list_characters(session, project.id) if item.id == character.id)
     return current, job_to_read(job), replayed
@@ -621,6 +616,7 @@ def approve_preproduction(
     expected_version: int,
     actor: str,
     trace_id: str,
+    commit: bool = True,
 ) -> tuple[dict[str, object], JobRead, bool]:
     project = project_or_404(session, project_id)
     if project.lock_version != expected_version:
@@ -731,7 +727,9 @@ def approve_preproduction(
         event_type="preproduction.approved",
         payload={"visual_bible_version_id": visual_bible.id},
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     session.refresh(job)
     return (
         {

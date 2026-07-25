@@ -56,6 +56,7 @@ def create_export_profile(
     *,
     project_id: str,
     payload: ExportProfileCreate,
+    commit: bool = True,
 ) -> dict[str, object]:
     project = project_or_404(session, project_id)
     if project.lock_version != payload.expected_version:
@@ -97,7 +98,9 @@ def create_export_profile(
     session.add(profile)
     project.lock_version += 1
     project.updated_at = datetime.now(UTC)
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     return _profile_read(profile)
 
 
@@ -182,6 +185,7 @@ def create_export_matrix(
     project_id: str,
     payload: ExportMatrixRequest,
     trace_id: str,
+    commit: bool = True,
 ) -> list[dict[str, object]]:
     project = project_or_404(session, project_id)
     if project.lock_version != payload.expected_version:
@@ -318,7 +322,9 @@ def create_export_matrix(
     project.export_ready = False
     project.lock_version += 1
     project.updated_at = now
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     return results
 
 

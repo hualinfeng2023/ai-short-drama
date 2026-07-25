@@ -307,6 +307,88 @@ async def create_graph(client: AsyncClient, graph: dict[str, object] | None = No
     return response.json()["data"]
 
 
+@pytest.mark.anyio
+async def test_relationship_graph_commands_are_idempotent_and_audited(
+    client: AsyncClient,
+) -> None:
+    prepare_relationship_project()
+    request = {
+        "expected_project_version": 1,
+        "story_bible_version_id": STORY_BIBLE_ID,
+        "graph": valid_graph(),
+        "actor": "command-author",
+    }
+    headers = {"Idempotency-Key": "relationship-graph-create-command-v1"}
+    created = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/relationship-graphs",
+        json=request,
+        headers=headers,
+    )
+    assert created.status_code == 201, created.text
+    assert created.headers["Idempotency-Replayed"] == "false"
+    graph = created.json()["data"]
+    replayed = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/relationship-graphs",
+        json=request,
+        headers=headers,
+    )
+    assert replayed.status_code == 201
+    assert replayed.headers["Idempotency-Replayed"] == "true"
+    assert replayed.json()["data"] == graph
+
+    lock_request = {
+        "expected_project_version": 2,
+        "expected_graph_version": 1,
+        "actor": "command-author",
+    }
+    lock_headers = {"Idempotency-Key": "relationship-lock-command-v1"}
+    locked = await client.post(
+        (
+            f"/api/v1/relationship-graphs/{graph['id']}"
+            "/relationships/protagonist-witness/lock"
+        ),
+        json=lock_request,
+        headers=lock_headers,
+    )
+    assert locked.status_code == 200, locked.text
+    assert locked.headers["Idempotency-Replayed"] == "false"
+    replayed_lock = await client.post(
+        (
+            f"/api/v1/relationship-graphs/{graph['id']}"
+            "/relationships/protagonist-witness/lock"
+        ),
+        json=lock_request,
+        headers=lock_headers,
+    )
+    assert replayed_lock.status_code == 200
+    assert replayed_lock.headers["Idempotency-Replayed"] == "true"
+    assert replayed_lock.json()["data"] == locked.json()["data"]
+
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        audits = list(
+            session.scalars(
+                select(AuditLog)
+                .where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.action.in_(
+                        {"CREATE_RELATIONSHIP_GRAPH", "SET_RELATIONSHIP_LOCK"}
+                    ),
+                )
+                .order_by(AuditLog.created_at)
+            ).all()
+        )
+        assert [audit.action for audit in audits] == [
+            "CREATE_RELATIONSHIP_GRAPH",
+            "SET_RELATIONSHIP_LOCK",
+        ]
+        assert all(audit.entity_type == "relationship_graph" for audit in audits)
+        assert all(audit.before_hash != audit.after_hash for audit in audits)
+
+
 async def lock_character_for_test(
     client: AsyncClient,
     character_data: dict,
@@ -1898,7 +1980,7 @@ async def test_relationship_revision_impact_diff_and_script_staleness(client: As
         f"/api/v1/projects/{PROJECT_ID}/relationship-revisions",
         json={**impact_payload, "confirmed": True, "impact_hash": "0" * 64},
     )
-    assert stale_confirmation.status_code == 409
+    assert stale_confirmation.status_code == 409, stale_confirmation.text
     assert stale_confirmation.json()["error"]["code"] == "RELATIONSHIP_REVISION_IMPACT_STALE"
 
     created = await client.post(

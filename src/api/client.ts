@@ -1162,8 +1162,8 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   return payload.data as T
 }
 
-export function mapWorkspace(workspace: ApiWorkspace): Pick<AppState, 'project' | 'jobs'> {
-  const mapIdentityReview = (review: ApiIdentityReviewRecord) => ({
+function mapIdentityReview(review: ApiIdentityReviewRecord) {
+  return {
     decision: review.decision,
     issues: review.issues,
     ...(review.note == null ? {} : { note: review.note }),
@@ -1172,8 +1172,11 @@ export function mapWorkspace(workspace: ApiWorkspace): Pick<AppState, 'project' 
     ...(review.score == null ? {} : { score: review.score }),
     referenceAssetIds: review.reference_asset_ids,
     ...(review.look_version == null ? {} : { lookVersion: review.look_version }),
-  })
-  const shots: Shot[] = workspace.shots.map((shot) => ({
+  }
+}
+
+function mapApiShot(shot: ApiShot): Shot {
+  return {
     id: shot.id,
     sceneId: shot.scene_id,
     code: shot.code,
@@ -1240,7 +1243,11 @@ export function mapWorkspace(workspace: ApiWorkspace): Pick<AppState, 'project' 
     ...(shot.latest_identity_review == null
       ? {}
       : { latestIdentityReview: mapIdentityReview(shot.latest_identity_review) }),
-  }))
+  }
+}
+
+export function mapWorkspace(workspace: ApiWorkspace): Pick<AppState, 'project' | 'jobs'> {
+  const shots = workspace.shots.map(mapApiShot)
   const scenes: Scene[] = workspace.scenes.map((scene) => ({
     id: scene.id,
     code: scene.code,
@@ -1266,6 +1273,61 @@ export async function fetchWorkspace(projectId: string, signal?: AbortSignal) {
     { signal },
   )
   return mapWorkspace(workspace)
+}
+
+export async function updatePersistedShot(
+  shotId: string,
+  expectedVersion: number,
+  patch: Pick<Partial<Shot>, 'description' | 'dialogue' | 'shotSize' | 'cameraMovement'>,
+): Promise<Shot> {
+  const result = await requestJson<ApiShot>(`/api/v1/shots/${shotId}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': crypto.randomUUID(),
+    },
+    body: JSON.stringify({
+      expected_version: expectedVersion,
+      ...(patch.description === undefined ? {} : { description: patch.description }),
+      ...(patch.dialogue === undefined ? {} : { dialogue: patch.dialogue }),
+      ...(patch.shotSize === undefined ? {} : { shot_size: patch.shotSize }),
+      ...(patch.cameraMovement === undefined
+        ? {}
+        : { camera_movement: patch.cameraMovement }),
+      actor: '创作者',
+    }),
+  })
+  return mapApiShot(result)
+}
+
+export async function reorderPersistedSceneShots(
+  sceneId: string,
+  expectedVersion: number,
+  shotIds: string[],
+): Promise<{ sceneId: string; projectLockVersion: number; shotIds: string[]; shots: Shot[] }> {
+  const result = await requestJson<{
+    scene_id: string
+    project_lock_version: number
+    shot_ids: string[]
+    shots: ApiShot[]
+  }>(`/api/v1/scenes/${sceneId}/shots/order`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': crypto.randomUUID(),
+    },
+    body: JSON.stringify({
+      expected_version: expectedVersion,
+      shot_ids: shotIds,
+      actor: '创作者',
+    }),
+  })
+  return {
+    sceneId: result.scene_id,
+    projectLockVersion: result.project_lock_version,
+    shotIds: result.shot_ids,
+    shots: result.shots.map(mapApiShot),
+  }
 }
 
 export async function fetchRuntimeConfig(signal?: AbortSignal): Promise<RuntimeConfig> {
@@ -4822,11 +4884,17 @@ export async function updatePersistedShotCharacterBindings(
   })
 }
 
-export async function approvePersistedCandidateIdentity(shotId: string): Promise<void> {
+export async function approvePersistedCandidateIdentity(
+  shotId: string,
+  expectedVersion: number,
+): Promise<void> {
   await requestJson<ApiShot>(`/api/v1/shots/${shotId}/takes/candidate/identity-approve`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ actor: 'demo-user' }),
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': crypto.randomUUID(),
+    },
+    body: JSON.stringify({ expected_version: expectedVersion, actor: 'demo-user' }),
   })
 }
 

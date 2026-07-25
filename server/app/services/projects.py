@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from uuid import uuid4
@@ -27,7 +28,10 @@ CREATE_SCOPE = "POST:/api/v1/projects"
 EDITABLE_PROJECT_STATES = {ProjectStatus.DRAFT, ProjectStatus.PROPOSAL_READY}
 
 
-def delete_project(session: Session, project_id: str) -> dict[str, object]:
+def prepare_project_deletion(
+    session: Session,
+    project_id: str,
+) -> tuple[dict[str, object], Callable[[], None]]:
     project = project_or_404(session, project_id)
     storage_keys = set(
         session.scalars(select(Asset.storage_key).where(Asset.project_id == project_id)).all()
@@ -118,20 +122,34 @@ def delete_project(session: Session, project_id: str) -> dict[str, object]:
         if result.rowcount and result.rowcount > 0:
             deleted_rows += result.rowcount
 
-    session.commit()
     assets_root = (get_settings().data_dir / "assets").resolve()
-    deleted_files = 0
-    for storage_key in storage_keys - shared_storage_keys:
-        path = (get_settings().data_dir / storage_key).resolve()
-        if path.is_relative_to(assets_root) and path.is_file():
-            path.unlink()
-            deleted_files += 1
-    return {
+    removable_paths = [
+        path
+        for storage_key in storage_keys - shared_storage_keys
+        if (path := (get_settings().data_dir / storage_key).resolve()).is_relative_to(assets_root)
+        and path.is_file()
+    ]
+    result: dict[str, object] = {
         "project_id": project_id,
         "deleted": True,
         "deleted_rows": deleted_rows,
-        "deleted_files": deleted_files,
+        "deleted_files": len(removable_paths),
     }
+
+    def cleanup_files() -> None:
+        for path in removable_paths:
+            if path.is_file():
+                path.unlink()
+
+    session.flush()
+    return result, cleanup_files
+
+
+def delete_project(session: Session, project_id: str) -> dict[str, object]:
+    result, cleanup_files = prepare_project_deletion(session, project_id)
+    session.commit()
+    cleanup_files()
+    return result
 
 
 def _json_list(value: str) -> list[str]:
@@ -272,7 +290,12 @@ def replay_create(
 
 
 async def create_project(
-    session: Session, payload: ProjectCreate, idempotency_key: str
+    session: Session,
+    payload: ProjectCreate,
+    idempotency_key: str,
+    *,
+    commit: bool = True,
+    manage_idempotency: bool = True,
 ) -> ProjectCreateResult:
     if payload.reference_asset_ids:
         raise HTTPException(
@@ -285,14 +308,15 @@ async def create_project(
         )
     request_data = payload.model_dump(mode="json")
     request_hash = content_hash(request_data)
-    existing = session.scalar(
-        select(IdempotencyKey).where(
-            IdempotencyKey.scope == CREATE_SCOPE,
-            IdempotencyKey.key == idempotency_key,
+    if manage_idempotency:
+        existing = session.scalar(
+            select(IdempotencyKey).where(
+                IdempotencyKey.scope == CREATE_SCOPE,
+                IdempotencyKey.key == idempotency_key,
+            )
         )
-    )
-    if existing is not None:
-        return replay_create(existing, request_hash, idempotency_key)
+        if existing is not None:
+            return replay_create(existing, request_hash, idempotency_key)
 
     project_name = payload.name
     if project_name is None:
@@ -395,19 +419,27 @@ async def create_project(
     stored_response = canonical_json(
         {"project": project_read.model_dump(mode="json"), "brief_version": 1}
     )
-    session.add(
-        IdempotencyKey(
-            id=str(uuid4()),
-            scope=CREATE_SCOPE,
-            key=idempotency_key,
-            request_hash=request_hash,
-            response_json=stored_response,
-            status_code=201,
-            resource_id=project.id,
-            created_at=now,
-            expires_at=now + timedelta(days=7),
+    if manage_idempotency:
+        session.add(
+            IdempotencyKey(
+                id=str(uuid4()),
+                scope=CREATE_SCOPE,
+                key=idempotency_key,
+                request_hash=request_hash,
+                response_json=stored_response,
+                status_code=201,
+                resource_id=project.id,
+                created_at=now,
+                expires_at=now + timedelta(days=7),
+            )
         )
-    )
+    if not commit:
+        session.flush()
+        return ProjectCreateResult(
+            project=project_read,
+            brief_version=1,
+            idempotency_replayed=False,
+        )
     try:
         session.commit()
     except IntegrityError:
@@ -429,7 +461,11 @@ async def create_project(
 
 
 def update_project(
-    session: Session, project_id: str, payload: ProjectUpdate
+    session: Session,
+    project_id: str,
+    payload: ProjectUpdate,
+    *,
+    commit: bool = True,
 ) -> ProjectUpdateResult:
     project = project_or_404(session, project_id)
     if project.status not in EDITABLE_PROJECT_STATES:
@@ -731,7 +767,9 @@ def update_project(
             created_at=now,
         )
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     session.refresh(project)
     return ProjectUpdateResult(
         project=ProjectRead.model_validate(project), brief_version=next_brief_version

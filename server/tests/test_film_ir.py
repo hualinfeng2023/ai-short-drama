@@ -51,3 +51,60 @@ async def test_film_ir_is_read_only_projection_of_existing_rows(
 async def test_film_ir_unknown_project_is_not_found(client: AsyncClient) -> None:
     response = await client.get("/api/v1/projects/not-a-project/film-ir")
     assert response.status_code == 404
+
+
+async def test_canvas_projection_reuses_film_ir_and_exposes_only_view_state_contract(
+    client: AsyncClient,
+) -> None:
+    with Session(get_engine(get_settings().database_url)) as session:
+        project = session.get(Project, PROJECT_ID)
+        assert project is not None
+        before_lock_version = project.lock_version
+        before_audits = session.scalar(select(func.count()).select_from(AuditLog))
+
+    film_ir = (await client.get(f"/api/v1/projects/{PROJECT_ID}/film-ir")).json()["data"]
+    response = await client.get(f"/api/v1/projects/{PROJECT_ID}/canvas-projection")
+
+    assert response.status_code == 200, response.text
+    canvas = response.json()["data"]
+    assert canvas["schema_version"] == "film-canvas-projection-v1"
+    assert canvas["source_projection"] == "film-ir-projection-v1"
+    assert canvas["project_lock_version"] == before_lock_version
+    assert canvas["nodes"]
+    assert all(node["read_only"] is True for node in canvas["nodes"])
+    film_ir_refs = {(item["type"], item["id"]) for item in film_ir["objects"]}
+    canvas_refs = {(node["ref"]["type"], node["ref"]["id"]) for node in canvas["nodes"]}
+    assert canvas_refs <= film_ir_refs
+    assert {"Project", "Scene", "Shot", "Character"} <= {
+        node["ref"]["type"] for node in canvas["nodes"]
+    }
+    for edge in canvas["edges"]:
+        assert (edge["source"]["type"], edge["source"]["id"]) in canvas_refs
+        assert (edge["target"]["type"], edge["target"]["id"]) in canvas_refs
+
+    contract = canvas["view_state_contract"]
+    assert contract["persistence"] == "CLIENT_LOCAL"
+    assert {
+        "x",
+        "y",
+        "width",
+        "height",
+        "group",
+        "z_index",
+        "collapsed",
+        "selected",
+        "viewport.x",
+        "viewport.y",
+        "viewport.zoom",
+    } == set(contract["allowed_fields"])
+    assert {
+        "canonical_status",
+        "approval_status",
+        "version_id",
+        "domain_payload",
+    } <= set(contract["forbidden_business_fields"])
+
+    with Session(get_engine(get_settings().database_url)) as session:
+        project = session.get(Project, PROJECT_ID)
+        assert project is not None and project.lock_version == before_lock_version
+        assert session.scalar(select(func.count()).select_from(AuditLog)) == before_audits

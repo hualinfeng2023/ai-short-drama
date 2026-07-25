@@ -1,29 +1,26 @@
 import { describe, expect, it } from 'vitest'
 
-import { normalizeCachedStudioState } from './StudioContext'
+import { normalizeStudioPreferences } from './StudioContext'
 
-describe('normalizeCachedStudioState', () => {
-  it('repairs invalid legacy project fields before the first route render', () => {
-    const state = normalizeCachedStudioState({
+describe('normalizeStudioPreferences', () => {
+  it('restores only view preferences and ignores cached domain objects', () => {
+    const preferences = normalizeStudioPreferences({
+      visualMode: 'cinema',
       project: {
         id: 'legacy-project',
-        name: null,
-        scenes: null,
-        shots: null,
-        updatedAt: null,
+        shots: [{ id: 'must-not-be-restored' }],
       },
-      jobs: [{
-        id: 'legacy-job',
-        entityType: 'shot',
-        entityId: 'legacy-shot',
-      }],
+      jobs: [{ id: 'must-not-be-restored' }],
     })
 
-    expect(state.project.id).toBe('legacy-project')
-    expect(state.project.name).toBeTruthy()
-    expect(Array.isArray(state.project.scenes)).toBe(true)
-    expect(Array.isArray(state.project.shots)).toBe(true)
-    expect(state.project.updatedAt).toBeTruthy()
-    expect(state.jobs[0].entity).toBe('shot:legacy-shot')
+    expect(preferences).toEqual({ visualMode: 'cinema' })
+    expect('project' in preferences).toBe(false)
+    expect('jobs' in preferences).toBe(false)
+  })
+
+  it('falls back when the preference payload is invalid', () => {
+    expect(normalizeStudioPreferences({ visualMode: 'invalid' })).toEqual({
+      visualMode: 'standard',
+    })
   })
 })

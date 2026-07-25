@@ -56,6 +56,7 @@ def create_proposal_job(
     expected_version: int,
     request_idempotency_key: str,
     trace_id: str,
+    commit: bool = True,
 ) -> tuple[JobRead, bool]:
     project = project_or_404(session, project_id)
     latest_brief = session.scalar(
@@ -204,7 +205,9 @@ def create_proposal_job(
             "brief_version": latest_brief.version,
         },
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     session.refresh(job)
     return job_to_read(job), replayed
 

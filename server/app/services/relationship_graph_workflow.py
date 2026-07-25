@@ -484,6 +484,7 @@ def create_relationship_graph(
     story_bible_version_id: str,
     payload: RelationshipGraphPayload,
     actor: str,
+    commit: bool = True,
 ) -> dict[str, object]:
     project = project_or_404(session, project_id)
     _check_project_version(project, expected_project_version)
@@ -550,7 +551,9 @@ def create_relationship_graph(
         event_type="relationship_graph.created",
         payload={"graph_id": graph.id, "version": graph.version, "actor": actor},
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     return graph_to_read(session, graph, project=project)
 
 
@@ -613,6 +616,7 @@ def update_relationship_graph(
     expected_graph_version: int,
     payload: RelationshipGraphPayload,
     actor: str,
+    commit: bool = True,
 ) -> dict[str, object]:
     graph = _graph_or_404(session, graph_id)
     project = project_or_404(session, graph.project_id)
@@ -640,7 +644,9 @@ def update_relationship_graph(
         event_type="relationship_graph.updated",
         payload={"graph_id": graph.id, "actor": actor, "lock_version": graph.lock_version},
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     return graph_to_read(session, graph, project=project)
 
 
@@ -690,6 +696,7 @@ def submit_relationship_graph(
     expected_graph_version: int,
     actor: str,
     note: str | None,
+    commit: bool = True,
 ) -> dict[str, object]:
     graph, project = _transition_action(
         session,
@@ -735,7 +742,9 @@ def submit_relationship_graph(
         event_type="relationship_graph.submitted",
         payload={"graph_id": graph.id, "actor": actor},
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     return graph_to_read(session, graph, project=project)
 
 
@@ -747,6 +756,7 @@ def withdraw_relationship_graph(
     expected_graph_version: int,
     actor: str,
     note: str | None,
+    commit: bool = True,
 ) -> dict[str, object]:
     graph, project = _transition_action(
         session,
@@ -785,7 +795,9 @@ def withdraw_relationship_graph(
         event_type="relationship_graph.withdrawn",
         payload={"graph_id": graph.id, "actor": actor},
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     return graph_to_read(session, graph, project=project)
 
 
@@ -852,6 +864,7 @@ def reject_relationship_graph(
     actor: str,
     note: str,
     issues: list[str],
+    commit: bool = True,
 ) -> dict[str, object]:
     graph, project = _transition_action(
         session,
@@ -905,7 +918,9 @@ def reject_relationship_graph(
         event_type="relationship_graph.rejected",
         payload={"graph_id": graph.id, "revision_graph_id": revision.id, "actor": actor},
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     return {
         "rejected_graph": graph_to_read(session, graph, project=project),
         "revision_graph": graph_to_read(session, revision, project=project),
@@ -921,6 +936,7 @@ def approve_relationship_graph(
     actor: str,
     note: str | None,
     trace_id: str,
+    commit: bool = True,
 ) -> dict[str, object]:
     graph, project = _transition_action(
         session,
@@ -1021,7 +1037,9 @@ def approve_relationship_graph(
             "next_gate": "CHARACTER_IDENTITY_LOCK",
         },
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     result = graph_to_read(session, graph, project=project)
     result["character_visuals"] = {
         "character_count": len(characters),
@@ -1324,6 +1342,7 @@ def create_confirmed_relationship_revision(
     confirmed: bool,
     impact_hash: str,
     actor: str,
+    commit: bool = True,
 ) -> dict[str, object]:
     if not confirmed:
         raise _http_error(
@@ -1396,7 +1415,9 @@ def create_confirmed_relationship_revision(
             "impact_hash": impact_hash,
         },
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     return {
         "revision_graph": graph_to_read(session, revision, project=project),
         "change_set": {
@@ -1417,6 +1438,7 @@ def create_relationship_graph_revision(
     expected_project_version: int,
     actor: str,
     note: str | None,
+    commit: bool = True,
 ) -> dict[str, object]:
     source = _graph_or_404(session, graph_id)
     project = project_or_404(session, source.project_id)
@@ -1436,7 +1458,9 @@ def create_relationship_graph_revision(
     now = datetime.now(UTC)
     project.lock_version += 1
     project.updated_at = now
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     return graph_to_read(session, revision, project=project)
 
 
@@ -1449,6 +1473,7 @@ def set_relationship_lock(
     expected_graph_version: int,
     actor: str,
     locked: bool,
+    commit: bool = True,
 ) -> dict[str, object]:
     graph = _graph_or_404(session, graph_id)
     project = project_or_404(session, graph.project_id)
@@ -1484,5 +1509,7 @@ def set_relationship_lock(
         event_type="relationship.locked" if locked else "relationship.unlocked",
         payload={"graph_id": graph.id, "relationship_key": relationship_key, "actor": actor},
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     return graph_to_read(session, graph, project=project)

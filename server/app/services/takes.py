@@ -550,7 +550,13 @@ def set_shot_character_bindings(
     return shot
 
 
-def approve_candidate_identity(session: Session, shot_id: str, *, actor: str) -> Shot:
+def approve_candidate_identity(
+    session: Session,
+    shot_id: str,
+    *,
+    actor: str,
+    commit: bool = True,
+) -> Shot:
     shot = shot_or_404(session, shot_id)
     if shot.candidate_take is None:
         raise HTTPException(
@@ -587,7 +593,9 @@ def approve_candidate_identity(session: Session, shot_id: str, *, actor: str) ->
             "actor": actor,
         },
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     session.refresh(shot)
     return shot
 

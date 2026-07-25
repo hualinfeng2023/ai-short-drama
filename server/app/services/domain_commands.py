@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db.models import (
     Asset,
+    AudioTake,
     AuditLog,
     BriefVersion,
     ChangeSet,
@@ -31,6 +32,7 @@ from app.db.models import (
     Project,
     ProposalVersion,
     RelationshipGraphVersion,
+    ReviewRecord,
     Scene,
     ScriptExcerptRevision,
     ScriptLine,
@@ -40,8 +42,8 @@ from app.db.models import (
     ShotSpec,
     StoryBibleVersion,
     StoryboardVersion,
+    StoryVersion,
     Take,
-    TimelineClip,
     TimelineItem,
     TimelineVersion,
 )
@@ -53,13 +55,29 @@ from app.schemas import (
     CharacterCandidateSelectRequest,
     CharacterChangeApplyRequest,
     CharacterIdentityViewGenerateRequest,
+    CharacterLockRequest,
     CharacterRevisionCreateRequest,
     CharacterVisualProfileConfirmRequest,
     CharacterVisualProfileUpdateRequest,
+    ExportCreateRequest,
+    ExportMatrixRequest,
+    ExportProfileCreate,
+    GenericReviewDecisionRequest,
     IdentityReviewRequest,
     JobRecoveryRequest,
+    ProjectCreate,
+    ProjectUpdate,
+    ProposalApprovalRequest,
+    ProposalGenerateRequest,
     ReferenceAssetUploadCommandPayload,
+    RelationshipGraphActionRequest,
+    RelationshipGraphCreateRequest,
+    RelationshipGraphRejectRequest,
+    RelationshipGraphRevisionRequest,
+    RelationshipGraphUpdateRequest,
+    RelationshipRevisionCreateRequest,
     RevisionCreateRequest,
+    SceneShotOrderRequest,
     ScriptEpisodeUpdateRequest,
     ScriptExcerptRewriteApplyRequest,
     ScriptExcerptRewriteRequest,
@@ -67,8 +85,10 @@ from app.schemas import (
     ScriptSceneUpdateRequest,
     ShotCharacterBindingUpdate,
     ShotImageGenerateRequest,
+    ShotSpecUpdateRequest,
     ShotVideoGenerateRequest,
     StoryboardShotRegenerateRequest,
+    StoryPackageGenerateRequest,
 )
 from app.services.assets import (
     asset_to_read,
@@ -97,15 +117,45 @@ from app.services.creative_story import (
     request_story_structure,
     revise_script,
 )
+from app.services.delivery import create_export_matrix, create_export_profile
+from app.services.dependency_analysis import apply_dependency_invalidation
 from app.services.director_proposals import director_proposal_to_read
 from app.services.events import append_event
+from app.services.exports import create_export
 from app.services.jobs import (
     job_state_hash,
+    job_to_read,
     request_cancel,
     request_job_recovery,
     request_retry,
 )
-from app.services.projects import canonical_json, content_hash, version_conflict
+from app.services.media_production_v2 import decide_review
+from app.services.preproduction import approve_preproduction
+from app.services.production import (
+    approve_proposal,
+    lock_character,
+    request_character_candidates,
+)
+from app.services.projects import (
+    canonical_json,
+    content_hash,
+    create_project,
+    prepare_project_deletion,
+    update_project,
+    version_conflict,
+)
+from app.services.proposals import create_proposal_job
+from app.services.relationship_graph_workflow import (
+    approve_relationship_graph,
+    create_confirmed_relationship_revision,
+    create_relationship_graph,
+    create_relationship_graph_revision,
+    reject_relationship_graph,
+    set_relationship_lock,
+    submit_relationship_graph,
+    update_relationship_graph,
+    withdraw_relationship_graph,
+)
 from app.services.revisions import approve_timeline, create_revision, rollback_timeline
 from app.services.script_rewrites import (
     apply_script_excerpt_rewrite,
@@ -115,6 +165,7 @@ from app.services.script_rewrites import (
 from app.services.storyboards_v2 import approve_storyboard, regenerate_storyboard_shot
 from app.services.takes import (
     apply_candidate_take,
+    approve_candidate_identity,
     create_shot_image_job,
     review_candidate_identity,
     set_shot_character_bindings,
@@ -1770,6 +1821,318 @@ def _execute_script_excerpt_rewrite_apply(
     )
 
 
+def _relationship_graph_state_hash(
+    project: Project,
+    graph: RelationshipGraphVersion,
+) -> str:
+    return content_hash(
+        {
+            "project_id": project.id,
+            "project_lock_version": project.lock_version,
+            "project_status": project.status,
+            "graph_id": graph.id,
+            "graph_version": graph.version,
+            "graph_lock_version": graph.lock_version,
+            "graph_status": graph.status,
+            "graph_content_hash": graph.content_hash,
+            "story_bible_version_id": graph.story_bible_version_id,
+            "parent_version_id": graph.parent_version_id,
+            "approved_by": graph.approved_by,
+            "approved_at": (
+                graph.approved_at.isoformat() if graph.approved_at is not None else None
+            ),
+        }
+    )
+
+
+def _relationship_expected_project_version(command: DirectorCommand) -> int:
+    expected = command.expected_version.project_lock_version
+    if expected is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "PROJECT_VERSION_REQUIRED",
+                "message": "关系网命令必须提供项目锁版本",
+            },
+        )
+    return expected
+
+
+def _relationship_expected_graph_version(command: DirectorCommand) -> int:
+    expected = command.expected_version.object_lock_version
+    if expected is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "OBJECT_VERSION_REQUIRED",
+                "message": "关系网命令必须提供关系版本锁",
+            },
+        )
+    return expected
+
+
+def _execute_relationship_graph_command(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    _require_explicit_user_confirmation(command)
+    project = session.get(Project, project_id)
+    if project is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "PROJECT_NOT_FOUND", "message": "项目不存在"},
+        )
+    expected_project_version = _relationship_expected_project_version(command)
+
+    if command.command_type == "CREATE_RELATIONSHIP_GRAPH":
+        bible = session.get(StoryBibleVersion, command.target_version_id)
+        if (
+            bible is None
+            or bible.project_id != project.id
+            or command.target_object_id != project.id
+        ):
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "COMMAND_TARGET_NOT_FOUND", "message": "关系网来源故事设定不存在"},
+            )
+        _validate_target(command, object_id=project.id, version_id=bible.id)
+        if project.lock_version != expected_project_version:
+            raise version_conflict(project, expected_project_version)
+        if (
+            command.expected_version.target_hash is not None
+            and command.expected_version.target_hash != bible.content_hash
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "TARGET_CONTENT_CHANGED",
+                    "message": "来源故事设定已经变化，请刷新后重试",
+                },
+            )
+        validated_create = RelationshipGraphCreateRequest(
+            expected_project_version=expected_project_version,
+            actor=command.actor.id,
+            **{key: value for key, value in command.payload.items() if key != "confirmed"},
+        )
+        before_hash = content_hash(
+            {
+                "project_lock_version": project.lock_version,
+                "story_bible_id": bible.id,
+                "story_bible_hash": bible.content_hash,
+            }
+        )
+        result = create_relationship_graph(
+            session,
+            project_id=project.id,
+            expected_project_version=expected_project_version,
+            story_bible_version_id=validated_create.story_bible_version_id,
+            payload=validated_create.graph,
+            actor=command.actor.id,
+            commit=False,
+        )
+        graph = session.get(RelationshipGraphVersion, result["id"])
+        if graph is None:
+            raise RuntimeError("关系网创建后无法读取")
+        return MutationResult(
+            result=result,
+            entity_type="relationship_graph",
+            entity_id=graph.id,
+            before_hash=before_hash,
+            after_hash=_relationship_graph_state_hash(project, graph),
+        )
+
+    graph = session.get(RelationshipGraphVersion, command.target_version_id)
+    if graph is None or graph.project_id != project.id or command.target_object_id != graph.id:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "COMMAND_TARGET_NOT_FOUND", "message": "命令目标关系网不存在"},
+        )
+    _validate_target(command, object_id=graph.id, version_id=graph.id)
+    if project.lock_version != expected_project_version:
+        raise version_conflict(project, expected_project_version)
+    if (
+        command.expected_version.target_hash is not None
+        and command.expected_version.target_hash != graph.content_hash
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "TARGET_CONTENT_CHANGED",
+                "message": "关系网内容已经变化，请刷新后重试",
+            },
+        )
+    before_hash = _relationship_graph_state_hash(project, graph)
+    payload = {key: value for key, value in command.payload.items() if key != "confirmed"}
+
+    if command.command_type == "UPDATE_RELATIONSHIP_GRAPH":
+        graph_version = _relationship_expected_graph_version(command)
+        validated_update = RelationshipGraphUpdateRequest(
+            expected_project_version=expected_project_version,
+            expected_graph_version=graph_version,
+            actor=command.actor.id,
+            **payload,
+        )
+        result = update_relationship_graph(
+            session,
+            graph_id=graph.id,
+            expected_project_version=expected_project_version,
+            expected_graph_version=graph_version,
+            payload=validated_update.graph_payload(),
+            actor=command.actor.id,
+            commit=False,
+        )
+        entity_type, entity_id = "relationship_graph", graph.id
+    elif command.command_type in {
+        "SUBMIT_RELATIONSHIP_GRAPH",
+        "WITHDRAW_RELATIONSHIP_GRAPH",
+        "APPROVE_RELATIONSHIP_GRAPH",
+    }:
+        graph_version = _relationship_expected_graph_version(command)
+        validated_action = RelationshipGraphActionRequest(
+            expected_project_version=expected_project_version,
+            expected_graph_version=graph_version,
+            actor=command.actor.id,
+            **payload,
+        )
+        if command.command_type == "SUBMIT_RELATIONSHIP_GRAPH":
+            result = submit_relationship_graph(
+                session,
+                graph_id=graph.id,
+                expected_project_version=expected_project_version,
+                expected_graph_version=graph_version,
+                actor=command.actor.id,
+                note=validated_action.note,
+                commit=False,
+            )
+        elif command.command_type == "WITHDRAW_RELATIONSHIP_GRAPH":
+            result = withdraw_relationship_graph(
+                session,
+                graph_id=graph.id,
+                expected_project_version=expected_project_version,
+                expected_graph_version=graph_version,
+                actor=command.actor.id,
+                note=validated_action.note,
+                commit=False,
+            )
+        else:
+            result = approve_relationship_graph(
+                session,
+                graph_id=graph.id,
+                expected_project_version=expected_project_version,
+                expected_graph_version=graph_version,
+                actor=command.actor.id,
+                note=validated_action.note,
+                trace_id=command.command_id,
+                commit=False,
+            )
+        entity_type, entity_id = "relationship_graph", graph.id
+    elif command.command_type == "REJECT_RELATIONSHIP_GRAPH":
+        graph_version = _relationship_expected_graph_version(command)
+        validated_reject = RelationshipGraphRejectRequest(
+            expected_project_version=expected_project_version,
+            expected_graph_version=graph_version,
+            actor=command.actor.id,
+            **payload,
+        )
+        result = reject_relationship_graph(
+            session,
+            graph_id=graph.id,
+            expected_project_version=expected_project_version,
+            expected_graph_version=graph_version,
+            actor=command.actor.id,
+            note=validated_reject.note,
+            issues=validated_reject.issues,
+            commit=False,
+        )
+        entity_type, entity_id = "relationship_graph", graph.id
+    elif command.command_type == "CREATE_RELATIONSHIP_GRAPH_REVISION":
+        validated_revision = RelationshipGraphRevisionRequest(
+            expected_project_version=expected_project_version,
+            actor=command.actor.id,
+            **payload,
+        )
+        result = create_relationship_graph_revision(
+            session,
+            graph_id=graph.id,
+            expected_project_version=expected_project_version,
+            actor=command.actor.id,
+            note=validated_revision.note,
+            commit=False,
+        )
+        entity_type, entity_id = "relationship_graph", str(result["id"])
+    elif command.command_type == "CREATE_CONFIRMED_RELATIONSHIP_REVISION":
+        validated_confirmed = RelationshipRevisionCreateRequest(
+            expected_version=expected_project_version,
+            actor=command.actor.id,
+            confirmed=command.payload.get("confirmed") is True,
+            **payload,
+        )
+        result = create_confirmed_relationship_revision(
+            session,
+            project_id=project.id,
+            base_relationship_graph_id=graph.id,
+            relationship_keys=validated_confirmed.relationship_keys,
+            intent=validated_confirmed.intent,
+            expected_version=expected_project_version,
+            confirmed=validated_confirmed.confirmed,
+            impact_hash=validated_confirmed.impact_hash,
+            actor=command.actor.id,
+            commit=False,
+        )
+        change_set = result.get("change_set")
+        if not isinstance(change_set, dict) or not isinstance(change_set.get("id"), str):
+            raise RuntimeError("关系修改版创建后缺少变更集")
+        entity_type, entity_id = "change_set", str(change_set["id"])
+    elif command.command_type == "SET_RELATIONSHIP_LOCK":
+        graph_version = _relationship_expected_graph_version(command)
+        relationship_key = payload.get("relationship_key")
+        locked = payload.get("locked")
+        if not isinstance(relationship_key, str) or not isinstance(locked, bool):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "COMMAND_PAYLOAD_INVALID",
+                    "message": "关系锁定命令参数无效",
+                },
+            )
+        validated_lock = RelationshipGraphActionRequest(
+            expected_project_version=expected_project_version,
+            expected_graph_version=graph_version,
+            actor=command.actor.id,
+            note=payload.get("note"),
+        )
+        result = set_relationship_lock(
+            session,
+            graph_id=graph.id,
+            relationship_key=relationship_key,
+            expected_project_version=expected_project_version,
+            expected_graph_version=graph_version,
+            actor=command.actor.id,
+            locked=locked,
+            commit=False,
+        )
+        _ = validated_lock
+        entity_type, entity_id = "relationship_graph", graph.id
+    else:  # pragma: no cover - guarded by dispatcher
+        raise RuntimeError("不支持的关系网命令")
+
+    after_graph = session.get(RelationshipGraphVersion, graph.id)
+    after_hash = (
+        _relationship_graph_state_hash(project, after_graph)
+        if after_graph is not None
+        else content_hash(result)
+    )
+    return MutationResult(
+        result=result,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        before_hash=before_hash,
+        after_hash=after_hash,
+    )
+
+
 def _execute_story_structure_request(
     session: Session,
     *,
@@ -1929,6 +2292,280 @@ def _shot_state_hash(shot: Shot) -> str:
             "character_look_version_ids_json": shot.character_look_version_ids_json,
             "character_story_state_version_ids_json": (shot.character_story_state_version_ids_json),
         }
+    )
+
+
+def _shot_spec_state_hash(shot: Shot, spec: ShotSpec | None) -> str:
+    return content_hash(
+        {
+            "shot": {
+                "id": shot.id,
+                "ordinal": shot.ordinal,
+                "description": shot.description,
+                "dialogue": shot.dialogue,
+                "shot_size": shot.shot_size,
+                "camera_movement": shot.camera_movement,
+                "status": shot.status,
+                "lock_version": shot.lock_version,
+            },
+            "shot_spec": (
+                {
+                    "id": spec.id,
+                    "storyboard_version_id": spec.storyboard_version_id,
+                    "ordinal": spec.ordinal,
+                    "description": spec.description,
+                    "dialogue": spec.dialogue,
+                    "shot_size": spec.shot_size,
+                    "camera_movement": spec.camera_movement,
+                    "status": spec.status,
+                    "content_hash": spec.content_hash,
+                }
+                if spec is not None
+                else None
+            ),
+        }
+    )
+
+
+def _shot_spec_content_hash(spec: ShotSpec) -> str:
+    return content_hash(
+        {
+            "shot_id": spec.shot_id,
+            "script_scene_id": spec.script_scene_id,
+            "script_line_ids_json": spec.script_line_ids_json,
+            "ordinal": spec.ordinal,
+            "description": spec.description,
+            "dialogue": spec.dialogue,
+            "duration_ms": spec.duration_ms,
+            "shot_size": spec.shot_size,
+            "camera_movement": spec.camera_movement,
+            "character_look_ids_json": spec.character_look_ids_json,
+            "location_version_id": spec.location_version_id,
+            "prop_version_ids_json": spec.prop_version_ids_json,
+            "prompt_json": spec.prompt_json,
+        }
+    )
+
+
+def _project_for_shot(session: Session, shot: Shot) -> Project:
+    project = session.scalar(
+        select(Project)
+        .join(Episode, Episode.project_id == Project.id)
+        .join(Scene, Scene.episode_id == Episode.id)
+        .where(Scene.id == shot.scene_id)
+    )
+    if project is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "COMMAND_TARGET_NOT_FOUND", "message": "命令目标镜头不存在"},
+        )
+    return project
+
+
+def _assert_shot_is_editable(
+    session: Session,
+    *,
+    shot: Shot,
+    spec: ShotSpec | None,
+) -> None:
+    storyboard = session.get(StoryboardVersion, spec.storyboard_version_id) if spec else None
+    approved_take = session.scalar(
+        select(Take.id).where(Take.shot_id == shot.id, Take.approval == "APPROVED").limit(1)
+    )
+    if (
+        shot.status == "APPROVED"
+        or (spec is not None and spec.status == "APPROVED")
+        or (storyboard is not None and storyboard.status == "APPROVED")
+        or approved_take is not None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "APPROVED_SHOT_EDIT_REQUIRES_REVISION",
+                "message": "已批准镜头不能原地修改，请通过修订流程创建新版本",
+                "user_action": "创建局部修订并确认影响范围；现有 Approved 资产会被保留",
+                "retryable": False,
+            },
+        )
+
+
+def _execute_shot_spec_update(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    _require_explicit_user_confirmation(command)
+    shot = shot_or_404(session, command.target_object_id)
+    project = _project_for_shot(session, shot)
+    if project.id != project_id:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "COMMAND_TARGET_NOT_FOUND", "message": "命令目标镜头不存在"},
+        )
+    spec = session.scalar(select(ShotSpec).where(ShotSpec.shot_id == shot.id))
+    version_id = spec.id if spec is not None else shot.id
+    _validate_target(command, object_id=shot.id, version_id=version_id)
+    expected_version = _object_lock_version(command)
+    if shot.lock_version != expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "SHOT_VERSION_CONFLICT",
+                "message": "镜头已被其他操作修改，请刷新后重试",
+                "details": {
+                    "expected_version": expected_version,
+                    "current_version": shot.lock_version,
+                },
+            },
+        )
+    _assert_shot_is_editable(session, shot=shot, spec=spec)
+    before_hash = _shot_spec_state_hash(shot, spec)
+    if (
+        command.expected_version.target_hash is not None
+        and command.expected_version.target_hash != before_hash
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "TARGET_CONTENT_CHANGED", "message": "镜头内容已经变化，请刷新后重试"},
+        )
+    validated = ShotSpecUpdateRequest(
+        expected_version=expected_version,
+        actor=command.actor.id,
+        **{key: value for key, value in command.payload.items() if key != "confirmed"},
+    )
+    changes = validated.model_dump(
+        exclude={"expected_version", "actor"},
+        exclude_none=True,
+    )
+    for field, value in changes.items():
+        setattr(shot, field, value)
+        if spec is not None:
+            setattr(spec, field, value)
+    shot.lock_version += 1
+    shot.status = "DRAFT"
+    if spec is not None:
+        spec.status = "DRAFT"
+        spec.content_hash = _shot_spec_content_hash(spec)
+
+    takes = session.scalars(select(Take).where(Take.shot_id == shot.id)).all()
+    asset_ids = {take.asset_id for take in takes}
+    for take in takes:
+        take.status = "SUSPECT"
+    if asset_ids:
+        for asset in session.scalars(select(Asset).where(Asset.id.in_(asset_ids))):
+            asset.status = "SUSPECT"
+    for timeline in session.scalars(
+        select(TimelineVersion).where(TimelineVersion.project_id == project.id)
+    ):
+        if timeline.status != "SUPERSEDED":
+            timeline.status = "SUSPECT"
+    project.preview_approved = False
+    project.updated_at = datetime.now(UTC)
+    session.flush()
+    return MutationResult(
+        result=shot_to_read(session, shot).model_dump(mode="json"),
+        entity_type="shot_spec" if spec is not None else "shot",
+        entity_id=version_id,
+        before_hash=before_hash,
+        after_hash=_shot_spec_state_hash(shot, spec),
+    )
+
+
+def _execute_scene_shot_reorder(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    _require_explicit_user_confirmation(command)
+    scene = session.get(Scene, command.target_object_id)
+    if scene is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "COMMAND_TARGET_NOT_FOUND", "message": "命令目标场景不存在"},
+        )
+    project = session.scalar(
+        select(Project)
+        .join(Episode, Episode.project_id == Project.id)
+        .where(Episode.id == scene.episode_id)
+    )
+    if project is None or project.id != project_id:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "COMMAND_TARGET_NOT_FOUND", "message": "命令目标场景不存在"},
+        )
+    _validate_target(command, object_id=scene.id, version_id=scene.id)
+    expected_version = command.expected_version.project_lock_version
+    if expected_version is None or project.lock_version != expected_version:
+        raise version_conflict(project, expected_version or 0)
+    validated = SceneShotOrderRequest(
+        expected_version=expected_version,
+        actor=command.actor.id,
+        **{key: value for key, value in command.payload.items() if key != "confirmed"},
+    )
+    shots = session.scalars(
+        select(Shot).where(Shot.scene_id == scene.id).order_by(Shot.ordinal)
+    ).all()
+    existing_ids = [shot.id for shot in shots]
+    if set(validated.shot_ids) != set(existing_ids) or len(validated.shot_ids) != len(existing_ids):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "SHOT_ORDER_SCOPE_INVALID",
+                "message": "镜头排序必须且只能包含当前场景的全部镜头",
+            },
+        )
+    specs = session.scalars(select(ShotSpec).where(ShotSpec.shot_id.in_(existing_ids))).all()
+    spec_by_shot = {spec.shot_id: spec for spec in specs}
+    for shot in shots:
+        _assert_shot_is_editable(session, shot=shot, spec=spec_by_shot.get(shot.id))
+    before_hash = content_hash(
+        {
+            "scene_id": scene.id,
+            "project_lock_version": project.lock_version,
+            "shot_ids": existing_ids,
+        }
+    )
+    ordinal_by_id = {shot_id: index + 1 for index, shot_id in enumerate(validated.shot_ids)}
+    for index, spec in enumerate(specs, start=1):
+        spec.ordinal = -(100_000 + index)
+    session.flush()
+    for shot in shots:
+        shot.ordinal = ordinal_by_id[shot.id]
+        shot.lock_version += 1
+        spec = spec_by_shot.get(shot.id)
+        if spec is not None:
+            spec.ordinal = shot.ordinal
+            spec.content_hash = _shot_spec_content_hash(spec)
+    for timeline in session.scalars(
+        select(TimelineVersion).where(TimelineVersion.project_id == project.id)
+    ):
+        if timeline.status != "SUPERSEDED":
+            timeline.status = "SUSPECT"
+    project.preview_approved = False
+    project.lock_version += 1
+    project.updated_at = datetime.now(UTC)
+    session.flush()
+    ordered = sorted(shots, key=lambda item: item.ordinal)
+    result = {
+        "scene_id": scene.id,
+        "project_lock_version": project.lock_version,
+        "shot_ids": [shot.id for shot in ordered],
+        "shots": [shot_to_read(session, shot).model_dump(mode="json") for shot in ordered],
+    }
+    return MutationResult(
+        result=result,
+        entity_type="scene",
+        entity_id=scene.id,
+        before_hash=before_hash,
+        after_hash=content_hash(
+            {
+                "scene_id": scene.id,
+                "project_lock_version": project.lock_version,
+                "shot_ids": result["shot_ids"],
+            }
+        ),
     )
 
 
@@ -2543,6 +3180,44 @@ def _execute_shot_take_review(
             "shot": shot_to_read(session, updated).model_dump(mode="json"),
             "job": job.model_dump(mode="json") if job is not None else None,
         },
+        entity_type="take",
+        entity_id=take.id,
+        before_hash=before_hash,
+        after_hash=_shot_take_state_hash(session, project, updated),
+    )
+
+
+def _execute_shot_take_identity_confirmation(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    _require_explicit_user_confirmation(command)
+    project, shot, take = _shot_take_target(
+        session,
+        project_id=project_id,
+        command=command,
+    )
+    expected_version = _object_lock_version(command)
+    if shot.lock_version != expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "VERSION_CONFLICT",
+                "message": "这个镜头刚刚发生了变化，请刷新后再确认",
+                "details": {"expected": expected_version, "actual": shot.lock_version},
+            },
+        )
+    before_hash = _shot_take_state_hash(session, project, shot)
+    updated = approve_candidate_identity(
+        session,
+        shot.id,
+        actor=command.actor.id,
+        commit=False,
+    )
+    return MutationResult(
+        result=shot_to_read(session, updated).model_dump(mode="json"),
         entity_type="take",
         entity_id=take.id,
         before_hash=before_hash,
@@ -3260,14 +3935,31 @@ def _take_state_hash(take: Take) -> str:
     )
 
 
+def _audio_take_state_hash(take: AudioTake) -> str:
+    return content_hash(
+        {
+            "status": take.status,
+            "approval": take.approval,
+            "asset_id": take.asset_id,
+            "is_current": take.is_current,
+        }
+    )
+
+
 def _assert_preserved_director_objects(
     session: Session, preserved: list[dict[str, object]]
 ) -> None:
     for expected in preserved:
-        if expected.get("type") != "Take":
+        object_type = expected.get("type")
+        if object_type == "Take":
+            record = session.get(Take, str(expected["id"]))
+            state_hash = _take_state_hash(record) if record is not None else None
+        elif object_type == "AudioTake":
+            record = session.get(AudioTake, str(expected["id"]))
+            state_hash = _audio_take_state_hash(record) if record is not None else None
+        else:
             continue
-        take = session.get(Take, str(expected["id"]))
-        if take is None or _take_state_hash(take) != expected.get("state_hash"):
+        if record is None or state_hash != expected.get("state_hash"):
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -3435,15 +4127,11 @@ def _execute_apply_director_proposal(
         scope=change_scope,
     )
     downstream = dict(impact["impact"])
-    shot_ids = list(downstream.get("shot_ids", []))
-    take_ids = list(downstream.get("take_ids", []))
-    timeline_clip_ids = list(downstream.get("timeline_clip_ids", []))
-    for shot in session.scalars(select(Shot).where(Shot.id.in_(shot_ids))):
-        shot.status = "SUSPECT"
-    for take in session.scalars(select(Take).where(Take.id.in_(take_ids))):
-        take.status = "SUSPECT"
-    for clip in session.scalars(select(TimelineClip).where(TimelineClip.id.in_(timeline_clip_ids))):
-        clip.degraded = True
+    invalidation_result = apply_dependency_invalidation(
+        session,
+        project_id=project.id,
+        impact=downstream,
+    )
     _assert_preserved_director_objects(session, preserved)
     after_values = {
         key: getattr(revised_line or revised_scene, key) for key in dict(change["changes"])
@@ -3467,6 +4155,7 @@ def _execute_apply_director_proposal(
         "media_generation": False,
     }
     impact["invalidated"] = downstream.get("affected_objects", [])
+    impact["invalidation_result"] = invalidation_result
     change_set.impact_json = canonical_json(impact)
     change_set.status = "APPLIED_PENDING_APPROVAL"
     session.flush()
@@ -3589,6 +4278,911 @@ def _execute_decide_director_proposal(
     )
 
 
+def _project_brief_state_hash(project: Project, brief: BriefVersion | None) -> str:
+    return content_hash(
+        {
+            "project": {
+                "id": project.id,
+                "name": project.name,
+                "idea": project.idea,
+                "genre": project.genre,
+                "style": project.style,
+                "target_duration_sec": project.target_duration_sec,
+                "aspect_ratio": project.aspect_ratio,
+                "target_platform": project.target_platform,
+                "status": project.status,
+                "lock_version": project.lock_version,
+            },
+            "brief": (
+                {
+                    "id": brief.id,
+                    "version": brief.version,
+                    "content_hash": brief.content_hash,
+                    "status": brief.status,
+                }
+                if brief is not None
+                else None
+            ),
+        }
+    )
+
+
+def _latest_brief(session: Session, project_id: str) -> BriefVersion | None:
+    return session.scalar(
+        select(BriefVersion)
+        .where(BriefVersion.project_id == project_id)
+        .order_by(BriefVersion.version.desc())
+    )
+
+
+def _execute_project_brief_update(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    project = session.get(Project, project_id)
+    if project is None or command.target_object_id != project.id:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "PROJECT_NOT_FOUND", "message": "项目不存在"},
+        )
+    expected_version = command.expected_version.project_lock_version
+    if expected_version is None:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "PROJECT_VERSION_REQUIRED", "message": "项目修改必须提供项目锁版本"},
+        )
+    latest_brief = _latest_brief(session, project.id)
+    target_version_id = latest_brief.id if latest_brief is not None else project.id
+    if command.target_version_id != target_version_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "TARGET_VERSION_CONFLICT",
+                "message": "项目简报版本已变化，请刷新后重试",
+                "retryable": False,
+                "details": {
+                    "expected_target_version_id": command.target_version_id,
+                    "latest_target_version_id": target_version_id,
+                },
+            },
+        )
+    before_hash = _project_brief_state_hash(project, latest_brief)
+    if command.expected_version.target_hash not in {None, before_hash}:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "TARGET_HASH_CONFLICT", "message": "项目简报内容已变化，请刷新后重试"},
+        )
+    _require_explicit_user_confirmation(command)
+    changes = command.payload.get("changes")
+    if not isinstance(changes, dict):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "COMMAND_PAYLOAD_INVALID", "message": "项目修改内容无效"},
+        )
+    validated = ProjectUpdate(expected_version=expected_version, **changes)
+    updated = update_project(
+        session,
+        project.id,
+        validated,
+        commit=False,
+    )
+    next_brief = _latest_brief(session, project.id)
+    session.refresh(project)
+    return MutationResult(
+        result=updated.model_dump(mode="json"),
+        entity_type="project_brief",
+        entity_id=next_brief.id if next_brief is not None else project.id,
+        before_hash=before_hash,
+        after_hash=_project_brief_state_hash(project, next_brief),
+    )
+
+
+def _execute_director_proposal_generation_request(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    project = session.get(Project, project_id)
+    if project is None or command.target_object_id != project.id:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "PROJECT_NOT_FOUND", "message": "项目不存在"},
+        )
+    latest_brief = _latest_brief(session, project.id)
+    if latest_brief is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "BRIEF_REQUIRED", "message": "生成导演方案前需要先保存项目简报"},
+        )
+    if command.target_version_id != latest_brief.id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "TARGET_VERSION_CONFLICT",
+                "message": "项目简报版本已变化，请刷新后重试",
+            },
+        )
+    expected_version = command.expected_version.project_lock_version
+    if expected_version is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "PROJECT_VERSION_REQUIRED",
+                "message": "生成导演方案必须提供项目锁版本",
+            },
+        )
+    before_hash = _project_brief_state_hash(project, latest_brief)
+    if command.expected_version.target_hash not in {None, before_hash}:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "TARGET_HASH_CONFLICT", "message": "项目简报内容已变化，请刷新后重试"},
+        )
+    _require_explicit_user_confirmation(command)
+    ProposalGenerateRequest(expected_version=expected_version)
+    job, _ = create_proposal_job(
+        session,
+        project_id=project.id,
+        expected_version=expected_version,
+        request_idempotency_key=command.idempotency_key,
+        trace_id=command.command_id,
+        commit=False,
+    )
+    session.refresh(project)
+    return MutationResult(
+        result=job.model_dump(mode="json"),
+        entity_type="job",
+        entity_id=job.id,
+        before_hash=before_hash,
+        after_hash=content_hash(
+            {
+                "project_lock_version": project.lock_version,
+                "project_status": project.status,
+                "job": job.model_dump(mode="json"),
+            }
+        ),
+    )
+
+
+def _review_state_hash(session: Session, review: ReviewRecord) -> str:
+    take = session.get(Take, review.entity_id) if review.entity_type == "take" else None
+    return content_hash(
+        {
+            "review": {
+                "id": review.id,
+                "status": review.status,
+                "decision": review.decision,
+                "issues_json": review.issues_json,
+                "note": review.note,
+                "actor": review.actor,
+                "decided_at": review.decided_at.isoformat() if review.decided_at else None,
+            },
+            "take": (
+                {
+                    "id": take.id,
+                    "approval": take.approval,
+                    "is_current": take.is_current,
+                    "version": take.version,
+                }
+                if take is not None
+                else None
+            ),
+        }
+    )
+
+
+def _execute_review_decision(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    review = session.get(ReviewRecord, command.target_object_id)
+    if review is None or review.project_id != project_id:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "REVIEW_NOT_FOUND", "message": "审核记录不存在"},
+        )
+    if command.target_version_id != review.id:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "TARGET_VERSION_CONFLICT", "message": "审核目标已变化，请刷新后重试"},
+        )
+    expected_version = command.expected_version.project_lock_version
+    if expected_version is None:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "PROJECT_VERSION_REQUIRED", "message": "审核决策必须提供项目锁版本"},
+        )
+    before_hash = _review_state_hash(session, review)
+    if command.expected_version.target_hash not in {None, before_hash}:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "TARGET_HASH_CONFLICT", "message": "审核状态已变化，请刷新后重试"},
+        )
+    _require_explicit_user_confirmation(command)
+    validated = GenericReviewDecisionRequest(
+        expected_version=expected_version,
+        decision=command.payload.get("decision"),
+        issues=command.payload.get("issues", []),
+        note=command.payload.get("note"),
+        actor=command.actor.id,
+    )
+    review_result, next_job = decide_review(
+        session,
+        review_id=review.id,
+        expected_version=validated.expected_version,
+        decision=validated.decision,
+        issues=validated.issues,
+        note=validated.note,
+        actor=validated.actor,
+        commit=False,
+    )
+    session.refresh(review)
+    return MutationResult(
+        result={
+            "review": review_result,
+            "job": job_to_read(next_job).model_dump(mode="json") if next_job else None,
+        },
+        entity_type="review",
+        entity_id=review.id,
+        before_hash=before_hash,
+        after_hash=_review_state_hash(session, review),
+    )
+
+
+def _project_target_state_hash(
+    project: Project,
+    *,
+    target_type: str,
+    target_id: str,
+    target_status: str | None,
+    target_version: int | None = None,
+) -> str:
+    return content_hash(
+        {
+            "project": {
+                "id": project.id,
+                "status": project.status,
+                "lock_version": project.lock_version,
+                "current_story_version_id": project.current_story_version_id,
+                "current_timeline_version_id": project.current_timeline_version_id,
+                "preview_approved": project.preview_approved,
+                "export_ready": project.export_ready,
+                "available_points": project.available_points,
+            },
+            "target": {
+                "type": target_type,
+                "id": target_id,
+                "status": target_status,
+                "version": target_version,
+            },
+        }
+    )
+
+
+def _command_project(
+    session: Session,
+    project_id: str,
+    command: DirectorCommand,
+) -> tuple[Project, int]:
+    project = session.get(Project, project_id)
+    if project is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "PROJECT_NOT_FOUND", "message": "项目不存在"},
+        )
+    expected_version = command.expected_version.project_lock_version
+    if expected_version is None:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "PROJECT_VERSION_REQUIRED", "message": "该领域命令必须提供项目锁版本"},
+        )
+    if project.lock_version != expected_version:
+        raise version_conflict(project, expected_version)
+    return project, expected_version
+
+
+def _execute_proposal_approval(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    _require_explicit_user_confirmation(command)
+    project, expected_version = _command_project(session, project_id, command)
+    proposal = session.get(ProposalVersion, command.target_object_id)
+    if proposal is None or proposal.project_id != project.id:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "PROPOSAL_NOT_FOUND", "message": "导演方案版本不存在"},
+        )
+    if command.target_version_id != proposal.id:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "TARGET_VERSION_CONFLICT", "message": "导演方案版本已变化"},
+        )
+    validated = ProposalApprovalRequest(
+        expected_version=expected_version,
+        assumptions_confirmed=command.payload.get("assumptions_confirmed"),
+        actor=command.actor.id,
+    )
+    before_hash = _project_target_state_hash(
+        project,
+        target_type="proposal",
+        target_id=proposal.id,
+        target_status=proposal.status,
+        target_version=proposal.version,
+    )
+    story, job, _ = approve_proposal(
+        session,
+        project_id=project.id,
+        proposal_version=proposal.version,
+        expected_version=validated.expected_version,
+        assumptions_confirmed=validated.assumptions_confirmed,
+        actor=validated.actor,
+        trace_id=command.command_id,
+        commit=False,
+    )
+    session.refresh(project)
+    session.refresh(proposal)
+    return MutationResult(
+        result={
+            "story": story.model_dump(mode="json"),
+            "job": job.model_dump(mode="json"),
+        },
+        entity_type="story_version",
+        entity_id=story.id,
+        before_hash=before_hash,
+        after_hash=_project_target_state_hash(
+            project,
+            target_type="story",
+            target_id=story.id,
+            target_status=story.status,
+            target_version=story.version,
+        ),
+    )
+
+
+def _execute_character_candidates_request(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    _require_explicit_user_confirmation(command)
+    project, _ = _command_project(session, project_id, command)
+    story = (
+        session.get(StoryVersion, project.current_story_version_id)
+        if project.current_story_version_id
+        else None
+    )
+    if (
+        story is None
+        or command.target_object_id != story.id
+        or command.target_version_id != story.id
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "APPROVED_STORY_REQUIRED", "message": "当前批准故事版本不存在或已变化"},
+        )
+    before_hash = _project_target_state_hash(
+        project,
+        target_type="story",
+        target_id=story.id,
+        target_status=story.status,
+        target_version=story.version,
+    )
+    job, _ = request_character_candidates(
+        session,
+        project_id=project.id,
+        trace_id=command.command_id,
+        commit=False,
+    )
+    return MutationResult(
+        result=job.model_dump(mode="json"),
+        entity_type="job",
+        entity_id=job.id,
+        before_hash=before_hash,
+        after_hash=content_hash(job.model_dump(mode="json")),
+    )
+
+
+def _execute_character_candidate_lock(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    _require_explicit_user_confirmation(command)
+    project, expected_version = _command_project(session, project_id, command)
+    character = session.get(Character, command.target_object_id)
+    candidate = session.get(CharacterCandidate, command.target_version_id)
+    if (
+        character is None
+        or character.project_id != project.id
+        or candidate is None
+        or candidate.character_id != character.id
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "CHARACTER_CANDIDATE_NOT_FOUND", "message": "角色或候选不存在"},
+        )
+    validated = CharacterLockRequest(
+        expected_version=expected_version,
+        candidate_id=candidate.id,
+    )
+    before_hash = _project_target_state_hash(
+        project,
+        target_type="character",
+        target_id=character.id,
+        target_status=character.status,
+        target_version=character.lock_version,
+    )
+    character_result, job, _ = lock_character(
+        session,
+        project_id=project.id,
+        character_id=character.id,
+        candidate_id=validated.candidate_id,
+        expected_version=validated.expected_version,
+        actor=command.actor.id,
+        trace_id=command.command_id,
+        commit=False,
+    )
+    session.refresh(project)
+    session.refresh(character)
+    return MutationResult(
+        result={
+            "character": character_result.model_dump(mode="json"),
+            "job": job.model_dump(mode="json"),
+        },
+        entity_type="character",
+        entity_id=character.id,
+        before_hash=before_hash,
+        after_hash=_project_target_state_hash(
+            project,
+            target_type="character",
+            target_id=character.id,
+            target_status=character.status,
+            target_version=character.lock_version,
+        ),
+    )
+
+
+def _execute_preproduction_approval(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    _require_explicit_user_confirmation(command)
+    project, expected_version = _command_project(session, project_id, command)
+    target_version_id = project.current_story_version_id or project.id
+    if command.target_object_id != project.id or command.target_version_id != target_version_id:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "TARGET_VERSION_CONFLICT", "message": "前期制作基线已变化"},
+        )
+    validated = StoryPackageGenerateRequest(
+        expected_version=expected_version,
+        actor=command.actor.id,
+    )
+    before_hash = _project_target_state_hash(
+        project,
+        target_type="preproduction",
+        target_id=target_version_id,
+        target_status=project.status,
+    )
+    visual_bible, job, _ = approve_preproduction(
+        session,
+        project_id=project.id,
+        expected_version=validated.expected_version,
+        actor=validated.actor,
+        trace_id=command.command_id,
+        commit=False,
+    )
+    session.refresh(project)
+    return MutationResult(
+        result={
+            "visual_bible": visual_bible,
+            "job": job.model_dump(mode="json"),
+        },
+        entity_type="visual_bible_version",
+        entity_id=str(visual_bible["id"]),
+        before_hash=before_hash,
+        after_hash=_project_target_state_hash(
+            project,
+            target_type="visual_bible",
+            target_id=str(visual_bible["id"]),
+            target_status=str(visual_bible["status"]),
+            target_version=int(visual_bible["version"]),
+        ),
+    )
+
+
+def _execute_export_creation(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    _require_explicit_user_confirmation(command)
+    project, expected_version = _command_project(session, project_id, command)
+    timeline_id = project.current_timeline_version_id or project.id
+    if command.target_object_id != project.id or command.target_version_id != timeline_id:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "TARGET_VERSION_CONFLICT", "message": "导出时间线基线已变化"},
+        )
+    validated = ExportCreateRequest(
+        expected_version=expected_version,
+        profile=command.payload.get("profile", "hybrid_720p"),
+        rights_confirmed=command.payload.get("rights_confirmed"),
+        actor=command.actor.id,
+    )
+    before_hash = _project_target_state_hash(
+        project,
+        target_type="timeline",
+        target_id=timeline_id,
+        target_status="APPROVED" if project.preview_approved else "UNAPPROVED",
+    )
+    export, job, _ = create_export(
+        session,
+        project_id=project.id,
+        expected_version=validated.expected_version,
+        profile=validated.profile,
+        rights_confirmed=validated.rights_confirmed,
+        actor=validated.actor,
+        idempotency_key=command.idempotency_key,
+        trace_id=command.command_id,
+        commit=False,
+    )
+    session.refresh(project)
+    return MutationResult(
+        result={
+            "export": export.model_dump(mode="json"),
+            "job": job.model_dump(mode="json"),
+        },
+        entity_type="export",
+        entity_id=export.id,
+        before_hash=before_hash,
+        after_hash=_project_target_state_hash(
+            project,
+            target_type="export",
+            target_id=export.id,
+            target_status=export.status,
+        ),
+    )
+
+
+def _execute_export_profile_creation(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    _require_explicit_user_confirmation(command)
+    project, expected_version = _command_project(session, project_id, command)
+    if command.target_object_id != project.id or command.target_version_id != project.id:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "TARGET_VERSION_CONFLICT", "message": "项目导出规格基线已变化"},
+        )
+    profile_payload = command.payload.get("profile")
+    if not isinstance(profile_payload, dict):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "COMMAND_PAYLOAD_INVALID", "message": "导出规格内容无效"},
+        )
+    validated = ExportProfileCreate(
+        expected_version=expected_version,
+        actor=command.actor.id,
+        **profile_payload,
+    )
+    before_hash = _project_target_state_hash(
+        project,
+        target_type="export_profile_set",
+        target_id=project.id,
+        target_status=project.status,
+    )
+    profile = create_export_profile(
+        session,
+        project_id=project.id,
+        payload=validated,
+        commit=False,
+    )
+    session.refresh(project)
+    return MutationResult(
+        result=profile,
+        entity_type="export_profile",
+        entity_id=str(profile["id"]),
+        before_hash=before_hash,
+        after_hash=_project_target_state_hash(
+            project,
+            target_type="export_profile",
+            target_id=str(profile["id"]),
+            target_status=str(profile["status"]),
+            target_version=int(profile["version"]),
+        ),
+    )
+
+
+def _execute_export_matrix_creation(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    _require_explicit_user_confirmation(command)
+    project, expected_version = _command_project(session, project_id, command)
+    timeline_id = project.current_timeline_version_id or project.id
+    if command.target_object_id != project.id or command.target_version_id != timeline_id:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "TARGET_VERSION_CONFLICT", "message": "交付时间线基线已变化"},
+        )
+    matrix_payload = command.payload.get("matrix")
+    if not isinstance(matrix_payload, dict):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "COMMAND_PAYLOAD_INVALID", "message": "交付矩阵内容无效"},
+        )
+    validated = ExportMatrixRequest(
+        expected_version=expected_version,
+        actor=command.actor.id,
+        **matrix_payload,
+    )
+    before_hash = _project_target_state_hash(
+        project,
+        target_type="timeline",
+        target_id=timeline_id,
+        target_status="APPROVED" if project.preview_approved else "UNAPPROVED",
+    )
+    matrix = create_export_matrix(
+        session,
+        project_id=project.id,
+        payload=validated,
+        trace_id=command.command_id,
+        commit=False,
+    )
+    session.refresh(project)
+    return MutationResult(
+        result={"exports": matrix},
+        entity_type="export_matrix",
+        entity_id=timeline_id,
+        before_hash=before_hash,
+        after_hash=_project_target_state_hash(
+            project,
+            target_type="export_matrix",
+            target_id=timeline_id,
+            target_status=project.status,
+        ),
+    )
+
+
+async def dispatch_project_create_command(
+    session: Session,
+    *,
+    command: DirectorCommand,
+    request_fingerprint: str | None = None,
+) -> CommandExecution:
+    if command.command_type != "CREATE_PROJECT":
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "COMMAND_TYPE_UNSUPPORTED",
+                "message": "项目创建边界仅接受创建项目命令",
+            },
+        )
+    if (
+        command.target_object_id != command.command_id
+        or command.target_version_id != command.command_id
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "PROJECT_BOOTSTRAP_TARGET_INVALID",
+                "message": "项目创建命令必须使用命令 ID 作为创建前目标",
+            },
+        )
+    _require_explicit_user_confirmation(command)
+    scope = "domain-command:project-create"
+    request_hash = _request_hash("project-bootstrap", command, request_fingerprint)
+    existing = session.scalar(
+        select(IdempotencyKey).where(
+            IdempotencyKey.scope == scope,
+            IdempotencyKey.key == command.idempotency_key,
+        )
+    )
+    if existing is not None:
+        return _replay(existing, command=command, request_hash=request_hash)
+    project_payload = command.payload.get("project")
+    if not isinstance(project_payload, dict):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "COMMAND_PAYLOAD_INVALID", "message": "项目创建内容无效"},
+        )
+    try:
+        validated = ProjectCreate.model_validate(project_payload)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "COMMAND_PAYLOAD_INVALID",
+                "message": "项目创建内容不符合约束",
+                "details": {
+                    "issues": exc.errors(include_url=False, include_context=False),
+                },
+            },
+        ) from exc
+    created = await create_project(
+        session,
+        validated,
+        command.idempotency_key,
+        commit=False,
+        manage_idempotency=False,
+    )
+    project_id = created.project.id
+    result = created.model_dump(mode="json")
+    after_hash = content_hash(result)
+    session.add(
+        AuditLog(
+            id=command.command_id,
+            project_id=project_id,
+            actor=command.actor.id,
+            action=command.command_type,
+            entity_type="project",
+            entity_id=project_id,
+            before_hash=content_hash(None),
+            after_hash=after_hash,
+            trace_id=command.command_id,
+            created_at=datetime.now(UTC),
+        )
+    )
+    append_event(
+        session,
+        project_id=project_id,
+        event_type="domain_command.executed",
+        payload={
+            "command_id": command.command_id,
+            "command_type": command.command_type,
+            "target_object_id": command.target_object_id,
+            "target_version_id": command.target_version_id,
+            "result_entity_type": "project",
+            "result_entity_id": project_id,
+            "actor": command.actor.model_dump(mode="json"),
+        },
+    )
+    execution = CommandExecution(
+        command_id=command.command_id,
+        command_type=command.command_type,
+        status="SUCCEEDED",
+        result=RESULT_ADAPTER.dump_python(result, mode="json"),
+        idempotency_replayed=False,
+    )
+    now = datetime.now(UTC)
+    session.add(
+        IdempotencyKey(
+            id=command.command_id,
+            scope=scope,
+            key=command.idempotency_key,
+            request_hash=request_hash,
+            response_json=canonical_json(execution.as_dict()),
+            status_code=201,
+            resource_id=project_id,
+            created_at=now,
+            expires_at=now + timedelta(days=7),
+        )
+    )
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        winner = session.scalar(
+            select(IdempotencyKey).where(
+                IdempotencyKey.scope == scope,
+                IdempotencyKey.key == command.idempotency_key,
+            )
+        )
+        if winner is None:
+            raise
+        return _replay(winner, command=command, request_hash=request_hash)
+    except Exception:
+        session.rollback()
+        raise
+    return execution
+
+
+def dispatch_project_delete_command(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+    request_fingerprint: str | None = None,
+) -> CommandExecution:
+    if command.command_type != "DELETE_PROJECT":
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "COMMAND_TYPE_UNSUPPORTED",
+                "message": "项目删除边界仅接受删除项目命令",
+            },
+        )
+    if command.target_object_id != project_id or command.target_version_id != project_id:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "PROJECT_DELETE_TARGET_INVALID", "message": "项目删除目标无效"},
+        )
+    _require_explicit_user_confirmation(command)
+    scope = "domain-command:project-delete"
+    request_hash = _request_hash(project_id, command, request_fingerprint)
+    existing = session.scalar(
+        select(IdempotencyKey).where(
+            IdempotencyKey.scope == scope,
+            IdempotencyKey.key == command.idempotency_key,
+        )
+    )
+    if existing is not None:
+        return _replay(existing, command=command, request_hash=request_hash)
+    project = session.get(Project, project_id)
+    if project is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "PROJECT_NOT_FOUND", "message": "项目不存在"},
+        )
+    expected_version = command.expected_version.project_lock_version
+    if expected_version is None or expected_version != project.lock_version:
+        raise version_conflict(project, expected_version or 0)
+    before_hash = _project_brief_state_hash(project, _latest_brief(session, project.id))
+    result, cleanup_files = prepare_project_deletion(session, project.id)
+    result["audit_mode"] = "DELETE_TOMBSTONE"
+    result["before_hash"] = before_hash
+    execution = CommandExecution(
+        command_id=command.command_id,
+        command_type=command.command_type,
+        status="SUCCEEDED",
+        result=RESULT_ADAPTER.dump_python(result, mode="json"),
+        idempotency_replayed=False,
+    )
+    now = datetime.now(UTC)
+    session.add(
+        IdempotencyKey(
+            id=command.command_id,
+            scope=scope,
+            key=command.idempotency_key,
+            request_hash=request_hash,
+            response_json=canonical_json(execution.as_dict()),
+            status_code=200,
+            resource_id=project_id,
+            created_at=now,
+            expires_at=now + timedelta(days=7),
+        )
+    )
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        winner = session.scalar(
+            select(IdempotencyKey).where(
+                IdempotencyKey.scope == scope,
+                IdempotencyKey.key == command.idempotency_key,
+            )
+        )
+        if winner is None:
+            raise
+        return _replay(winner, command=command, request_hash=request_hash)
+    except Exception:
+        session.rollback()
+        raise
+    try:
+        cleanup_files()
+    except OSError:
+        logger.exception("项目已删除，但部分项目素材文件清理失败：project_id=%s", project_id)
+    return execution
+
+
 def dispatch_domain_command(
     session: Session,
     *,
@@ -3632,6 +5226,18 @@ def dispatch_domain_command(
                 project_id=project_id,
                 command=command,
             )
+        elif command.command_type == "UPDATE_SHOT_SPEC":
+            mutation = _execute_shot_spec_update(
+                session,
+                project_id=project_id,
+                command=command,
+            )
+        elif command.command_type == "REORDER_SCENE_SHOTS":
+            mutation = _execute_scene_shot_reorder(
+                session,
+                project_id=project_id,
+                command=command,
+            )
         elif command.command_type == "APPROVE_SCRIPT":
             mutation = _execute_script_approval(
                 session,
@@ -3646,6 +5252,12 @@ def dispatch_domain_command(
             )
         elif command.command_type == "REVIEW_SHOT_TAKE":
             mutation = _execute_shot_take_review(
+                session,
+                project_id=project_id,
+                command=command,
+            )
+        elif command.command_type == "CONFIRM_SHOT_TAKE_IDENTITY":
+            mutation = _execute_shot_take_identity_confirmation(
                 session,
                 project_id=project_id,
                 command=command,
@@ -3746,6 +5358,22 @@ def dispatch_domain_command(
                 project_id=project_id,
                 command=command,
             )
+        elif command.command_type in {
+            "CREATE_RELATIONSHIP_GRAPH",
+            "UPDATE_RELATIONSHIP_GRAPH",
+            "SUBMIT_RELATIONSHIP_GRAPH",
+            "WITHDRAW_RELATIONSHIP_GRAPH",
+            "REJECT_RELATIONSHIP_GRAPH",
+            "APPROVE_RELATIONSHIP_GRAPH",
+            "CREATE_RELATIONSHIP_GRAPH_REVISION",
+            "CREATE_CONFIRMED_RELATIONSHIP_REVISION",
+            "SET_RELATIONSHIP_LOCK",
+        }:
+            mutation = _execute_relationship_graph_command(
+                session,
+                project_id=project_id,
+                command=command,
+            )
         elif command.command_type == "APPLY_CHARACTER_CHANGE":
             mutation = _execute_character_change(
                 session,
@@ -3802,6 +5430,66 @@ def dispatch_domain_command(
             )
         elif command.command_type == "DECIDE_DIRECTOR_PROPOSAL":
             mutation = _execute_decide_director_proposal(
+                session,
+                project_id=project_id,
+                command=command,
+            )
+        elif command.command_type == "UPDATE_PROJECT_BRIEF":
+            mutation = _execute_project_brief_update(
+                session,
+                project_id=project_id,
+                command=command,
+            )
+        elif command.command_type == "REQUEST_DIRECTOR_PROPOSAL_GENERATION":
+            mutation = _execute_director_proposal_generation_request(
+                session,
+                project_id=project_id,
+                command=command,
+            )
+        elif command.command_type == "DECIDE_REVIEW":
+            mutation = _execute_review_decision(
+                session,
+                project_id=project_id,
+                command=command,
+            )
+        elif command.command_type == "APPROVE_PROPOSAL":
+            mutation = _execute_proposal_approval(
+                session,
+                project_id=project_id,
+                command=command,
+            )
+        elif command.command_type == "REQUEST_CHARACTER_CANDIDATES":
+            mutation = _execute_character_candidates_request(
+                session,
+                project_id=project_id,
+                command=command,
+            )
+        elif command.command_type == "LOCK_CHARACTER_CANDIDATE":
+            mutation = _execute_character_candidate_lock(
+                session,
+                project_id=project_id,
+                command=command,
+            )
+        elif command.command_type == "APPROVE_PREPRODUCTION":
+            mutation = _execute_preproduction_approval(
+                session,
+                project_id=project_id,
+                command=command,
+            )
+        elif command.command_type == "CREATE_EXPORT":
+            mutation = _execute_export_creation(
+                session,
+                project_id=project_id,
+                command=command,
+            )
+        elif command.command_type == "CREATE_EXPORT_PROFILE":
+            mutation = _execute_export_profile_creation(
+                session,
+                project_id=project_id,
+                command=command,
+            )
+        elif command.command_type == "CREATE_EXPORT_MATRIX":
+            mutation = _execute_export_matrix_creation(
                 session,
                 project_id=project_id,
                 command=command,

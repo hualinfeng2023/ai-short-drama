@@ -19,8 +19,7 @@ from app.schemas import (
 from app.services.domain_commands import dispatch_domain_command
 from app.services.projects import content_hash
 from app.services.prompt_enhancer import enhance_shot_description
-from app.services.takes import approve_candidate_identity
-from app.services.workspace import shot_or_404, shot_to_read
+from app.services.workspace import shot_or_404
 
 router = APIRouter(prefix="/api/v1", tags=["takes"])
 
@@ -264,10 +263,30 @@ def update_character_bindings(
 def approve_identity(
     shot_id: str,
     payload: LegacyIdentityReviewRequest,
+    response: Response,
+    idempotency_key: str | None = Header(
+        default=None,
+        alias="Idempotency-Key",
+        min_length=8,
+        max_length=160,
+    ),
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
-    shot = approve_candidate_identity(session, shot_id, actor=payload.actor)
-    return success(shot_to_read(session, shot))
+    shot = shot_or_404(session, shot_id)
+    expected_version = payload.expected_version or shot.lock_version
+    effective_key = idempotency_key or f"identity-approve:{shot_id}:{expected_version}"
+    result, replayed = _dispatch_take_command(
+        session,
+        shot_id=shot_id,
+        expected_version=expected_version,
+        command_type="CONFIRM_SHOT_TAKE_IDENTITY",
+        payload={},
+        actor=payload.actor,
+        idempotency_key=effective_key,
+        fingerprint_expected_version=expected_version,
+    )
+    response.headers["Idempotency-Replayed"] = str(replayed).lower()
+    return success(result)
 
 
 @router.post("/shots/{shot_id}/takes/candidate/review")

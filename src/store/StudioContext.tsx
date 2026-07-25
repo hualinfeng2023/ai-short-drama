@@ -17,9 +17,11 @@ import {
   fetchWorkspace,
   generateShotTake,
   generateShotVideo,
+  reorderPersistedSceneShots,
   retryPersistedJob,
   reviewPersistedCandidateIdentity,
   updatePersistedShotCharacterBindings,
+  updatePersistedShot,
   type ImageGenerationOptions,
 } from '../api/client'
 import { initialAppState, PROJECT_ID } from '../data/demo'
@@ -37,7 +39,8 @@ import type {
   VisualMode,
 } from '../types'
 
-const STORAGE_KEY = 'ai-short-drama-studio-v1'
+const PREFERENCES_KEY = 'ai-short-drama-studio-preferences-v2'
+const LEGACY_STORAGE_KEY = 'ai-short-drama-studio-v1'
 
 interface StudioContextValue extends AppState {
   apiStatus: ApiStatus
@@ -50,8 +53,8 @@ interface StudioContextValue extends AppState {
   refreshProjects: () => Promise<void>
   deleteProject: (projectId: string) => Promise<void>
   activateProject: (projectId: string) => Promise<void>
-  updateShot: (shotId: string, patch: Partial<Shot>) => void
-  reorderSceneShots: (sceneId: string, orderedShotIds: string[]) => void
+  updateShot: (shotId: string, patch: Partial<Shot>) => Promise<void>
+  reorderSceneShots: (sceneId: string, orderedShotIds: string[]) => Promise<void>
   generateTake: (shotId: string, options: ImageGenerationOptions) => void
   generateVideo: (shotId: string, prompt?: string, imageUrl?: string) => void
   applyCandidateTake: (shotId: string) => void
@@ -67,9 +70,6 @@ interface StudioContextValue extends AppState {
     characterIds: string[],
     lookVersion: string,
   ) => Promise<void>
-  runRevision: (shotId: string, instruction: string) => void
-  approvePreview: () => void
-  exportProject: () => void
   cancelJob: (jobId: string) => Promise<void>
   retryJob: (jobId: string) => Promise<void>
   resyncCurrentProject: () => Promise<void>
@@ -82,54 +82,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function nonEmptyString(value: unknown, fallback: string): string {
-  return typeof value === 'string' && value.trim() ? value : fallback
+export interface StudioPreferences {
+  visualMode: VisualMode
 }
 
-export function normalizeCachedStudioState(value: unknown): AppState {
-  const fallback = structuredClone(initialAppState)
-  if (!isRecord(value)) return fallback
-
-  const cachedProject = isRecord(value.project) ? value.project : {}
-  const project = {
-    ...fallback.project,
-    ...cachedProject,
-    id: nonEmptyString(cachedProject.id, fallback.project.id),
-    name: nonEmptyString(cachedProject.name, fallback.project.name),
-    idea: nonEmptyString(cachedProject.idea, fallback.project.idea),
-    style: nonEmptyString(cachedProject.style, fallback.project.style),
-    aspectRatio: cachedProject.aspectRatio === '16:9' ? '16:9' : fallback.project.aspectRatio,
-    episodeId: nonEmptyString(cachedProject.episodeId, fallback.project.episodeId),
-    updatedAt: nonEmptyString(cachedProject.updatedAt, fallback.project.updatedAt),
-    scenes: Array.isArray(cachedProject.scenes)
-      ? cachedProject.scenes
-      : fallback.project.scenes,
-    shots: Array.isArray(cachedProject.shots)
-      ? cachedProject.shots
-      : fallback.project.shots,
-  } as AppState['project']
-
-  const jobs = Array.isArray(value.jobs)
-    ? value.jobs.flatMap((item, index) => {
-      if (!isRecord(item)) return []
-      const entityType = nonEmptyString(item.entityType, 'legacy')
-      const entityId = nonEmptyString(item.entityId, `job-${index + 1}`)
-      return [{
-        ...item,
-        entityType,
-        entityId,
-        entity: nonEmptyString(item.entity, `${entityType}:${entityId}`),
-      } as unknown as Job]
-    })
-    : fallback.jobs
-
+export function normalizeStudioPreferences(value: unknown): StudioPreferences {
+  if (!isRecord(value)) return { visualMode: initialAppState.visualMode }
+  const visualMode = value.visualMode
   return {
-    ...fallback,
-    ...value,
-    project,
-    jobs,
-    visualMode: value.visualMode === 'cinema' ? 'cinema' : fallback.visualMode,
-  } as AppState
+    visualMode:
+      visualMode === 'focus' || visualMode === 'cinema' || visualMode === 'standard'
+        ? visualMode
+        : initialAppState.visualMode,
+  }
 }
 
 function summarizeCurrentProject(state: AppState): ProjectSummary {
@@ -142,15 +107,18 @@ function summarizeCurrentProject(state: AppState): ProjectSummary {
 }
 
 function loadInitialState(): AppState {
+  const state = structuredClone(initialAppState)
   try {
-    const saved = localStorage.getItem(STORAGE_KEY)
-    if (saved) {
-      return normalizeCachedStudioState(JSON.parse(saved))
-    }
+    const saved = localStorage.getItem(PREFERENCES_KEY)
+    const legacy = localStorage.getItem(LEGACY_STORAGE_KEY)
+    const preferences = normalizeStudioPreferences(JSON.parse(saved ?? legacy ?? '{}'))
+    localStorage.removeItem(LEGACY_STORAGE_KEY)
+    return { ...state, visualMode: preferences.visualMode }
   } catch {
-    localStorage.removeItem(STORAGE_KEY)
+    localStorage.removeItem(PREFERENCES_KEY)
+    localStorage.removeItem(LEGACY_STORAGE_KEY)
   }
-  return structuredClone(initialAppState)
+  return state
 }
 
 function newJob(label: string, entity: string, stage: string): Job {
@@ -181,7 +149,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AppState>(loadInitialState)
   const [apiStatus, setApiStatus] = useState<ApiStatus>('loading')
   const [projectSummaries, setProjectSummaries] = useState<ProjectSummary[]>(() => [
-    summarizeCurrentProject(loadInitialState()),
+    summarizeCurrentProject(initialAppState),
   ])
 
   useEffect(() => {
@@ -249,6 +217,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
       'shot.video_generation_started',
       'shot.video_ready',
       'shot.take_applied',
+      'domain.command.executed',
     ]
     eventTypes.forEach((type) => source.addEventListener(type, refresh))
     return () => {
@@ -259,11 +228,15 @@ export function StudioProvider({ children }: { children: ReactNode }) {
   }, [apiStatus, state.project.id])
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
+    localStorage.setItem(
+      PREFERENCES_KEY,
+      JSON.stringify({ visualMode: state.visualMode } satisfies StudioPreferences),
+    )
+    localStorage.removeItem(LEGACY_STORAGE_KEY)
     document.documentElement.dataset.visualMode = state.visualMode
     const themeColor = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')
     if (themeColor) themeColor.content = state.visualMode === 'cinema' ? '#090b10' : '#f5f5f7'
-  }, [state])
+  }, [state.visualMode])
 
   const setVisualMode = useCallback((visualMode: VisualMode) => {
     setState((current) => ({ ...current, visualMode }))
@@ -325,7 +298,12 @@ export function StudioProvider({ children }: { children: ReactNode }) {
     return result.project
   }, [])
 
-  const updateShot = useCallback((shotId: string, patch: Partial<Shot>) => {
+  const updateShot = useCallback(async (shotId: string, patch: Partial<Shot>) => {
+    if (apiStatus !== 'connected') {
+      throw new Error('当前未连接项目服务，镜头修改未保存。')
+    }
+    const shot = state.project.shots.find((item) => item.id === shotId)
+    if (!shot) throw new Error('找不到要修改的镜头。')
     setState((current) => ({
       ...current,
       project: {
@@ -336,37 +314,68 @@ export function StudioProvider({ children }: { children: ReactNode }) {
         updatedAt: new Date().toISOString(),
       },
     }))
-  }, [])
+    try {
+      await updatePersistedShot(shotId, shot.lockVersion ?? 1, patch)
+      const workspace = await fetchWorkspace(state.project.id)
+      setState((current) => ({ ...current, ...workspace }))
+    } catch (error) {
+      const workspace = await fetchWorkspace(state.project.id).catch(() => null)
+      if (workspace) setState((current) => ({ ...current, ...workspace }))
+      throw error
+    }
+  }, [apiStatus, state.project.id, state.project.shots])
 
-  const reorderSceneShots = useCallback((sceneId: string, orderedShotIds: string[]) => {
-    setState((current) => {
-      const scene = current.project.scenes.find((item) => item.id === sceneId)
-      if (!scene) return current
-      const validIds = new Set(scene.shotIds)
-      if (
-        orderedShotIds.length !== scene.shotIds.length
-        || !orderedShotIds.every((id) => validIds.has(id))
-      ) {
-        return current
-      }
-      const ordinalById = new Map(orderedShotIds.map((id, index) => [id, index + 1]))
-      return {
-        ...current,
-        project: {
-          ...current.project,
-          scenes: current.project.scenes.map((item) => (
-            item.id === sceneId ? { ...item, shotIds: orderedShotIds } : item
-          )),
-          shots: current.project.shots.map((shot) => (
-            shot.sceneId === sceneId && ordinalById.has(shot.id)
-              ? { ...shot, ordinal: ordinalById.get(shot.id)! }
-              : shot
-          )),
-          updatedAt: new Date().toISOString(),
-        },
-      }
-    })
-  }, [])
+  const reorderSceneShots = useCallback(async (
+    sceneId: string,
+    orderedShotIds: string[],
+  ) => {
+    if (apiStatus !== 'connected') {
+      throw new Error('当前未连接项目服务，镜头排序未保存。')
+    }
+    const scene = state.project.scenes.find((item) => item.id === sceneId)
+    if (!scene) throw new Error('找不到要排序的场景。')
+    const validIds = new Set(scene.shotIds)
+    if (
+      orderedShotIds.length !== scene.shotIds.length
+      || !orderedShotIds.every((id) => validIds.has(id))
+    ) {
+      throw new Error('镜头排序范围无效，请刷新后重试。')
+    }
+    const ordinalById = new Map(orderedShotIds.map((id, index) => [id, index + 1]))
+    setState((current) => ({
+      ...current,
+      project: {
+        ...current.project,
+        scenes: current.project.scenes.map((item) => (
+          item.id === sceneId ? { ...item, shotIds: orderedShotIds } : item
+        )),
+        shots: current.project.shots.map((shot) => (
+          shot.sceneId === sceneId && ordinalById.has(shot.id)
+            ? { ...shot, ordinal: ordinalById.get(shot.id)! }
+            : shot
+        )),
+        updatedAt: new Date().toISOString(),
+      },
+    }))
+    try {
+      await reorderPersistedSceneShots(
+        sceneId,
+        state.project.lockVersion,
+        orderedShotIds,
+      )
+      const workspace = await fetchWorkspace(state.project.id)
+      setState((current) => ({ ...current, ...workspace }))
+    } catch (error) {
+      const workspace = await fetchWorkspace(state.project.id).catch(() => null)
+      if (workspace) setState((current) => ({ ...current, ...workspace }))
+      throw error
+    }
+  }, [
+    apiStatus,
+    state.project.id,
+    state.project.lockVersion,
+    state.project.scenes,
+  ])
 
   const generateTake = useCallback((shotId: string, options: ImageGenerationOptions) => {
     const shot = state.project.shots.find((item) => item.id === shotId)
@@ -404,52 +413,25 @@ export function StudioProvider({ children }: { children: ReactNode }) {
           )
           failed.status = 'FAILED'
           failed.progress = 0
-          setState((current) => ({
-            ...current,
-            project: {
-              ...current.project,
-              shots: current.project.shots.map((item) =>
-                item.id === shotId
-                  ? { ...item, status: 'FAILED', candidateTake: undefined }
-                  : item,
-              ),
-            },
-            jobs: [failed, ...current.jobs],
-          }))
+          void fetchWorkspace(state.project.id)
+            .then((workspace) => {
+              setState((current) => ({
+                ...current,
+                ...workspace,
+                jobs: [failed, ...workspace.jobs],
+              }))
+            })
+            .catch(() => {
+              setState((current) => ({ ...current, jobs: [failed, ...current.jobs] }))
+            })
         })
       return
     }
-    const job = newJob(`${shot.code} · Take V${candidate}`, shot.id, '生成关键帧 · 组装动态分镜')
-    setState((current) => ({
-      ...current,
-      project: {
-        ...current.project,
-        shots: current.project.shots.map((item) =>
-          item.id === shotId
-            ? { ...item, status: 'GENERATING', candidateTake: candidate }
-            : item,
-        ),
-      },
-      jobs: [job, ...current.jobs],
-    }))
-
-    window.setTimeout(() => {
-      setState((current) => ({
-        ...current,
-        project: {
-          ...current.project,
-          shots: current.project.shots.map((item) =>
-            item.id === shotId ? { ...item, status: 'PENDING_REVIEW' } : item,
-          ),
-        },
-        jobs: current.jobs.map((item) =>
-          item.id === job.id
-            ? { ...item, status: 'SUCCEEDED', progress: 100, stage: '候选版本已就绪' }
-            : item,
-        ),
-      }))
-    }, 1400)
-  }, [apiStatus, state.project.shots])
+    const failed = newJob(`${shot.code} · Take V${candidate}`, shot.id, '图片生成需要连接后端 API')
+    failed.status = 'FAILED'
+    failed.progress = 0
+    setState((current) => ({ ...current, jobs: [failed, ...current.jobs] }))
+  }, [apiStatus, state.project.id, state.project.shots])
 
   const generateVideo = useCallback((shotId: string, prompt?: string, imageUrl?: string) => {
     const shot = state.project.shots.find((item) => item.id === shotId)
@@ -497,32 +479,22 @@ export function StudioProvider({ children }: { children: ReactNode }) {
         .then((workspace) => setState((current) => ({ ...current, ...workspace })))
       return
     }
-    setState((current) => ({
-      ...current,
-      project: {
-        ...current.project,
-        shots: current.project.shots.map((shot) =>
-          shot.id === shotId && shot.candidateTake
-            ? {
-                ...shot,
-                currentTake: shot.candidateTake,
-                candidateTake: undefined,
-                status: 'APPROVED',
-              }
-            : shot,
-        ),
-        timelineVersion: current.project.timelineVersion + 1,
-        status: 'PREVIEW_READY',
-      },
-    }))
-  }, [apiStatus, state.project.id])
+    const shot = state.project.shots.find((item) => item.id === shotId)
+    if (!shot) return
+    const failed = newJob(`${shot.code} · 应用候选版本`, shot.id, '应用候选版本需要连接后端 API')
+    failed.status = 'FAILED'
+    failed.progress = 0
+    setState((current) => ({ ...current, jobs: [failed, ...current.jobs] }))
+  }, [apiStatus, state.project.id, state.project.shots])
 
   const approveCandidateIdentity = useCallback(async (shotId: string) => {
-    if (apiStatus !== 'connected') return
-    await approvePersistedCandidateIdentity(shotId)
+    if (apiStatus !== 'connected') throw new Error('连接后端后才能确认角色一致性')
+    const shot = state.project.shots.find((item) => item.id === shotId)
+    if (!shot) throw new Error('没有找到要确认的镜头')
+    await approvePersistedCandidateIdentity(shotId, shot.lockVersion ?? 1)
     const workspace = await fetchWorkspace(state.project.id)
     setState((current) => ({ ...current, ...workspace }))
-  }, [apiStatus, state.project.id])
+  }, [apiStatus, state.project.id, state.project.shots])
 
   const reviewCandidateIdentity = useCallback(async (
     shotId: string,
@@ -569,79 +541,6 @@ export function StudioProvider({ children }: { children: ReactNode }) {
     setState((current) => ({ ...current, ...workspace }))
   }, [apiStatus, state.project.id, state.project.shots])
 
-  const runRevision = useCallback((shotId: string, instruction: string) => {
-    const shot = state.project.shots.find((item) => item.id === shotId)
-    if (!shot) return
-    const job = newJob(`${shot.code} · 局部修改`, shot.id, `解析：${instruction.slice(0, 18)}`)
-    setState((current) => ({
-      ...current,
-      jobs: [job, ...current.jobs],
-      project: {
-        ...current.project,
-        shots: current.project.shots.map((item) =>
-          item.id === shotId ? { ...item, status: 'GENERATING' } : item,
-        ),
-      },
-    }))
-    window.setTimeout(() => {
-      setState((current) => ({
-        ...current,
-        jobs: current.jobs.map((item) =>
-          item.id === job.id
-            ? { ...item, status: 'SUCCEEDED', progress: 100, stage: '时间线已重组' }
-            : item,
-        ),
-        project: {
-          ...current.project,
-          timelineVersion: current.project.timelineVersion + 1,
-          status: 'PREVIEW_READY',
-          previewApproved: false,
-          shots: current.project.shots.map((item) =>
-            item.id === shotId
-              ? {
-                  ...item,
-                  status: 'PENDING_REVIEW',
-                  candidateTake: (item.candidateTake ?? item.currentTake) + 1,
-                }
-              : item,
-          ),
-        },
-      }))
-    }, 1600)
-  }, [state.project.shots])
-
-  const approvePreview = useCallback(() => {
-    setState((current) => ({
-      ...current,
-      project: {
-        ...current.project,
-        previewApproved: true,
-        status: 'APPROVED',
-      },
-    }))
-  }, [])
-
-  const exportProject = useCallback(() => {
-    if (!state.project.previewApproved || state.project.exportReady) return
-    const job = newJob(
-      `Export · Timeline V${state.project.timelineVersion}`,
-      state.project.id,
-      '权利预检 · 媒体封装',
-    )
-    setState((current) => ({ ...current, jobs: [job, ...current.jobs] }))
-    window.setTimeout(() => {
-      setState((current) => ({
-        ...current,
-        jobs: current.jobs.map((item) =>
-          item.id === job.id
-            ? { ...item, status: 'SUCCEEDED', progress: 100, stage: '导出清单已就绪' }
-            : item,
-        ),
-        project: { ...current.project, exportReady: true, status: 'EXPORTED' },
-      }))
-    }, 1300)
-  }, [state.project.exportReady, state.project.id, state.project.previewApproved, state.project.timelineVersion])
-
   const cancelJob = useCallback(async (jobId: string) => {
     if (apiStatus === 'connected' && !jobId.startsWith('job-')) {
       const updated = await cancelPersistedJob(jobId)
@@ -685,7 +584,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
       projectId: state.project.id,
       fetchCurrentWorkspace: fetchWorkspace,
       fetchProjectSummaries: fetchProjects,
-      clearLocalCache: () => localStorage.removeItem(STORAGE_KEY),
+      clearLocalCache: () => localStorage.removeItem(LEGACY_STORAGE_KEY),
     })
     setState((current) => ({ ...current, ...workspace }))
     setProjectSummaries(projects)
@@ -693,7 +592,8 @@ export function StudioProvider({ children }: { children: ReactNode }) {
   }, [state.project.id])
 
   const resetDemo = useCallback(() => {
-    localStorage.removeItem(STORAGE_KEY)
+    localStorage.removeItem(PREFERENCES_KEY)
+    localStorage.removeItem(LEGACY_STORAGE_KEY)
     setState(structuredClone(initialAppState))
   }, [])
 
@@ -715,9 +615,6 @@ export function StudioProvider({ children }: { children: ReactNode }) {
       approveCandidateIdentity,
       reviewCandidateIdentity,
       updateShotCharacterBindings,
-      runRevision,
-      approvePreview,
-      exportProject,
       cancelJob,
       retryJob,
       resyncCurrentProject,
@@ -740,9 +637,6 @@ export function StudioProvider({ children }: { children: ReactNode }) {
       approveCandidateIdentity,
       reviewCandidateIdentity,
       updateShotCharacterBindings,
-      runRevision,
-      approvePreview,
-      exportProject,
       cancelJob,
       retryJob,
       resyncCurrentProject,
