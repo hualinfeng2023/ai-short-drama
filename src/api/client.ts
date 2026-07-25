@@ -3385,7 +3385,10 @@ export async function confirmCharacterRevision(projectId: string, input: {
 }): Promise<void> {
   await requestJson(`/api/v1/projects/${projectId}/character-revisions`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': `character-revision-${input.impactHash}`,
+    },
     body: JSON.stringify({
       base_story_bible_id: input.baseStoryBibleId,
       base_relationship_graph_id: input.baseRelationshipGraphId,
@@ -3458,7 +3461,10 @@ export async function applyScriptExcerptRewrite(
     }
   }>(`/api/v1/script-excerpt-rewrites/${revisionId}/apply`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': `script-rewrite-apply-${revisionId}`,
+    },
     body: JSON.stringify({
       expected_version: input.expectedVersion,
       script_id: input.scriptId,

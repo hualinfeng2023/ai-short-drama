@@ -249,17 +249,26 @@ async def test_excerpt_rewrite_retry_history_and_apply(client: AsyncClient) -> N
         json=request,
     )
     assert generated.status_code == 201, generated.text
+    assert generated.headers["Idempotency-Replayed"] == "false"
     first = generated.json()["data"]
     assert first["version"] == 1
     assert first["original_text"] == "你现在必须离开这里"
     assert first["proposed_text"] != first["original_text"]
     assert first["status"] == "GENERATED"
+    replayed_generated = await client.post(
+        f"/api/v1/scripts/{SCRIPT_ID}/lines/{LINE_ID}/rewrites",
+        json=request,
+    )
+    assert replayed_generated.status_code == 201
+    assert replayed_generated.headers["Idempotency-Replayed"] == "true"
+    assert replayed_generated.json()["data"] == first
 
     retried = await client.post(
         f"/api/v1/scripts/{SCRIPT_ID}/lines/{LINE_ID}/rewrites",
         json={**request, "parent_revision_id": first["id"]},
     )
     assert retried.status_code == 201, retried.text
+    assert retried.headers["Idempotency-Replayed"] == "false"
     second = retried.json()["data"]
     assert second["version"] == 2
     assert second["parent_revision_id"] == first["id"]
@@ -277,10 +286,22 @@ async def test_excerpt_rewrite_retry_history_and_apply(client: AsyncClient) -> N
         },
     )
     assert applied.status_code == 200, applied.text
+    assert applied.headers["Idempotency-Replayed"] == "false"
     result = applied.json()["data"]
     assert result["rewrite"]["status"] == "APPLIED"
     assert result["script"]["version"] == 2
     assert result["script"]["project_lock_version"] == 9
+    replayed_applied = await client.post(
+        f"/api/v1/script-excerpt-rewrites/{first['id']}/apply",
+        json={
+            "expected_version": 8,
+            "script_id": SCRIPT_ID,
+            "line_id": LINE_ID,
+        },
+    )
+    assert replayed_applied.status_code == 200
+    assert replayed_applied.headers["Idempotency-Replayed"] == "true"
+    assert replayed_applied.json()["data"] == result
 
     factory = sessionmaker(
         bind=get_engine(get_settings().database_url),
@@ -303,6 +324,28 @@ async def test_excerpt_rewrite_retry_history_and_apply(client: AsyncClient) -> N
             json.loads(revised_script.payload_json)["scenes"][0]["lines"][0]["text"]
             == revised_line.text
         )
+        creation_audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.action == "CREATE_SCRIPT_EXCERPT_REWRITE",
+                )
+            ).all()
+        )
+        assert len(creation_audits) == 2
+        assert {audit.entity_type for audit in creation_audits} == {"script_excerpt_revision"}
+        apply_audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.action == "APPLY_SCRIPT_EXCERPT_REWRITE",
+                    AuditLog.entity_id == revised_script.id,
+                )
+            ).all()
+        )
+        assert len(apply_audits) == 1
+        assert apply_audits[0].entity_type == "script_version"
+        assert apply_audits[0].before_hash != apply_audits[0].after_hash
 
     new_history = await client.get(
         f"/api/v1/scripts/{revised_script.id}/lines/{revised_line.id}/rewrites"

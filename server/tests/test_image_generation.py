@@ -69,6 +69,69 @@ pytestmark = pytest.mark.anyio
             },
         ),
         (
+            "CANCEL_JOB",
+            {
+                "project_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
+            "RETRY_JOB",
+            {
+                "project_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
+            "RECOVER_JOB",
+            {
+                "project_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
+            "REQUEST_STORY_DIRECTION_GENERATION",
+            {
+                "project_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
+            "REQUEST_STORY_STRUCTURE_GENERATION",
+            {
+                "project_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
+            "MERGE_STORY_DIRECTIONS",
+            {
+                "project_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
+            "CREATE_CHARACTER_REVISION",
+            {
+                "project_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
+            "CREATE_SCRIPT_EXCERPT_REWRITE",
+            {
+                "project_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
+            "APPLY_SCRIPT_EXCERPT_REWRITE",
+            {
+                "project_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
             "APPLY_CHARACTER_CHANGE",
             {
                 "object_lock_version": 1,

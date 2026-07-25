@@ -639,6 +639,7 @@ async def test_confirming_direction_retries_existing_failed_story_structure_job(
         headers={"Idempotency-Key": "story-retry-first-approval-v1"},
     )
     assert approved.status_code == 202
+    assert approved.headers["Idempotency-Replayed"] == "false"
     job_id = approved.json()["data"]["id"]
 
     with Session(get_engine(get_settings().database_url)) as session:
@@ -666,6 +667,21 @@ async def test_confirming_direction_retries_existing_failed_story_structure_job(
     assert retried.json()["data"]["status"] == "RETRY_WAIT"
     assert retried.json()["data"]["stage"] == "等待重试"
     assert retried.json()["data"]["error_code"] is None
+    with Session(get_engine(get_settings().database_url)) as session:
+        audits = list(
+            session.scalars(
+                select(AuditLog)
+                .where(
+                    AuditLog.project_id == project_id,
+                    AuditLog.action == "REQUEST_STORY_STRUCTURE_GENERATION",
+                    AuditLog.entity_id == job_id,
+                )
+                .order_by(AuditLog.created_at)
+            ).all()
+        )
+        assert len(audits) == 2
+        assert all(audit.entity_type == "job" for audit in audits)
+        assert all(audit.before_hash != audit.after_hash for audit in audits)
 
 
 async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> None:
@@ -677,7 +693,29 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
         headers={"Idempotency-Key": "story-directions-v1"},
     )
     assert queued.status_code == 202
+    assert queued.headers["Idempotency-Replayed"] == "false"
     assert queued.json()["data"]["max_attempts"] == 2
+    replayed_queued = await client.post(
+        f"/api/v1/projects/{project_id}/story-directions",
+        json={"expected_version": 1},
+        headers={"Idempotency-Key": "story-directions-v1"},
+    )
+    assert replayed_queued.status_code == 202
+    assert replayed_queued.headers["Idempotency-Replayed"] == "true"
+    assert replayed_queued.json()["data"] == queued.json()["data"]
+    with Session(get_engine(get_settings().database_url)) as session:
+        direction_audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == project_id,
+                    AuditLog.action == "REQUEST_STORY_DIRECTION_GENERATION",
+                    AuditLog.entity_id == queued.json()["data"]["id"],
+                )
+            ).all()
+        )
+        assert len(direction_audits) == 1
+        assert direction_audits[0].entity_type == "job"
+        assert direction_audits[0].before_hash != direction_audits[0].after_hash
     worker = PersistentJobWorker(get_settings())
     assert await worker.run_once() is True
     directions = (await client.get(f"/api/v1/projects/{project_id}/story-directions")).json()[
@@ -707,9 +745,35 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
         headers={"Idempotency-Key": "story-direction-merge-v1"},
     )
     assert merged.status_code == 200
+    assert merged.headers["Idempotency-Replayed"] == "false"
     merged_direction = merged.json()["data"]
     assert merged_direction["direction_key"] == "merged"
     assert len(merged_direction["source_proposal_ids"]) == 2
+    replayed_merge = await client.post(
+        f"/api/v1/projects/{project_id}/story-directions/merge",
+        json={
+            "expected_version": 3,
+            "source_proposal_ids": [directions[0]["id"], directions[1]["id"]],
+            "title": "情绪与强情节融合版",
+        },
+        headers={"Idempotency-Key": "story-direction-merge-v1"},
+    )
+    assert replayed_merge.status_code == 200
+    assert replayed_merge.headers["Idempotency-Replayed"] == "true"
+    assert replayed_merge.json()["data"] == merged_direction
+    with Session(get_engine(get_settings().database_url)) as session:
+        merge_audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == project_id,
+                    AuditLog.action == "MERGE_STORY_DIRECTIONS",
+                    AuditLog.entity_id == merged_direction["id"],
+                )
+            ).all()
+        )
+        assert len(merge_audits) == 1
+        assert merge_audits[0].entity_type == "proposal_version"
+        assert merge_audits[0].before_hash != merge_audits[0].after_hash
 
     estimate = (await client.get(f"/api/v1/projects/{project_id}/story-package-estimate")).json()[
         "data"
@@ -728,7 +792,29 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
         headers={"Idempotency-Key": "story-package-v1"},
     )
     assert structure_job.status_code == 202
+    assert structure_job.headers["Idempotency-Replayed"] == "false"
     assert structure_job.json()["data"]["job_type"] == "GENERATE_STORY_STRUCTURE"
+    replayed_structure_job = await client.post(
+        f"/api/v1/projects/{project_id}/story-dna/{merged_direction['version']}/approve",
+        json={"expected_version": 4, "actor": "test-writer"},
+        headers={"Idempotency-Key": "story-package-v1"},
+    )
+    assert replayed_structure_job.status_code == 202
+    assert replayed_structure_job.headers["Idempotency-Replayed"] == "true"
+    assert replayed_structure_job.json()["data"] == structure_job.json()["data"]
+    with Session(get_engine(get_settings().database_url)) as session:
+        audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == project_id,
+                    AuditLog.action == "REQUEST_STORY_STRUCTURE_GENERATION",
+                    AuditLog.entity_id == structure_job.json()["data"]["id"],
+                )
+            ).all()
+        )
+        assert len(audits) == 1
+        assert audits[0].entity_type == "job"
+        assert audits[0].before_hash != audits[0].after_hash
     assert await worker.run_once() is True
     workspace = (await client.get(f"/api/v1/projects/{project_id}/story-workspace")).json()["data"]
     assert len(workspace["story_dna_versions"]) == 1
@@ -1485,15 +1571,44 @@ async def test_cancel_retry_and_worker_completion(client: AsyncClient) -> None:
         f"/api/v1/jobs/{job_id}/cancel",
         headers={"Idempotency-Key": "cancel-job-v1"},
     )
+    assert cancelled.headers["Idempotency-Replayed"] == "false"
     assert cancelled.json()["data"]["status"] == "CANCELLED"
+    replayed_cancel = await client.post(
+        f"/api/v1/jobs/{job_id}/cancel",
+        headers={"Idempotency-Key": "cancel-job-v1"},
+    )
+    assert replayed_cancel.headers["Idempotency-Replayed"] == "true"
+    assert replayed_cancel.json()["data"] == cancelled.json()["data"]
     retry = await client.post(
         f"/api/v1/jobs/{job_id}/retry",
         headers={"Idempotency-Key": "retry-job-v1"},
     )
+    assert retry.headers["Idempotency-Replayed"] == "false"
     assert retry.json()["data"]["status"] == "RETRY_WAIT"
+    replayed_retry = await client.post(
+        f"/api/v1/jobs/{job_id}/retry",
+        headers={"Idempotency-Key": "retry-job-v1"},
+    )
+    assert replayed_retry.headers["Idempotency-Replayed"] == "true"
+    assert replayed_retry.json()["data"] == retry.json()["data"]
     assert (
         datetime.fromisoformat(retry.json()["data"]["available_at"].replace("Z", "+00:00")) >= now
     )
+    with Session(get_engine(get_settings().database_url)) as session:
+        audits = list(
+            session.scalars(
+                select(AuditLog)
+                .where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.entity_id == job_id,
+                    AuditLog.action.in_(["CANCEL_JOB", "RETRY_JOB"]),
+                )
+                .order_by(AuditLog.created_at)
+            ).all()
+        )
+        assert [audit.action for audit in audits] == ["CANCEL_JOB", "RETRY_JOB"]
+        assert all(audit.entity_type == "job" for audit in audits)
+        assert all(audit.before_hash != audit.after_hash for audit in audits)
 
     worker = PersistentJobWorker(get_settings())
     assert await worker.run_once() is True
@@ -1559,8 +1674,16 @@ async def test_failed_job_exposes_and_executes_recovery_actions(client: AsyncCli
         headers={"Idempotency-Key": "save-intermediate-v1"},
     )
     assert saved.status_code == 200
+    assert saved.headers["Idempotency-Replayed"] == "false"
     assert saved.json()["data"]["status"] == "FAILED"
     assert saved.json()["data"]["error_details"]["recovery"]["intermediate_result_saved"] is True
+    replayed_saved = await client.post(
+        f"/api/v1/jobs/{job_id}/recovery",
+        json={"action": "SAVE_INTERMEDIATE"},
+        headers={"Idempotency-Key": "save-intermediate-v1"},
+    )
+    assert replayed_saved.headers["Idempotency-Replayed"] == "true"
+    assert replayed_saved.json()["data"] == saved.json()["data"]
 
     resumed = await client.post(
         f"/api/v1/jobs/{job_id}/recovery",
@@ -1568,6 +1691,7 @@ async def test_failed_job_exposes_and_executes_recovery_actions(client: AsyncCli
         headers={"Idempotency-Key": "retry-failed-parts-v1"},
     )
     assert resumed.status_code == 200
+    assert resumed.headers["Idempotency-Replayed"] == "false"
     assert resumed.json()["data"]["status"] == "RETRY_WAIT"
     assert resumed.json()["data"]["progress"] == 64
     with Session(get_engine(get_settings().database_url)) as session:
@@ -1577,6 +1701,20 @@ async def test_failed_job_exposes_and_executes_recovery_actions(client: AsyncCli
         assert directive["action"] == "RETRY_FAILED_PARTS"
         assert directive["failed_part_ids"] == ["shot-03"]
         assert persisted.output_json is not None
+        audits = list(
+            session.scalars(
+                select(AuditLog)
+                .where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.entity_id == job_id,
+                    AuditLog.action == "RECOVER_JOB",
+                )
+                .order_by(AuditLog.created_at)
+            ).all()
+        )
+        assert len(audits) == 2
+        assert all(audit.entity_type == "job" for audit in audits)
+        assert all(audit.before_hash != audit.after_hash for audit in audits)
 
     worker = PersistentJobWorker(get_settings())
     assert await worker.run_once() is True

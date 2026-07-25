@@ -44,6 +44,46 @@ SCRIPT_PACKAGE_CONFIG_VERSION = "story-package-v5-independent-targeting"
 RELATIONSHIP_SCRIPT_SCHEMA_VERSION = "script-v4-relationship-driven"
 
 
+def proposal_state_hash(proposal: ProposalVersion) -> str:
+    return content_hash(
+        {
+            "id": proposal.id,
+            "project_id": proposal.project_id,
+            "version": proposal.version,
+            "brief_version": proposal.brief_version,
+            "batch_id": proposal.batch_id,
+            "direction_key": proposal.direction_key,
+            "source_proposal_ids_json": proposal.source_proposal_ids_json,
+            "parent_version_id": proposal.parent_version_id,
+            "schema_version": proposal.schema_version,
+            "generation_evidence_json": proposal.generation_evidence_json,
+            "payload_json": proposal.payload_json,
+            "provider": proposal.provider,
+            "model": proposal.model,
+            "config_version": proposal.config_version,
+            "status": proposal.status,
+            "approved_at": (
+                proposal.approved_at.isoformat() if proposal.approved_at is not None else None
+            ),
+            "approved_by": proposal.approved_by,
+        }
+    )
+
+
+def proposal_set_state_hash(proposals: list[ProposalVersion]) -> str:
+    return content_hash(
+        {
+            "proposals": [
+                {
+                    "id": proposal.id,
+                    "state_hash": proposal_state_hash(proposal),
+                }
+                for proposal in sorted(proposals, key=lambda item: item.id)
+            ]
+        }
+    )
+
+
 def _latest_brief(session: Session, project_id: str) -> BriefVersion:
     brief = session.scalar(
         select(BriefVersion)
@@ -126,6 +166,7 @@ def request_story_directions(
     expected_version: int,
     request_idempotency_key: str,
     trace_id: str,
+    commit: bool = True,
 ) -> tuple[JobRead, bool]:
     project = project_or_404(session, project_id)
     brief = _latest_brief(session, project_id)
@@ -174,8 +215,10 @@ def request_story_directions(
         event_type="story_directions.started",
         payload={"brief_version": brief.version, "job_id": job.id},
     )
-    session.commit()
-    session.refresh(job)
+    session.flush()
+    if commit:
+        session.commit()
+        session.refresh(job)
     return job_to_read(job), replayed
 
 
@@ -298,6 +341,7 @@ def merge_story_directions(
     expected_version: int,
     source_proposal_ids: list[str],
     title: str | None,
+    commit: bool = True,
 ) -> ProposalRead:
     project = project_or_404(session, project_id)
     if project.lock_version != expected_version:
@@ -390,7 +434,9 @@ def merge_story_directions(
     session.add(proposal)
     project.lock_version += 1
     project.updated_at = now
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     return proposal_to_read(proposal)
 
 
@@ -403,6 +449,7 @@ def request_story_structure(
     actor: str,
     request_idempotency_key: str,
     trace_id: str,
+    commit: bool = True,
 ) -> tuple[JobRead, bool]:
     project = project_or_404(session, project_id)
     proposal = session.scalar(
@@ -421,7 +468,7 @@ def request_story_structure(
     existing = session.scalar(select(Job).where(Job.idempotency_key == business_key))
     if existing is not None:
         if existing.status in {"FAILED", "CANCELLED"} and existing.retryable:
-            return request_retry(session, existing.id), False
+            return request_retry(session, existing.id, commit=commit), False
         return job_to_read(existing), True
     if project.status != "PROPOSAL_READY" or proposal.status != "READY":
         raise HTTPException(
@@ -468,8 +515,10 @@ def request_story_structure(
         event_type="story_structure.started",
         payload={"proposal_id": proposal.id, "job_id": job.id},
     )
-    session.commit()
-    session.refresh(job)
+    session.flush()
+    if commit:
+        session.commit()
+        session.refresh(job)
     return job_to_read(job), replayed
 
 

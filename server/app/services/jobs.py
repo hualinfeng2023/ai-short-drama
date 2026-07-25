@@ -25,7 +25,7 @@ from app.db.models import (
 )
 from app.schemas import JobRead, JobRecoveryRequest
 from app.services.events import append_event
-from app.services.projects import canonical_json
+from app.services.projects import canonical_json, content_hash
 from app.services.workspace import not_found, project_or_404
 
 QUEUED_STATUSES = {"PENDING", "RETRY_WAIT"}
@@ -413,6 +413,33 @@ def job_to_read(job: Job) -> JobRead:
     return JobRead.model_validate(job)
 
 
+def job_state_hash(job: Job) -> str:
+    return content_hash(
+        {
+            "id": job.id,
+            "project_id": job.project_id,
+            "status": job.status,
+            "progress": job.progress,
+            "stage": job.stage,
+            "attempt": job.attempt,
+            "max_attempts": job.max_attempts,
+            "available_at": job.available_at.isoformat(),
+            "lease_until": job.lease_until.isoformat() if job.lease_until else None,
+            "heartbeat_at": job.heartbeat_at.isoformat() if job.heartbeat_at else None,
+            "cancel_requested": job.cancel_requested,
+            "input_json": job.input_json,
+            "output_json": job.output_json,
+            "error_code": job.error_code,
+            "error_message": job.error_message,
+            "error_details_json": job.error_details_json,
+            "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+            "worker_id": job.worker_id,
+            "retryable": job.retryable,
+            "updated_at": job.updated_at.isoformat(),
+        }
+    )
+
+
 def job_or_404(session: Session, job_id: str) -> Job:
     job = session.get(Job, job_id)
     if job is None:
@@ -518,7 +545,7 @@ def enqueue_job(
     return job, False
 
 
-def request_cancel(session: Session, job_id: str) -> JobRead:
+def request_cancel(session: Session, job_id: str, *, commit: bool = True) -> JobRead:
     job = job_or_404(session, job_id)
     now = datetime.now(UTC)
     if job.status in TERMINAL_STATUSES:
@@ -541,12 +568,14 @@ def request_cancel(session: Session, job_id: str) -> JobRead:
         event_type="job.cancel_requested",
         payload={"job_id": job.id, "status": job.status, "progress": job.progress},
     )
-    session.commit()
-    session.refresh(job)
+    session.flush()
+    if commit:
+        session.commit()
+        session.refresh(job)
     return job_to_read(job)
 
 
-def request_retry(session: Session, job_id: str) -> JobRead:
+def request_retry(session: Session, job_id: str, *, commit: bool = True) -> JobRead:
     job = job_or_404(session, job_id)
     if job.status in {"PENDING", "RETRY_WAIT", "RUNNING"}:
         return job_to_read(job)
@@ -582,8 +611,10 @@ def request_retry(session: Session, job_id: str) -> JobRead:
         event_type="job.retry_requested",
         payload={"job_id": job.id, "status": job.status, "attempt": job.attempt},
     )
-    session.commit()
-    session.refresh(job)
+    session.flush()
+    if commit:
+        session.commit()
+        session.refresh(job)
     return job_to_read(job)
 
 
@@ -591,6 +622,8 @@ def request_job_recovery(
     session: Session,
     job_id: str,
     request: JobRecoveryRequest,
+    *,
+    commit: bool = True,
 ) -> JobRead:
     job = job_or_404(session, job_id)
     if job.status not in {"FAILED", "CANCELLED"}:
@@ -666,8 +699,10 @@ def request_job_recovery(
             event_type="job.intermediate_saved",
             payload={"job_id": job.id, "progress": job.progress},
         )
-        session.commit()
-        session.refresh(job)
+        session.flush()
+        if commit:
+            session.commit()
+            session.refresh(job)
         return job_to_read(job)
 
     failed_part_ids = request.failed_part_ids or _string_list(recovery.get("failed_parts"))
@@ -736,8 +771,10 @@ def request_job_recovery(
             "progress": job.progress,
         },
     )
-    session.commit()
-    session.refresh(job)
+    session.flush()
+    if commit:
+        session.commit()
+        session.refresh(job)
     return job_to_read(job)
 
 

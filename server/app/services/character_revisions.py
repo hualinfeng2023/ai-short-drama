@@ -11,11 +11,22 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.db.models import ChangeSet, EpisodeOutlineVersion, RelationshipGraphVersion, ScriptVersion, StoryBibleVersion
+from app.db.models import (
+    ChangeSet,
+    EpisodeOutlineVersion,
+    ScriptVersion,
+    StoryBibleVersion,
+)
 from app.schemas import CharacterRevisionChanges
 from app.services.events import append_event
 from app.services.projects import canonical_json, content_hash, version_conflict
-from app.services.relationship_graph_workflow import _create_revision_copy, _graph_or_404, _graph_payload, graph_to_read, replace_graph_payload
+from app.services.relationship_graph_workflow import (
+    _create_revision_copy,
+    _graph_or_404,
+    _graph_payload,
+    graph_to_read,
+    replace_graph_payload,
+)
 from app.services.text_provider import TextProviderError, _ark_json
 from app.services.workspace import project_or_404
 
@@ -49,7 +60,9 @@ STRUCTURAL_FIELDS = {
 
 
 def _error(status_code: int, code: str, message: str, **details: object) -> HTTPException:
-    return HTTPException(status_code=status_code, detail={"code": code, "message": message, "details": details})
+    return HTTPException(
+        status_code=status_code, detail={"code": code, "message": message, "details": details}
+    )
 
 
 def _revision_context(
@@ -70,14 +83,25 @@ def _revision_context(
     if bible is None or bible.project_id != project_id or graph.project_id != project_id:
         raise _error(404, "CHARACTER_REVISION_BASE_NOT_FOUND", "角色修改引用的故事版本不存在。")
     if graph.story_bible_version_id != bible.id:
-        raise _error(409, "CHARACTER_REVISION_BASE_MISMATCH", "故事设定与关系版本不匹配，请刷新后重试。")
+        raise _error(
+            409, "CHARACTER_REVISION_BASE_MISMATCH", "故事设定与关系版本不匹配，请刷新后重试。"
+        )
     payload = json.loads(bible.payload_json)
     characters = payload.get("characters")
     if not isinstance(characters, list):
         raise _error(422, "STORY_BIBLE_CHARACTERS_INVALID", "故事设定缺少结构化角色列表。")
-    character = next((item for item in characters if isinstance(item, dict) and item.get("key") == character_key), None)
+    character = next(
+        (
+            item
+            for item in characters
+            if isinstance(item, dict) and item.get("key") == character_key
+        ),
+        None,
+    )
     if character is None:
-        raise _error(404, "CHARACTER_NOT_FOUND", "当前故事设定中不存在该角色。", character_key=character_key)
+        raise _error(
+            404, "CHARACTER_NOT_FOUND", "当前故事设定中不存在该角色。", character_key=character_key
+        )
     proposed = {**character, **changes.model_dump(exclude_none=True)}
     changed_fields = sorted(key for key, value in proposed.items() if character.get(key) != value)
     if not changed_fields:
@@ -91,9 +115,27 @@ def _revision_context(
             suggestion="请同步调整或确认视觉特征，再检查修改影响。",
         )
     graph_payload = _graph_payload(session, graph)
-    related_edges = [edge for edge in graph_payload.edges if character_key in {edge.source_character_key, edge.target_character_key}]
-    affected_outlines = session.scalar(select(func.count()).select_from(EpisodeOutlineVersion).where(EpisodeOutlineVersion.project_id == project_id)) or 0
-    affected_scripts = session.scalar(select(func.count()).select_from(ScriptVersion).where(ScriptVersion.project_id == project_id)) or 0
+    related_edges = [
+        edge
+        for edge in graph_payload.edges
+        if character_key in {edge.source_character_key, edge.target_character_key}
+    ]
+    affected_outlines = (
+        session.scalar(
+            select(func.count())
+            .select_from(EpisodeOutlineVersion)
+            .where(EpisodeOutlineVersion.project_id == project_id)
+        )
+        or 0
+    )
+    affected_scripts = (
+        session.scalar(
+            select(func.count())
+            .select_from(ScriptVersion)
+            .where(ScriptVersion.project_id == project_id)
+        )
+        or 0
+    )
     affected = {
         "relationship_keys": [edge.relationship_key for edge in related_edges],
         "relationship_count": len(related_edges),
@@ -132,34 +174,51 @@ def _rules_review(context: dict[str, Any]) -> CharacterRevisionAIReview:
     structural = sorted(set(context["changed_fields"]) & STRUCTURAL_FIELDS)
     issues: list[CharacterRevisionIssue] = []
     if structural:
-        issues.append(CharacterRevisionIssue(
-            severity="BLOCKER",
-            code="CHARACTER_STORY_LOGIC_IMPACT",
-            field="、".join(structural),
-            message="修改涉及角色动机或叙事功能，现有剧情推进不能继续原样使用。",
-            suggestion="创建同步修改版，并重新确认相关人物关系后生成新剧本。",
-        ))
+        issues.append(
+            CharacterRevisionIssue(
+                severity="BLOCKER",
+                code="CHARACTER_STORY_LOGIC_IMPACT",
+                field="、".join(structural),
+                message="修改涉及角色动机或叙事功能，现有剧情推进不能继续原样使用。",
+                suggestion="创建同步修改版，并重新确认相关人物关系后生成新剧本。",
+            )
+        )
     if {"ethnicity", "visual_notes"} <= set(context["changed_fields"]):
-        issues.append(CharacterRevisionIssue(
-            severity="INFO",
-            code="CHARACTER_ETHNICITY_VISUALS_SYNCED",
-            field="ethnicity、visual_notes",
-            message="族裔／文化背景与视觉特征已作为同一组身份变化同步更新。",
-            suggestion="继续检查描述是否保留个体差异，并避免用外貌推断性格、职业或剧情功能。",
-        ))
+        issues.append(
+            CharacterRevisionIssue(
+                severity="INFO",
+                code="CHARACTER_ETHNICITY_VISUALS_SYNCED",
+                field="ethnicity、visual_notes",
+                message="族裔／文化背景与视觉特征已作为同一组身份变化同步更新。",
+                suggestion="继续检查描述是否保留个体差异，并避免用外貌推断性格、职业或剧情功能。",
+            )
+        )
     if context["affected"]["relationship_count"]:
-        issues.append(CharacterRevisionIssue(
-            severity="WARNING",
-            code="CHARACTER_RELATIONSHIP_IMPACT",
-            message=f"该角色参与 {context['affected']['relationship_count']} 条人物关系，需要重新核对关系描述与变化节拍。",
-            suggestion="系统将复制相关关系为可编辑草稿，不覆盖已批准版本。",
-        ))
+        issues.append(
+            CharacterRevisionIssue(
+                severity="WARNING",
+                code="CHARACTER_RELATIONSHIP_IMPACT",
+                message=(
+                    f"该角色参与 {context['affected']['relationship_count']} 条人物关系，"
+                    "需要重新核对关系描述与变化节拍。"
+                ),
+                suggestion="系统将复制相关关系为可编辑草稿，不覆盖已批准版本。",
+            )
+        )
     return CharacterRevisionAIReview(
         verdict="CONFLICT" if any(issue.severity == "BLOCKER" for issue in issues) else "PASS",
-        summary="角色修改需要通过版本化流程同步故事设定与人物关系。" if issues else "未发现明显故事逻辑冲突。",
+        summary="角色修改需要通过版本化流程同步故事设定与人物关系。"
+        if issues
+        else "未发现明显故事逻辑冲突。",
         issues=issues,
-        story_sync_notes=["创建新的故事设定版本", "旧分集大纲与剧本保留为历史版本", "关系确认后重新生成受影响故事资产"],
-        relationship_sync_notes=[f"重新核对关系：{key}" for key in context["affected"]["relationship_keys"]],
+        story_sync_notes=[
+            "创建新的故事设定版本",
+            "旧分集大纲与剧本保留为历史版本",
+            "关系确认后重新生成受影响故事资产",
+        ],
+        relationship_sync_notes=[
+            f"重新核对关系：{key}" for key in context["affected"]["relationship_keys"]
+        ],
     )
 
 
@@ -174,16 +233,34 @@ async def review_character_revision(
     model = "character-consistency-v1"
     review = fallback
     if settings.ark_api_key:
+        review_schema_json = json.dumps(
+            CharacterRevisionAIReview.model_json_schema(),
+            ensure_ascii=False,
+        )
+        story_bible_json = json.dumps(context["story_bible"], ensure_ascii=False)
+        relationship_graph_json = json.dumps(
+            context["relationship_graph"],
+            ensure_ascii=False,
+        )
+        original_character_json = json.dumps(
+            context["original_character"],
+            ensure_ascii=False,
+        )
+        proposed_character_json = json.dumps(
+            context["proposed_character"],
+            ensure_ascii=False,
+        )
         prompt = (
             "你是短剧角色连续性审核员。判断角色修改是否与当前故事世界、角色动机和人物关系冲突。"
             "只返回 JSON，不要改写用户没有修改的事实。BLOCKER 表示必须同步修改故事或关系；"
-            "WARNING 表示需要人工核对；PASS 也必须给出同步说明。若族裔／文化背景改变，必须同时检查视觉特征是否"
-            "保持身份一致与自然个体差异，不得用族裔推断性格、职业或剧情功能。输出符合 JSON Schema：\n"
-            f"{json.dumps(CharacterRevisionAIReview.model_json_schema(), ensure_ascii=False)}\n"
-            f"Story Bible:\n{json.dumps(context['story_bible'], ensure_ascii=False)}\n"
-            f"Relationship Graph:\n{json.dumps(context['relationship_graph'], ensure_ascii=False)}\n"
-            f"Original Character:\n{json.dumps(context['original_character'], ensure_ascii=False)}\n"
-            f"Proposed Character:\n{json.dumps(context['proposed_character'], ensure_ascii=False)}"
+            "WARNING 表示需要人工核对；PASS 也必须给出同步说明。"
+            "若族裔／文化背景改变，必须同时检查视觉特征是否保持身份一致与自然个体差异，"
+            "不得用族裔推断性格、职业或剧情功能。输出符合 JSON Schema：\n"
+            f"{review_schema_json}\n"
+            f"Story Bible:\n{story_bible_json}\n"
+            f"Relationship Graph:\n{relationship_graph_json}\n"
+            f"Original Character:\n{original_character_json}\n"
+            f"Proposed Character:\n{proposed_character_json}"
         )
         try:
             result = await _ark_json(settings, prompt=prompt, validator=CharacterRevisionAIReview)
@@ -213,10 +290,13 @@ def create_character_revision(
     confirmed: bool,
     impact_hash: str,
     actor: str,
+    commit: bool = True,
     **kwargs: Any,
 ) -> dict[str, Any]:
     if not confirmed:
-        raise _error(409, "CHARACTER_REVISION_CONFIRMATION_REQUIRED", "必须确认影响范围后才能创建修改版。")
+        raise _error(
+            409, "CHARACTER_REVISION_CONFIRMATION_REQUIRED", "必须确认影响范围后才能创建修改版。"
+        )
     context = _revision_context(session, **kwargs)
     if impact_hash != context["impact_hash"]:
         raise _error(409, "CHARACTER_REVISION_IMPACT_STALE", "影响范围已经变化，请重新审核。")
@@ -229,24 +309,52 @@ def create_character_revision(
         for item in payload["characters"]
     ]
     now = datetime.now(UTC)
-    bible_version = (session.scalar(select(func.max(StoryBibleVersion.version)).where(StoryBibleVersion.project_id == project.id)) or 0) + 1
+    bible_version = (
+        session.scalar(
+            select(func.max(StoryBibleVersion.version)).where(
+                StoryBibleVersion.project_id == project.id
+            )
+        )
+        or 0
+    ) + 1
     bible = StoryBibleVersion(
-        id=str(uuid4()), project_id=project.id, story_version_id=source_bible.story_version_id,
-        version=bible_version, status="DRAFT", payload_json=canonical_json(payload),
-        critic_json=canonical_json({"character_revision": {"character_key": kwargs["character_key"], "changed_fields": context["changed_fields"]}}),
-        content_hash=content_hash(payload), parent_version_id=source_bible.id,
-        schema_version="story-bible-v2", provider="manual", model="character-revision-v1",
-        config_version=source_bible.config_version, approved_at=None, approved_by=None, created_at=now,
+        id=str(uuid4()),
+        project_id=project.id,
+        story_version_id=source_bible.story_version_id,
+        version=bible_version,
+        status="DRAFT",
+        payload_json=canonical_json(payload),
+        critic_json=canonical_json(
+            {
+                "character_revision": {
+                    "character_key": kwargs["character_key"],
+                    "changed_fields": context["changed_fields"],
+                }
+            }
+        ),
+        content_hash=content_hash(payload),
+        parent_version_id=source_bible.id,
+        schema_version="story-bible-v2",
+        provider="manual",
+        model="character-revision-v1",
+        config_version=source_bible.config_version,
+        approved_at=None,
+        approved_by=None,
+        created_at=now,
     )
     session.add(bible)
     session.flush()
-    revision_graph = _create_revision_copy(session, source=source_graph, actor=actor, note=f"角色 {kwargs['character_key']} 信息修改")
+    revision_graph = _create_revision_copy(
+        session, source=source_graph, actor=actor, note=f"角色 {kwargs['character_key']} 信息修改"
+    )
     graph_payload = _graph_payload(session, revision_graph)
     affected_keys = set(context["affected"]["relationship_keys"])
     for edge in graph_payload.edges:
         if edge.relationship_key in affected_keys:
             edge.locked = False
-    graph_payload.generation_notes.append("角色信息已修改；请重新核对相关关系，确认后再生成故事线。")
+    graph_payload.generation_notes.append(
+        "角色信息已修改；请重新核对相关关系，确认后再生成故事线。"
+    )
     revision_graph.story_bible_version_id = bible.id
     revision_graph.provider = "manual"
     revision_graph.model = "character-synced-revision-v1"
@@ -266,23 +374,50 @@ def create_character_revision(
     source_bible.status = "SUPERSEDED"
     source_graph.status = "SUPERSEDED"
     change_set = ChangeSet(
-        id=str(uuid4()), project_id=project.id, base_timeline_id=None,
+        id=str(uuid4()),
+        project_id=project.id,
+        base_timeline_id=None,
         base_relationship_graph_id=source_graph.id,
         scope_json=canonical_json({"type": "CHARACTER", "ids": [kwargs["character_key"]]}),
         instruction=f"修改角色 {kwargs['character_key']} 并同步故事与关系基线",
         impact_json=canonical_json({"impact_hash": impact_hash, "affected": context["affected"]}),
-        estimate_json=canonical_json({"points": 0, "seconds": 0}), status="CONFIRMED",
-        result_timeline_id=None, result_relationship_graph_id=revision_graph.id, created_at=now,
+        estimate_json=canonical_json({"points": 0, "seconds": 0}),
+        status="CONFIRMED",
+        result_timeline_id=None,
+        result_relationship_graph_id=revision_graph.id,
+        created_at=now,
     )
     session.add(change_set)
     project.lock_version += 1
     project.preview_approved = False
     project.export_ready = False
     project.updated_at = now
-    append_event(session, project_id=project.id, event_type="story_bible.character_revision_confirmed", payload={"character_key": kwargs["character_key"], "story_bible_id": bible.id, "relationship_graph_id": revision_graph.id, "change_set_id": change_set.id})
-    session.commit()
+    append_event(
+        session,
+        project_id=project.id,
+        event_type="story_bible.character_revision_confirmed",
+        payload={
+            "character_key": kwargs["character_key"],
+            "story_bible_id": bible.id,
+            "relationship_graph_id": revision_graph.id,
+            "change_set_id": change_set.id,
+        },
+    )
+    session.flush()
+    if commit:
+        session.commit()
     return {
-        "story_bible": {"id": bible.id, "version": bible.version, "status": bible.status, "payload": payload, "content_hash": bible.content_hash},
+        "story_bible": {
+            "id": bible.id,
+            "version": bible.version,
+            "status": bible.status,
+            "payload": payload,
+            "content_hash": bible.content_hash,
+        },
         "relationship_graph": graph_to_read(session, revision_graph, project=project),
-        "change_set": {"id": change_set.id, "status": change_set.status, "impact": context["affected"]},
+        "change_set": {
+            "id": change_set.id,
+            "status": change_set.status,
+            "impact": context["affected"],
+        },
     }
