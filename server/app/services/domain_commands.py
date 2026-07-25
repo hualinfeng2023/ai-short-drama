@@ -1,6 +1,9 @@
 import json
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -9,10 +12,13 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.db.models import (
+    Asset,
     AuditLog,
     ChangeSet,
     Character,
+    CharacterCandidate,
     CharacterIdentityVersion,
     CharacterLookVersion,
     CharacterStoryStateVersion,
@@ -20,12 +26,14 @@ from app.db.models import (
     Episode,
     GenerationRecord,
     IdempotencyKey,
+    Job,
     Project,
     Scene,
     ScriptLine,
     ScriptScene,
     ScriptVersion,
     Shot,
+    ShotSpec,
     StoryboardVersion,
     Take,
     TimelineClip,
@@ -35,6 +43,11 @@ from app.db.models import (
 from app.domain.commands import DirectorCommand
 from app.domain.director import DirectorReviewOutput
 from app.schemas import (
+    CharacterCandidateDeleteRequest,
+    CharacterCandidateGenerateRequest,
+    CharacterCandidateSelectRequest,
+    CharacterChangeApplyRequest,
+    CharacterIdentityViewGenerateRequest,
     CharacterVisualProfileConfirmRequest,
     CharacterVisualProfileUpdateRequest,
     IdentityReviewRequest,
@@ -43,11 +56,20 @@ from app.schemas import (
     ScriptLineUpdateRequest,
     ScriptSceneUpdateRequest,
     ShotCharacterBindingUpdate,
+    ShotImageGenerateRequest,
+    ShotVideoGenerateRequest,
+    StoryboardShotRegenerateRequest,
 )
+from app.services.assets import delete_reference_asset
 from app.services.character_visuals import (
+    apply_character_change,
     confirm_visual_profile,
+    delete_character_candidate,
+    generate_character_candidates,
+    generate_character_identity_view,
     lock_character_identity,
     restore_character_identity,
+    select_character_candidate,
     update_visual_profile,
 )
 from app.services.creative_story import approve_script, revise_script
@@ -55,15 +77,18 @@ from app.services.director_proposals import director_proposal_to_read
 from app.services.events import append_event
 from app.services.projects import canonical_json, content_hash, version_conflict
 from app.services.revisions import approve_timeline, create_revision, rollback_timeline
-from app.services.storyboards_v2 import approve_storyboard
+from app.services.storyboards_v2 import approve_storyboard, regenerate_storyboard_shot
 from app.services.takes import (
     apply_candidate_take,
+    create_shot_image_job,
     review_candidate_identity,
     set_shot_character_bindings,
 )
+from app.services.videos import create_shot_video_job
 from app.services.workspace import shot_or_404, shot_to_read
 
 RESULT_ADAPTER = TypeAdapter(dict[str, object])
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -91,6 +116,20 @@ class MutationResult:
     entity_id: str
     before_hash: str
     after_hash: str
+    post_commit: Callable[[], None] | None = None
+
+
+def _run_post_commit_action(mutation: MutationResult) -> None:
+    if mutation.post_commit is None:
+        return
+    try:
+        mutation.post_commit()
+    except OSError:
+        logger.exception(
+            "领域命令已提交，但提交后清理失败：entity_type=%s entity_id=%s",
+            mutation.entity_type,
+            mutation.entity_id,
+        )
 
 
 def _command_scope(project_id: str) -> str:
@@ -461,6 +500,454 @@ def _execute_character_profile_confirmation(
     )
 
 
+def _character_candidate_generation_state_hash(
+    session: Session,
+    character: Character,
+    profile: CharacterVisualProfileVersion,
+) -> str:
+    jobs = list(
+        session.scalars(
+            select(Job)
+            .where(
+                Job.project_id == character.project_id,
+                Job.entity_id == character.id,
+                Job.job_type == "GENERATE_CHARACTER_VISUAL_CANDIDATE",
+            )
+            .order_by(Job.created_at, Job.id)
+        ).all()
+    )
+    return content_hash(
+        {
+            "profile_state": _character_profile_state_hash(character, profile),
+            "jobs": [
+                {
+                    "id": job.id,
+                    "status": job.status,
+                    "request_hash": job.request_hash,
+                    "input_json": job.input_json,
+                }
+                for job in jobs
+            ],
+        }
+    )
+
+
+def _execute_character_candidate_generation_request(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    _require_explicit_user_confirmation(command)
+    character, profile = _character_target(
+        session,
+        project_id=project_id,
+        command=command,
+    )
+    expected_version = _object_lock_version(command)
+    if (
+        command.expected_version.target_hash is not None
+        and profile.content_hash != command.expected_version.target_hash
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "TARGET_CONTENT_CHANGED",
+                "message": "目标角色视觉版本已经变化，请刷新后重试",
+            },
+        )
+    validated = CharacterCandidateGenerateRequest(
+        expected_version=expected_version,
+        actor=command.actor.id,
+        **{key: value for key, value in command.payload.items() if key != "confirmed"},
+    )
+    if validated.profile_version_id != profile.id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "COMMAND_TARGET_VERSION_MISMATCH",
+                "message": "候选生成使用的视觉版本与命令目标不一致",
+            },
+        )
+    before_hash = _character_candidate_generation_state_hash(session, character, profile)
+    batch, jobs = generate_character_candidates(
+        session,
+        project_id=project_id,
+        character_id=character.id,
+        profile_version_id=profile.id,
+        expected_version=expected_version,
+        count=validated.count,
+        source_candidate_id=validated.source_candidate_id,
+        refinement_note=validated.refinement_note,
+        custom_prompt=validated.custom_prompt,
+        actor=command.actor.id,
+        trace_id=command.command_id,
+        commit=False,
+    )
+    return MutationResult(
+        result={
+            "batch": batch,
+            "jobs": [job.model_dump(mode="json") for job in jobs],
+        },
+        entity_type="character_candidate_batch",
+        entity_id=str(batch["id"]),
+        before_hash=before_hash,
+        after_hash=_character_candidate_generation_state_hash(session, character, profile),
+    )
+
+
+def _character_candidate_target(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> tuple[Character, CharacterCandidate, int]:
+    character = session.get(Character, command.target_object_id)
+    candidate = session.get(CharacterCandidate, command.target_version_id)
+    if (
+        character is None
+        or character.project_id != project_id
+        or candidate is None
+        or candidate.project_id != project_id
+        or candidate.character_id != character.id
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "COMMAND_TARGET_NOT_FOUND", "message": "命令目标角色候选不存在"},
+        )
+    _validate_target(command, object_id=character.id, version_id=candidate.id)
+    expected_version = _object_lock_version(command)
+    if command.payload.get("candidate_id") != candidate.id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "COMMAND_TARGET_VERSION_MISMATCH",
+                "message": "选定的角色候选与命令目标不一致",
+            },
+        )
+    return character, candidate, expected_version
+
+
+def _character_candidate_selection_state_hash(
+    session: Session,
+    character: Character,
+    candidate: CharacterCandidate,
+) -> str:
+    return content_hash(
+        {
+            "identity_state": _character_identity_state_hash(session, character),
+            "candidate": {
+                "id": candidate.id,
+                "profile_version_id": candidate.profile_version_id,
+                "status": candidate.status,
+                "review_status": candidate.review_status,
+                "selected": candidate.selected,
+                "asset_id": candidate.asset_id,
+            },
+        }
+    )
+
+
+def _execute_character_candidate_selection(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    _require_explicit_user_confirmation(command)
+    character, candidate, expected_version = _character_candidate_target(
+        session,
+        project_id=project_id,
+        command=command,
+    )
+    before_hash = _character_candidate_selection_state_hash(session, character, candidate)
+    if (
+        command.expected_version.target_hash is not None
+        and before_hash != command.expected_version.target_hash
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "TARGET_CONTENT_CHANGED",
+                "message": "目标角色候选已经变化，请刷新后重试",
+            },
+        )
+    validated = CharacterCandidateSelectRequest(
+        expected_version=expected_version,
+        actor=command.actor.id,
+        **{key: value for key, value in command.payload.items() if key != "confirmed"},
+    )
+    shots_before = _project_shot_snapshot_hash(session, project_id)
+    identity, jobs = select_character_candidate(
+        session,
+        project_id=project_id,
+        character_id=character.id,
+        candidate_id=validated.candidate_id,
+        expected_version=expected_version,
+        actor=command.actor.id,
+        trace_id=command.command_id,
+        commit=False,
+    )
+    if _project_shot_snapshot_hash(session, project_id) != shots_before:
+        raise RuntimeError("角色候选选定意外修改了既有镜头")
+    return MutationResult(
+        result={
+            "identity": identity,
+            "jobs": [job.model_dump(mode="json") for job in jobs],
+        },
+        entity_type="character_identity_version",
+        entity_id=str(identity["id"]),
+        before_hash=before_hash,
+        after_hash=_character_candidate_selection_state_hash(session, character, candidate),
+    )
+
+
+def _character_candidate_deletion_state_hash(
+    session: Session,
+    character: Character,
+    candidate_id: str,
+) -> str:
+    candidate = session.get(CharacterCandidate, candidate_id)
+    asset = session.get(Asset, candidate.asset_id) if candidate is not None else None
+    return content_hash(
+        {
+            "character_id": character.id,
+            "character_lock_version": character.lock_version,
+            "character_status": character.status,
+            "candidate": (
+                {
+                    "id": candidate.id,
+                    "profile_version_id": candidate.profile_version_id,
+                    "status": candidate.status,
+                    "review_status": candidate.review_status,
+                    "selected": candidate.selected,
+                    "asset_id": candidate.asset_id,
+                }
+                if candidate is not None
+                else None
+            ),
+            "asset_id": asset.id if asset is not None else None,
+        }
+    )
+
+
+def _delete_local_asset(path: Path) -> None:
+    path.unlink(missing_ok=True)
+
+
+def _execute_character_candidate_deletion(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    _require_explicit_user_confirmation(command)
+    character, candidate, expected_version = _character_candidate_target(
+        session,
+        project_id=project_id,
+        command=command,
+    )
+    before_hash = _character_candidate_deletion_state_hash(
+        session,
+        character,
+        candidate.id,
+    )
+    if (
+        command.expected_version.target_hash is not None
+        and before_hash != command.expected_version.target_hash
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "TARGET_CONTENT_CHANGED",
+                "message": "目标角色候选已经变化，请刷新后重试",
+            },
+        )
+    validated = CharacterCandidateDeleteRequest(
+        expected_version=expected_version,
+        actor=command.actor.id,
+    )
+    result, asset_path = delete_character_candidate(
+        session,
+        get_settings(),
+        project_id=project_id,
+        character_id=character.id,
+        candidate_id=candidate.id,
+        expected_version=validated.expected_version,
+        actor=validated.actor,
+        commit=False,
+    )
+    return MutationResult(
+        result=result,
+        entity_type="character_candidate",
+        entity_id=candidate.id,
+        before_hash=before_hash,
+        after_hash=_character_candidate_deletion_state_hash(
+            session,
+            character,
+            candidate.id,
+        ),
+        post_commit=(
+            (lambda path=asset_path: _delete_local_asset(path))
+            if asset_path is not None
+            else None
+        ),
+    )
+
+
+def _reference_asset_state_hash(
+    project: Project,
+    asset: Asset | None,
+    asset_id: str,
+) -> str:
+    return content_hash(
+        {
+            "project_id": project.id,
+            "project_lock_version": project.lock_version,
+            "asset_id": asset_id,
+            "asset": (
+                {
+                    "kind": asset.kind,
+                    "storage_key": asset.storage_key,
+                    "sha256": asset.sha256,
+                    "status": asset.status,
+                    "rights_status": asset.rights_status,
+                    "source_entity_type": asset.source_entity_type,
+                    "source_entity_id": asset.source_entity_id,
+                }
+                if asset is not None
+                else None
+            ),
+        }
+    )
+
+
+def _execute_reference_asset_deletion(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    _require_explicit_user_confirmation(command)
+    project = session.get(Project, project_id)
+    asset = session.get(Asset, command.target_object_id)
+    if project is None or asset is None or asset.project_id != project.id:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "COMMAND_TARGET_NOT_FOUND", "message": "命令目标素材不存在"},
+        )
+    _validate_target(command, object_id=asset.id, version_id=asset.id)
+    expected_version = command.expected_version.project_lock_version
+    if expected_version is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "PROJECT_VERSION_REQUIRED",
+                "message": "素材删除命令必须提供项目锁版本",
+            },
+        )
+    if project.lock_version != expected_version:
+        raise version_conflict(project, expected_version)
+    before_hash = _reference_asset_state_hash(project, asset, asset.id)
+    if (
+        command.expected_version.target_hash is not None
+        and before_hash != command.expected_version.target_hash
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "TARGET_CONTENT_CHANGED",
+                "message": "目标素材已经变化，请刷新后重试",
+            },
+        )
+    result, cleanup_path = delete_reference_asset(
+        session,
+        get_settings(),
+        asset_id=asset.id,
+        commit=False,
+    )
+    return MutationResult(
+        result=result,
+        entity_type="asset",
+        entity_id=asset.id,
+        before_hash=before_hash,
+        after_hash=_reference_asset_state_hash(project, None, asset.id),
+        post_commit=(
+            (lambda path=cleanup_path: _delete_local_asset(path))
+            if cleanup_path is not None
+            else None
+        ),
+    )
+
+
+def _character_change_target(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> tuple[Character, int]:
+    character = session.get(Character, command.target_object_id)
+    if character is None or character.project_id != project_id:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "COMMAND_TARGET_NOT_FOUND", "message": "命令目标角色不存在"},
+        )
+    _validate_target(command, object_id=character.id, version_id=character.id)
+    return character, _object_lock_version(command)
+
+
+def _execute_character_change(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    _require_explicit_user_confirmation(command)
+    character, expected_version = _character_change_target(
+        session,
+        project_id=project_id,
+        command=command,
+    )
+    before_hash = _character_identity_state_hash(session, character)
+    if (
+        command.expected_version.target_hash is not None
+        and before_hash != command.expected_version.target_hash
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "TARGET_CONTENT_CHANGED",
+                "message": "目标角色已经变化，请刷新后重试",
+            },
+        )
+    validated = CharacterChangeApplyRequest(
+        expected_version=expected_version,
+        actor=command.actor.id,
+        **{key: value for key, value in command.payload.items() if key != "confirmed"},
+    )
+    shots_before = _project_shot_snapshot_hash(session, project_id)
+    result = apply_character_change(
+        session,
+        project_id=project_id,
+        character_id=character.id,
+        expected_version=expected_version,
+        change_type=validated.change_type,
+        payload=validated.payload,
+        decision=validated.decision,
+        actor=command.actor.id,
+        commit=False,
+    )
+    if _project_shot_snapshot_hash(session, project_id) != shots_before:
+        raise RuntimeError("角色变更意外修改了既有镜头")
+    return MutationResult(
+        result=result,
+        entity_type="character",
+        entity_id=character.id,
+        before_hash=before_hash,
+        after_hash=_character_identity_state_hash(session, character),
+    )
+
+
 def _shot_state_hash(shot: Shot) -> str:
     return content_hash(
         {
@@ -702,6 +1189,119 @@ def _execute_storyboard_approval(
     )
 
 
+def _storyboard_regeneration_state_hash(
+    session: Session,
+    project: Project,
+    storyboard: StoryboardVersion,
+    spec: ShotSpec,
+    shot: Shot,
+) -> str:
+    jobs = list(
+        session.scalars(
+            select(Job)
+            .where(
+                Job.project_id == project.id,
+                Job.entity_id == spec.id,
+                Job.job_type == "GENERATE_STORYBOARD_TAKE",
+            )
+            .order_by(Job.created_at, Job.id)
+        ).all()
+    )
+    return content_hash(
+        {
+            "project_lock_version": project.lock_version,
+            "project_status": project.status,
+            "storyboard_id": storyboard.id,
+            "storyboard_status": storyboard.status,
+            "storyboard_content_hash": storyboard.content_hash,
+            "animatic_asset_id": storyboard.animatic_asset_id,
+            "shot_spec_id": spec.id,
+            "shot_spec_status": spec.status,
+            "shot_id": shot.id,
+            "shot_status": shot.status,
+            "shot_lock_version": shot.lock_version,
+            "jobs": [
+                {
+                    "id": job.id,
+                    "status": job.status,
+                    "request_hash": job.request_hash,
+                    "input_json": job.input_json,
+                }
+                for job in jobs
+            ],
+        }
+    )
+
+
+def _execute_storyboard_shot_regeneration_request(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    _require_explicit_user_confirmation(command)
+    spec = session.get(ShotSpec, command.target_object_id)
+    storyboard = session.get(StoryboardVersion, command.target_version_id)
+    shot = session.get(Shot, spec.shot_id) if spec is not None else None
+    project = session.get(Project, project_id)
+    if (
+        spec is None
+        or storyboard is None
+        or spec.storyboard_version_id != storyboard.id
+        or storyboard.project_id != project_id
+        or shot is None
+        or project is None
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "COMMAND_TARGET_NOT_FOUND", "message": "命令目标分镜镜头不存在"},
+        )
+    _validate_target(command, object_id=spec.id, version_id=storyboard.id)
+    expected_version = command.expected_version.project_lock_version
+    if expected_version is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "PROJECT_VERSION_REQUIRED",
+                "message": "分镜重生成命令必须提供项目锁版本",
+            },
+        )
+    if (
+        command.expected_version.target_hash is not None
+        and storyboard.content_hash != command.expected_version.target_hash
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "TARGET_CONTENT_CHANGED", "message": "目标分镜版本已经变化"},
+        )
+    validated = StoryboardShotRegenerateRequest(
+        expected_version=expected_version,
+        actor=command.actor.id,
+        **{key: value for key, value in command.payload.items() if key != "confirmed"},
+    )
+    before_hash = _storyboard_regeneration_state_hash(
+        session, project, storyboard, spec, shot
+    )
+    shot_result, job, _ = regenerate_storyboard_shot(
+        session,
+        shot_spec_id=spec.id,
+        expected_version=expected_version,
+        actor=validated.actor,
+        trace_id=command.command_id,
+        note=validated.note,
+        commit=False,
+    )
+    return MutationResult(
+        result={"shot": shot_result, "job": job.model_dump(mode="json")},
+        entity_type="job",
+        entity_id=job.id,
+        before_hash=before_hash,
+        after_hash=_storyboard_regeneration_state_hash(
+            session, project, storyboard, spec, shot
+        ),
+    )
+
+
 def _take_state_hash(take: Take) -> str:
     return content_hash(
         {
@@ -746,6 +1346,149 @@ def _shot_take_state_hash(session: Session, project: Project, shot: Shot) -> str
                 for take in takes
             ],
         }
+    )
+
+
+def _shot_generation_state_hash(session: Session, project: Project, shot: Shot) -> str:
+    jobs = list(
+        session.scalars(
+            select(Job)
+            .where(
+                Job.project_id == project.id,
+                Job.entity_type == "shot",
+                Job.entity_id == shot.id,
+                Job.job_type.in_(["GENERATE_SHOT_IMAGE", "GENERATE_SHOT_VIDEO"]),
+            )
+            .order_by(Job.created_at, Job.id)
+        ).all()
+    )
+    return content_hash(
+        {
+            "shot_state": _shot_take_state_hash(session, project, shot),
+            "generation_jobs": [
+                {
+                    "id": job.id,
+                    "job_type": job.job_type,
+                    "status": job.status,
+                    "request_hash": job.request_hash,
+                    "input_json": job.input_json,
+                }
+                for job in jobs
+            ],
+        }
+    )
+
+
+def _shot_generation_target(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> tuple[Project, Shot]:
+    shot = shot_or_404(session, command.target_object_id)
+    _validate_target(command, object_id=shot.id, version_id=shot.id)
+    project = session.scalar(
+        select(Project)
+        .join(Episode, Episode.project_id == Project.id)
+        .join(Scene, Scene.episode_id == Episode.id)
+        .where(Scene.id == shot.scene_id)
+    )
+    if project is None or project.id != project_id:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "COMMAND_TARGET_NOT_FOUND", "message": "命令目标镜头不存在"},
+        )
+    expected_version = _object_lock_version(command)
+    if shot.lock_version != expected_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "VERSION_CONFLICT",
+                "message": "镜头版本已经变化，请刷新后重试",
+                "details": {
+                    "expected_version": expected_version,
+                    "actual_version": shot.lock_version,
+                },
+            },
+        )
+    if (
+        command.expected_version.target_hash is not None
+        and _shot_generation_state_hash(session, project, shot)
+        != command.expected_version.target_hash
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "TARGET_CONTENT_CHANGED", "message": "镜头生成上下文已经变化"},
+        )
+    return project, shot
+
+
+def _execute_shot_image_generation_request(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    _require_explicit_user_confirmation(command)
+    project, shot = _shot_generation_target(
+        session,
+        project_id=project_id,
+        command=command,
+    )
+    before_hash = _shot_generation_state_hash(session, project, shot)
+    validated = ShotImageGenerateRequest(
+        **{key: value for key, value in command.payload.items() if key != "confirmed"}
+    )
+    job, _ = create_shot_image_job(
+        session,
+        shot_id=shot.id,
+        prompt=validated.prompt,
+        model=validated.model,
+        resolution=validated.resolution,
+        aspect_ratio=validated.aspect_ratio,
+        request_idempotency_key=command.idempotency_key,
+        trace_id=command.command_id,
+        commit=False,
+    )
+    return MutationResult(
+        result=job.model_dump(mode="json"),
+        entity_type="job",
+        entity_id=job.id,
+        before_hash=before_hash,
+        after_hash=_shot_generation_state_hash(session, project, shot),
+    )
+
+
+def _execute_shot_video_generation_request(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    _require_explicit_user_confirmation(command)
+    project, shot = _shot_generation_target(
+        session,
+        project_id=project_id,
+        command=command,
+    )
+    before_hash = _shot_generation_state_hash(session, project, shot)
+    validated = ShotVideoGenerateRequest(
+        **{key: value for key, value in command.payload.items() if key != "confirmed"}
+    )
+    job, _ = create_shot_video_job(
+        session,
+        shot_id=shot.id,
+        payload=validated,
+        request_idempotency_key=command.idempotency_key,
+        trace_id=command.command_id,
+        commit=False,
+    )
+    return MutationResult(
+        result=job.model_dump(mode="json"),
+        entity_type="job",
+        entity_id=job.id,
+        before_hash=before_hash,
+        after_hash=_shot_generation_state_hash(session, project, shot),
     )
 
 
@@ -1117,6 +1860,10 @@ def _character_identity_state_hash(
     session: Session,
     character: Character,
 ) -> str:
+    profile = session.get(
+        CharacterVisualProfileVersion,
+        character.current_profile_version_id,
+    )
     identities = list(
         session.scalars(
             select(CharacterIdentityVersion)
@@ -1143,6 +1890,9 @@ def _character_identity_state_hash(
             "character_id": character.id,
             "lock_version": character.lock_version,
             "status": character.status,
+            "current_profile_version_id": character.current_profile_version_id,
+            "current_profile_content_hash": profile.content_hash if profile is not None else None,
+            "current_profile_status": profile.status if profile is not None else None,
             "locked_candidate_id": character.locked_candidate_id,
             "locked_identity_version_id": character.locked_identity_version_id,
             "active_look_version_id": character.active_look_version_id,
@@ -1308,6 +2058,49 @@ def _execute_character_identity_restore(
         result=result,
         entity_type="character_identity_version",
         entity_id=identity.id,
+        before_hash=before_hash,
+        after_hash=_character_identity_state_hash(session, character),
+    )
+
+
+def _execute_character_identity_view_generation_request(
+    session: Session,
+    *,
+    project_id: str,
+    command: DirectorCommand,
+) -> MutationResult:
+    _require_explicit_user_confirmation(command)
+    character, identity, expected_version = _character_identity_target(
+        session,
+        project_id=project_id,
+        command=command,
+    )
+    validated = CharacterIdentityViewGenerateRequest(
+        expected_version=expected_version,
+        actor=command.actor.id,
+        **{
+            key: value
+            for key, value in command.payload.items()
+            if key not in {"confirmed", "identity_version_id"}
+        },
+    )
+    before_hash = _character_identity_state_hash(session, character)
+    job = generate_character_identity_view(
+        session,
+        project_id=project_id,
+        character_id=character.id,
+        identity_version_id=identity.id,
+        view_type=validated.view_type,
+        expected_version=expected_version,
+        refinement_note=validated.refinement_note,
+        actor=command.actor.id,
+        trace_id=command.command_id,
+        commit=False,
+    )
+    return MutationResult(
+        result={"job": job.model_dump(mode="json")},
+        entity_type="job",
+        entity_id=job.id,
         before_hash=before_hash,
         after_hash=_character_identity_state_hash(session, character),
     )
@@ -1897,6 +2690,60 @@ def dispatch_domain_command(
                 project_id=project_id,
                 command=command,
             )
+        elif command.command_type == "REQUEST_SHOT_IMAGE_GENERATION":
+            mutation = _execute_shot_image_generation_request(
+                session,
+                project_id=project_id,
+                command=command,
+            )
+        elif command.command_type == "REQUEST_SHOT_VIDEO_GENERATION":
+            mutation = _execute_shot_video_generation_request(
+                session,
+                project_id=project_id,
+                command=command,
+            )
+        elif command.command_type == "REQUEST_CHARACTER_CANDIDATE_GENERATION":
+            mutation = _execute_character_candidate_generation_request(
+                session,
+                project_id=project_id,
+                command=command,
+            )
+        elif command.command_type == "REQUEST_CHARACTER_IDENTITY_VIEW_GENERATION":
+            mutation = _execute_character_identity_view_generation_request(
+                session,
+                project_id=project_id,
+                command=command,
+            )
+        elif command.command_type == "SELECT_CHARACTER_CANDIDATE":
+            mutation = _execute_character_candidate_selection(
+                session,
+                project_id=project_id,
+                command=command,
+            )
+        elif command.command_type == "DELETE_CHARACTER_CANDIDATE":
+            mutation = _execute_character_candidate_deletion(
+                session,
+                project_id=project_id,
+                command=command,
+            )
+        elif command.command_type == "DELETE_REFERENCE_ASSET":
+            mutation = _execute_reference_asset_deletion(
+                session,
+                project_id=project_id,
+                command=command,
+            )
+        elif command.command_type == "APPLY_CHARACTER_CHANGE":
+            mutation = _execute_character_change(
+                session,
+                project_id=project_id,
+                command=command,
+            )
+        elif command.command_type == "REQUEST_STORYBOARD_SHOT_REGENERATION":
+            mutation = _execute_storyboard_shot_regeneration_request(
+                session,
+                project_id=project_id,
+                command=command,
+            )
         elif command.command_type == "CREATE_REVISION_CHANGE_SET":
             mutation = _execute_revision_change_set(
                 session,
@@ -2027,4 +2874,5 @@ def dispatch_domain_command(
         if winner is None:
             raise
         return _replay(winner, command=command, request_hash=request_hash)
+    _run_post_commit_action(mutation)
     return execution

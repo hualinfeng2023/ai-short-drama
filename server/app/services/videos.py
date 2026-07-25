@@ -96,6 +96,7 @@ def create_shot_video_job(
     payload: ShotVideoGenerateRequest,
     request_idempotency_key: str,
     trace_id: str,
+    commit: bool = True,
 ) -> tuple[JobRead, bool]:
     shot = shot_or_404(session, shot_id)
     project = _shot_project(session, shot)
@@ -196,7 +197,9 @@ def create_shot_video_job(
         event_type="shot.video_generation_started",
         payload={"shot_id": shot.id, "take_version": take_version},
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     session.refresh(job)
     return job_to_read(job), False
 

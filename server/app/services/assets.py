@@ -1,4 +1,5 @@
 import hashlib
+import json
 import mimetypes
 import os
 from datetime import UTC, datetime
@@ -10,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.db.models import Asset
+from app.db.models import Asset, BriefVersion
 
 
 def asset_or_404(session: Session, asset_id: str) -> Asset:
@@ -110,3 +111,37 @@ def resolve_asset_path(settings: Settings, asset: Asset) -> Path:
             },
         )
     return path
+
+
+def delete_reference_asset(
+    session: Session,
+    settings: Settings,
+    *,
+    asset_id: str,
+    commit: bool = True,
+) -> tuple[dict[str, object], Path | None]:
+    asset = asset_or_404(session, asset_id)
+    if not asset.kind.startswith("REFERENCE_"):
+        raise HTTPException(status_code=409, detail="生成资产不能通过素材上传接口删除")
+    briefs = session.scalars(
+        select(BriefVersion).where(BriefVersion.project_id == asset.project_id)
+    ).all()
+    if any(asset.id in json.loads(brief.reference_asset_ids_json) for brief in briefs):
+        raise HTTPException(status_code=409, detail="素材已被 Brief Version 引用，不能删除")
+    path = resolve_asset_path(settings, asset)
+    shared = session.scalar(
+        select(Asset).where(Asset.storage_key == asset.storage_key, Asset.id != asset.id)
+    )
+    result = {
+        "asset_id": asset.id,
+        "project_id": asset.project_id,
+        "deleted": True,
+    }
+    session.delete(asset)
+    session.flush()
+    cleanup_path = path if shared is None else None
+    if commit:
+        session.commit()
+        if cleanup_path is not None:
+            cleanup_path.unlink(missing_ok=True)
+    return result, cleanup_path

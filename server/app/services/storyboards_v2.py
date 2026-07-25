@@ -1045,6 +1045,7 @@ def regenerate_storyboard_shot(
     actor: str,
     trace_id: str,
     note: str | None = None,
+    commit: bool = True,
 ) -> tuple[dict[str, object], JobRead, bool]:
     spec = session.get(ShotSpec, shot_spec_id)
     if spec is None:
@@ -1199,7 +1200,9 @@ def regenerate_storyboard_shot(
             "actor": actor,
         },
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     session.refresh(child)
     return (
         {

@@ -6,7 +6,12 @@ import pytest
 from docx import Document
 from httpx import AsyncClient
 from pypdf import PdfWriter
+from sqlalchemy import select
+from sqlalchemy.orm import sessionmaker
 
+from app.config import get_settings
+from app.db.models import AuditLog
+from app.db.session import get_engine
 from app.services.media import deterministic_png_bytes
 
 pytestmark = pytest.mark.anyio
@@ -83,6 +88,47 @@ async def test_text_upload_deduplicates_and_links_to_immutable_brief(
     assert [item["id"] for item in listed] == [asset["id"]]
     downloaded = await client.get(asset["content_url"])
     assert downloaded.content == content
+
+    deletable = await _upload(
+        client,
+        project_id,
+        "待删除.txt",
+        "这是一份未绑定 Brief 的临时参考。".encode(),
+        "text/plain",
+    )
+    assert deletable.status_code == 201
+    deletable_asset = deletable.json()["data"]
+    deletion_headers = {
+        "Idempotency-Key": f"delete-reference-asset-{deletable_asset['id']}",
+        "X-Actor": "upload-test",
+    }
+    deleted = await client.delete(
+        f"/api/v1/assets/{deletable_asset['id']}",
+        headers=deletion_headers,
+    )
+    assert deleted.status_code == 204, deleted.text
+    assert deleted.headers["Idempotency-Replayed"] == "false"
+    replayed_delete = await client.delete(
+        f"/api/v1/assets/{deletable_asset['id']}",
+        headers=deletion_headers,
+    )
+    assert replayed_delete.status_code == 204, replayed_delete.text
+    assert replayed_delete.headers["Idempotency-Replayed"] == "true"
+    assert (await client.get(deletable_asset["content_url"])).status_code == 404
+    factory = sessionmaker(bind=get_engine(get_settings().database_url), expire_on_commit=False)
+    with factory() as session:
+        audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == project_id,
+                    AuditLog.action == "DELETE_REFERENCE_ASSET",
+                    AuditLog.entity_id == deletable_asset["id"],
+                )
+            ).all()
+        )
+        assert len(audits) == 1
+        assert audits[0].entity_type == "asset"
+        assert audits[0].before_hash != audits[0].after_hash
 
     forged_reference = await client.patch(
         f"/api/v1/projects/{project_id}",
