@@ -1973,6 +1973,7 @@ def generate_character_candidates(
     custom_prompt: str | None,
     actor: str,
     trace_id: str,
+    commit: bool = True,
 ) -> tuple[dict[str, object], list[JobRead]]:
     character = session.get(Character, character_id)
     if character is None or character.project_id != project_id:
@@ -2230,7 +2231,9 @@ def generate_character_candidates(
             "actor": actor,
         },
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     return {
         "id": batch.id,
         "version": batch.version,
@@ -2405,6 +2408,7 @@ def select_character_candidate(
     expected_version: int,
     actor: str,
     trace_id: str,
+    commit: bool = True,
 ) -> tuple[dict[str, object], list[JobRead]]:
     character = session.get(Character, character_id)
     candidate = session.get(CharacterCandidate, candidate_id)
@@ -2523,7 +2527,9 @@ def select_character_candidate(
             "actor": actor,
         },
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     return {"id": identity.id, "version": identity.version, "status": identity.status}, jobs
 
 
@@ -2536,7 +2542,8 @@ def delete_character_candidate(
     candidate_id: str,
     expected_version: int,
     actor: str,
-) -> dict[str, object]:
+    commit: bool = True,
+) -> tuple[dict[str, object], Path | None]:
     character = session.get(Character, character_id)
     candidate = session.get(CharacterCandidate, candidate_id)
     if (
@@ -2628,15 +2635,20 @@ def delete_character_candidate(
             "actor": actor,
         },
     )
-    session.commit()
-    if asset_path is not None:
-        asset_path.unlink(missing_ok=True)
-    return {
-        "character_id": character.id,
-        "candidate_id": candidate_id,
-        "deleted": True,
-        "lock_version": character.lock_version,
-    }
+    session.flush()
+    if commit:
+        session.commit()
+        if asset_path is not None:
+            asset_path.unlink(missing_ok=True)
+    return (
+        {
+            "character_id": character.id,
+            "candidate_id": candidate_id,
+            "deleted": True,
+            "lock_version": character.lock_version,
+        },
+        asset_path,
+    )
 
 
 def generate_character_identity_view(
@@ -2650,6 +2662,7 @@ def generate_character_identity_view(
     refinement_note: str | None,
     actor: str,
     trace_id: str,
+    commit: bool = True,
 ) -> JobRead:
     character = session.get(Character, character_id)
     identity = session.get(CharacterIdentityVersion, identity_version_id)
@@ -2901,7 +2914,9 @@ def generate_character_identity_view(
             "actor": actor,
         },
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     return job_to_read(job)
 
 
@@ -3375,6 +3390,7 @@ def apply_character_change(
     payload: dict[str, object],
     decision: str | None,
     actor: str,
+    commit: bool = True,
 ) -> dict[str, object]:
     character = session.get(Character, character_id)
     if character is None or character.project_id != project_id:
@@ -3490,7 +3506,9 @@ def apply_character_change(
             "actor": actor,
         },
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     return {
         "action": action,
         "entity_id": entity_id,

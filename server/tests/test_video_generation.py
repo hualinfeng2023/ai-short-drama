@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.db.models import Asset, GenerationRecord, Job, Shot, Take
+from app.db.models import Asset, AuditLog, GenerationRecord, Job, Shot, Take
 from app.db.session import get_engine
 from app.jobs.worker import PersistentJobWorker
 from app.seed import PROJECT_ID, SHOT_IDS
@@ -220,6 +220,18 @@ async def test_shot_video_job_persists_provider_task_and_asset(
         assert asset is not None
         assert asset.provider == "volcengine-ark"
         assert asset.duration_ms == 5000
+        audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.action == "REQUEST_SHOT_VIDEO_GENERATION",
+                )
+            ).all()
+        )
+        assert len(audits) == 1
+        assert audits[0].entity_type == "job"
+        assert audits[0].entity_id == job["id"]
+        assert audits[0].before_hash != audits[0].after_hash
 
 
 async def test_shot_video_job_accepts_local_keyframe_when_private_tos_is_configured(

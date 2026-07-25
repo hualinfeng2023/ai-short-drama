@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.db.models import Asset
-from app.services.assets import register_file
+from app.services.assets import cleanup_unreferenced_asset_files, register_file
 from app.services.workspace import project_or_404
 
 MIB = 1024 * 1024
@@ -231,7 +231,8 @@ def validate_and_register_upload(
     source: Path,
     filename: str,
     declared_content_type: str | None,
-) -> Asset:
+    commit: bool = True,
+) -> tuple[Asset, tuple[Path, ...]]:
     extension, _limit, mime, kind = upload_rule(filename)
     size = source.stat().st_size
     ensure_project_capacity(session, project_id, size)
@@ -255,6 +256,7 @@ def validate_and_register_upload(
             "security_checks": ["size", "magic", "safe_path"],
         }
     )
+    created_files: list[Path] = []
     asset = register_file(
         session,
         settings,
@@ -267,11 +269,19 @@ def validate_and_register_upload(
         width=width,
         height=height,
         duration_ms=duration_ms,
+        created_files=created_files,
     )
     asset.original_filename = filename
     asset.metadata_json = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
     asset.rights_status = "USER_CONFIRMED"
     asset.is_temporary = False
-    session.commit()
-    session.refresh(asset)
-    return asset
+    session.flush()
+    if commit:
+        try:
+            session.commit()
+        except Exception:
+            session.rollback()
+            cleanup_unreferenced_asset_files(session, settings, tuple(created_files))
+            raise
+        session.refresh(asset)
+    return asset, tuple(created_files)

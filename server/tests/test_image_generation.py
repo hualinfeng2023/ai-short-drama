@@ -23,6 +23,200 @@ from app.services.image_provider import GeneratedImage, generate_image
 pytestmark = pytest.mark.anyio
 
 
+@pytest.mark.parametrize(
+    ("command_type", "expected_version"),
+    [
+        (
+            "REQUEST_CHARACTER_CANDIDATE_GENERATION",
+            {
+                "object_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
+            "REQUEST_CHARACTER_IDENTITY_VIEW_GENERATION",
+            {
+                "object_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
+            "SELECT_CHARACTER_CANDIDATE",
+            {
+                "object_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
+            "DELETE_CHARACTER_CANDIDATE",
+            {
+                "object_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
+            "DELETE_REFERENCE_ASSET",
+            {
+                "project_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
+            "UPLOAD_REFERENCE_ASSET",
+            {
+                "project_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
+            "APPLY_CHARACTER_CHANGE",
+            {
+                "object_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
+            "REQUEST_STORYBOARD_SHOT_REGENERATION",
+            {
+                "project_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+    ],
+)
+async def test_expensive_generation_commands_reject_director_and_unconfirmed_user(
+    client: AsyncClient,
+    command_type: str,
+    expected_version: dict[str, object],
+) -> None:
+    base_command = {
+        "command_type": command_type,
+        "target_object_id": "96000000-0000-4000-8000-000000000001",
+        "target_version_id": "96000000-0000-4000-8000-000000000002",
+        "expected_version": expected_version,
+        "payload": {"confirmed": True},
+    }
+    director_attempt = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/commands",
+        json={
+            **base_command,
+            "command_id": "96000000-0000-4000-8000-000000000003",
+            "actor": {"type": "DIRECTOR", "id": "ai-director"},
+            "idempotency_key": f"{command_type.lower()}-director-blocked",
+        },
+    )
+    assert director_attempt.status_code == 409
+    assert director_attempt.json()["error"]["code"] == "USER_CONFIRMATION_REQUIRED"
+
+    user_attempt = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/commands",
+        json={
+            **base_command,
+            "command_id": "96000000-0000-4000-8000-000000000004",
+            "actor": {"type": "USER", "id": "test-creator"},
+            "payload": {"confirmed": False},
+            "idempotency_key": f"{command_type.lower()}-user-unconfirmed",
+        },
+    )
+    assert user_attempt.status_code == 409
+    assert user_attempt.json()["error"]["code"] == "USER_CONFIRMATION_REQUIRED"
+
+
+async def test_shot_generation_command_requires_user_confirmation_and_is_audited(
+    client: AsyncClient,
+) -> None:
+    workspace = (await client.get(f"/api/v1/projects/{PROJECT_ID}/workspace")).json()["data"]
+    shot = next(item for item in workspace["shots"] if item["id"] == SHOT_IDS[0])
+    base_command = {
+        "command_type": "REQUEST_SHOT_IMAGE_GENERATION",
+        "target_object_id": shot["id"],
+        "target_version_id": shot["id"],
+        "expected_version": {
+            "object_lock_version": shot["lock_version"],
+            "target_version_id": shot["id"],
+        },
+        "payload": {
+            "resolution": "2K",
+            "aspect_ratio": "9:16",
+            "confirmed": True,
+        },
+    }
+
+    director_attempt = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/commands",
+        json={
+            **base_command,
+            "command_id": "95000000-0000-4000-8000-000000000001",
+            "actor": {"type": "DIRECTOR", "id": "ai-director"},
+            "idempotency_key": "director-image-generation-blocked-v1",
+        },
+    )
+    assert director_attempt.status_code == 409
+    assert director_attempt.json()["error"]["code"] == "USER_CONFIRMATION_REQUIRED"
+
+    unconfirmed_attempt = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/commands",
+        json={
+            **base_command,
+            "command_id": "95000000-0000-4000-8000-000000000002",
+            "actor": {"type": "USER", "id": "test-creator"},
+            "payload": {**base_command["payload"], "confirmed": False},
+            "idempotency_key": "user-image-generation-unconfirmed-v1",
+        },
+    )
+    assert unconfirmed_attempt.status_code == 409
+    assert unconfirmed_attempt.json()["error"]["code"] == "USER_CONFIRMATION_REQUIRED"
+
+    command = {
+        **base_command,
+        "command_id": "95000000-0000-4000-8000-000000000003",
+        "actor": {"type": "USER", "id": "test-creator"},
+        "idempotency_key": "user-image-generation-confirmed-v1",
+    }
+    created = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/commands",
+        json=command,
+    )
+    assert created.status_code == 200, created.text
+    assert created.headers["Idempotency-Replayed"] == "false"
+    execution = created.json()["data"]
+    assert execution["command_type"] == "REQUEST_SHOT_IMAGE_GENERATION"
+    assert execution["result"]["job_type"] == "GENERATE_SHOT_IMAGE"
+
+    replayed = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/commands",
+        json=command,
+    )
+    assert replayed.status_code == 200
+    assert replayed.headers["Idempotency-Replayed"] == "true"
+    assert replayed.json()["data"]["result"] == execution["result"]
+
+    with Session(get_engine(get_settings().database_url)) as session:
+        jobs = list(
+            session.scalars(
+                select(Job).where(
+                    Job.project_id == PROJECT_ID,
+                    Job.job_type == "GENERATE_SHOT_IMAGE",
+                    Job.entity_id == shot["id"],
+                )
+            ).all()
+        )
+        audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.action == "REQUEST_SHOT_IMAGE_GENERATION",
+                )
+            ).all()
+        )
+        assert len(jobs) == 1
+        assert len(audits) == 1
+        assert audits[0].actor == "test-creator"
+        assert audits[0].entity_type == "job"
+        assert audits[0].entity_id == jobs[0].id
+        assert audits[0].before_hash != audits[0].after_hash
+
+
 async def test_shot_binding_writes_use_idempotent_command_boundary(
     client: AsyncClient,
 ) -> None:

@@ -1,4 +1,5 @@
 import hashlib
+import json
 import mimetypes
 import os
 from datetime import UTC, datetime
@@ -10,7 +11,32 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.db.models import Asset
+from app.db.models import Asset, BriefVersion
+from app.schemas import AssetRead
+
+
+def asset_to_read(asset: Asset) -> AssetRead:
+    return AssetRead(
+        id=asset.id,
+        project_id=asset.project_id,
+        kind=asset.kind,
+        sha256=asset.sha256,
+        mime=asset.mime,
+        size_bytes=asset.size_bytes,
+        status=asset.status,
+        provider=asset.provider,
+        is_temporary=asset.is_temporary,
+        width=asset.width,
+        height=asset.height,
+        duration_ms=asset.duration_ms,
+        original_filename=asset.original_filename,
+        metadata=json.loads(asset.metadata_json or "{}"),
+        rights_status=asset.rights_status,
+        source_entity_type=asset.source_entity_type,
+        source_entity_id=asset.source_entity_id,
+        created_at=asset.created_at,
+        content_url=f"/api/v1/assets/{asset.id}/content",
+    )
 
 
 def asset_or_404(session: Session, asset_id: str) -> Asset:
@@ -50,6 +76,7 @@ def register_file(
     width: int | None = None,
     height: int | None = None,
     duration_ms: int | None = None,
+    created_files: list[Path] | None = None,
 ) -> Asset:
     digest = sha256_file(source)
     existing = session.scalar(
@@ -72,6 +99,8 @@ def register_file(
         source.unlink()
     else:
         os.replace(source, destination)
+        if created_files is not None:
+            created_files.append(destination)
     asset = Asset(
         id=str(uuid4()),
         project_id=project_id,
@@ -95,6 +124,22 @@ def register_file(
     return asset
 
 
+def cleanup_unreferenced_asset_files(
+    session: Session,
+    settings: Settings,
+    paths: tuple[Path, ...],
+) -> None:
+    assets_root = (settings.data_dir / "assets").resolve()
+    for candidate in paths:
+        path = candidate.resolve()
+        if not path.is_relative_to(assets_root):
+            continue
+        storage_key = str(path.relative_to(settings.data_dir.resolve()))
+        referenced = session.scalar(select(Asset.id).where(Asset.storage_key == storage_key))
+        if referenced is None:
+            path.unlink(missing_ok=True)
+
+
 def resolve_asset_path(settings: Settings, asset: Asset) -> Path:
     assets_root = (settings.data_dir / "assets").resolve()
     path = (settings.data_dir / asset.storage_key).resolve()
@@ -110,3 +155,37 @@ def resolve_asset_path(settings: Settings, asset: Asset) -> Path:
             },
         )
     return path
+
+
+def delete_reference_asset(
+    session: Session,
+    settings: Settings,
+    *,
+    asset_id: str,
+    commit: bool = True,
+) -> tuple[dict[str, object], Path | None]:
+    asset = asset_or_404(session, asset_id)
+    if not asset.kind.startswith("REFERENCE_"):
+        raise HTTPException(status_code=409, detail="生成资产不能通过素材上传接口删除")
+    briefs = session.scalars(
+        select(BriefVersion).where(BriefVersion.project_id == asset.project_id)
+    ).all()
+    if any(asset.id in json.loads(brief.reference_asset_ids_json) for brief in briefs):
+        raise HTTPException(status_code=409, detail="素材已被 Brief Version 引用，不能删除")
+    path = resolve_asset_path(settings, asset)
+    shared = session.scalar(
+        select(Asset).where(Asset.storage_key == asset.storage_key, Asset.id != asset.id)
+    )
+    result = {
+        "asset_id": asset.id,
+        "project_id": asset.project_id,
+        "deleted": True,
+    }
+    session.delete(asset)
+    session.flush()
+    cleanup_path = path if shared is None else None
+    if commit:
+        session.commit()
+        if cleanup_path is not None:
+            cleanup_path.unlink(missing_ok=True)
+    return result, cleanup_path

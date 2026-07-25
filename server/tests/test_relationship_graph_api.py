@@ -40,6 +40,7 @@ from app.services.character_visuals import (
     materialize_identity_asset,
     materialize_visual_candidate,
 )
+from app.services.domain_commands import MutationResult, _run_post_commit_action
 from app.services.image_provider import GeneratedImage
 from app.services.projects import canonical_json, content_hash
 
@@ -351,8 +352,23 @@ async def lock_character_for_test(
             "count": 3,
             "actor": "family-test",
         },
+        headers={"Idempotency-Key": f"character-candidates-{character_id}"},
     )
     assert generated.status_code == 202, generated.text
+    assert generated.headers["Idempotency-Replayed"] == "false"
+    generated_replay = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/characters/{character_id}/visual-candidates",
+        json={
+            "expected_version": character_data["lock_version"],
+            "profile_version_id": character_data["profile"]["id"],
+            "count": 3,
+            "actor": "family-test",
+        },
+        headers={"Idempotency-Key": f"character-candidates-{character_id}"},
+    )
+    assert generated_replay.status_code == 202
+    assert generated_replay.headers["Idempotency-Replayed"] == "true"
+    assert generated_replay.json()["data"] == generated.json()["data"]
     factory = sessionmaker(bind=get_engine(get_settings().database_url), expire_on_commit=False)
     with factory() as session:
         jobs = list(
@@ -366,6 +382,18 @@ async def lock_character_for_test(
             ).all()
         )
         assert len(jobs) == 3
+        audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.action == "REQUEST_CHARACTER_CANDIDATE_GENERATION",
+                    AuditLog.entity_id == generated.json()["data"]["batch"]["id"],
+                )
+            ).all()
+        )
+        assert len(audits) == 1
+        assert audits[0].entity_type == "character_candidate_batch"
+        assert audits[0].before_hash != audits[0].after_hash
         for index, job in enumerate(jobs):
             assert 0 <= json.loads(job.input_json)["seed"] < 2**31
             materialize_visual_candidate(
@@ -386,17 +414,43 @@ async def lock_character_for_test(
         "data"
     ]
     character_data = next(item for item in workspace["characters"] if item["id"] == character_id)
+    selection_payload = {
+        "expected_version": character_data["lock_version"],
+        "candidate_id": character_data["candidates"][0]["id"],
+        "actor": "family-test",
+    }
+    selection_headers = {
+        "Idempotency-Key": f"select-character-candidate-{selection_payload['candidate_id']}"
+    }
     selected = await client.post(
         f"/api/v1/projects/{PROJECT_ID}/characters/{character_id}/visual-candidates/select",
-        json={
-            "expected_version": character_data["lock_version"],
-            "candidate_id": character_data["candidates"][0]["id"],
-            "actor": "family-test",
-        },
+        json=selection_payload,
+        headers=selection_headers,
     )
     assert selected.status_code == 202, selected.text
+    assert selected.headers["Idempotency-Replayed"] == "false"
+    replayed_selection = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/characters/{character_id}/visual-candidates/select",
+        json=selection_payload,
+        headers=selection_headers,
+    )
+    assert replayed_selection.status_code == 202, replayed_selection.text
+    assert replayed_selection.headers["Idempotency-Replayed"] == "true"
+    assert replayed_selection.json()["data"] == selected.json()["data"]
     identity_id = selected.json()["data"]["identity"]["id"]
     with factory() as session:
+        audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.action == "SELECT_CHARACTER_CANDIDATE",
+                    AuditLog.entity_id == identity_id,
+                )
+            ).all()
+        )
+        assert len(audits) == 1
+        assert audits[0].entity_type == "character_identity_version"
+        assert audits[0].before_hash != audits[0].after_hash
         jobs = list(
             session.scalars(
                 select(Job)
@@ -853,13 +907,52 @@ async def test_character_visual_flow_requires_manual_generation_and_lock(
                     "refinement_note": "保留五官，让视线更坚定",
                     "actor": "tester",
                 },
+                headers={
+                    "Idempotency-Key": (
+                        f"identity-view-adjustment-{identity_id}-three-quarter"
+                    )
+                },
             )
             assert adjustment.status_code == 202, adjustment.text
+            assert adjustment.headers["Idempotency-Replayed"] == "false"
             adjustment_job_id = adjustment.json()["data"]["job"]["id"]
+            adjustment_replay = await client.post(
+                (
+                    f"/api/v1/projects/{PROJECT_ID}/characters/{character_id}"
+                    f"/identity/{identity_id}/views"
+                ),
+                json={
+                    "expected_version": expected_version,
+                    "view_type": "THREE_QUARTER",
+                    "refinement_note": "保留五官，让视线更坚定",
+                    "actor": "tester",
+                },
+                headers={
+                    "Idempotency-Key": (
+                        f"identity-view-adjustment-{identity_id}-three-quarter"
+                    )
+                },
+            )
+            assert adjustment_replay.status_code == 202
+            assert adjustment_replay.headers["Idempotency-Replayed"] == "true"
+            assert adjustment_replay.json()["data"] == adjustment.json()["data"]
 
             with factory() as session:
                 adjustment_job = session.get(Job, adjustment_job_id)
                 assert adjustment_job is not None
+                audits = list(
+                    session.scalars(
+                        select(AuditLog).where(
+                            AuditLog.project_id == PROJECT_ID,
+                            AuditLog.action
+                            == "REQUEST_CHARACTER_IDENTITY_VIEW_GENERATION",
+                            AuditLog.entity_id == adjustment_job_id,
+                        )
+                    ).all()
+                )
+                assert len(audits) == 1
+                assert audits[0].entity_type == "job"
+                assert audits[0].before_hash != audits[0].after_hash
                 adjustment_payload = json.loads(adjustment_job.input_json)
                 assert adjustment_payload["generation_mode"] == "REFINE"
                 assert adjustment_payload["reference_asset_id"] == current_view["asset_id"]
@@ -944,17 +1037,45 @@ async def test_character_visual_flow_requires_manual_generation_and_lock(
     assert decision_required.status_code == 409
     assert decision_required.json()["error"]["code"] == "IDENTITY_DECISION_REQUIRED"
 
+    state_change_payload = {
+        "expected_version": first["lock_version"],
+        "change_type": "STORY_STATE",
+        "payload": {"label": "雨夜受伤", "injury": "额角轻伤", "wetness": "湿发"},
+        "actor": "tester",
+    }
+    state_change_headers = {
+        "Idempotency-Key": f"apply-character-state-change-{first['id']}"
+    }
     state_changed = await client.post(
         f"/api/v1/projects/{PROJECT_ID}/characters/{first['id']}/changes",
-        json={
-            "expected_version": first["lock_version"],
-            "change_type": "STORY_STATE",
-            "payload": {"label": "雨夜受伤", "injury": "额角轻伤", "wetness": "湿发"},
-            "actor": "tester",
-        },
+        json=state_change_payload,
+        headers=state_change_headers,
     )
     assert state_changed.status_code == 200
+    assert state_changed.headers["Idempotency-Replayed"] == "false"
     assert state_changed.json()["data"]["action"] == "STORY_STATE_VERSION_CREATED"
+    replayed_state_change = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/characters/{first['id']}/changes",
+        json=state_change_payload,
+        headers=state_change_headers,
+    )
+    assert replayed_state_change.status_code == 200
+    assert replayed_state_change.headers["Idempotency-Replayed"] == "true"
+    assert replayed_state_change.json()["data"] == state_changed.json()["data"]
+    with factory() as session:
+        audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.action == "APPLY_CHARACTER_CHANGE",
+                    AuditLog.entity_id == first["id"],
+                    AuditLog.before_hash != AuditLog.after_hash,
+                )
+            ).all()
+        )
+        assert len(audits) == 1
+        assert audits[0].entity_type == "character"
+        assert audits[0].before_hash != audits[0].after_hash
     refreshed = (await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")).json()[
         "data"
     ]
@@ -1220,16 +1341,50 @@ async def test_candidate_prompt_is_visible_and_can_generate_an_edited_version(
     assert edited_candidate["source_candidate_id"] == source["id"]
     assert edited_candidate["deletable"] is True
 
+    deletion_payload = {
+        "expected_version": character["lock_version"],
+        "actor": "tester",
+    }
+    deletion_headers = {
+        "Idempotency-Key": f"delete-character-candidate-{edited_candidate['id']}"
+    }
     deleted = await client.request(
         "DELETE",
         (
             f"/api/v1/projects/{PROJECT_ID}/characters/{character['id']}"
             f"/visual-candidates/{edited_candidate['id']}"
         ),
-        json={"expected_version": character["lock_version"], "actor": "tester"},
+        json=deletion_payload,
+        headers=deletion_headers,
     )
     assert deleted.status_code == 200, deleted.text
+    assert deleted.headers["Idempotency-Replayed"] == "false"
     assert deleted.json()["data"]["deleted"] is True
+    replayed_deletion = await client.request(
+        "DELETE",
+        (
+            f"/api/v1/projects/{PROJECT_ID}/characters/{character['id']}"
+            f"/visual-candidates/{edited_candidate['id']}"
+        ),
+        json=deletion_payload,
+        headers=deletion_headers,
+    )
+    assert replayed_deletion.status_code == 200, replayed_deletion.text
+    assert replayed_deletion.headers["Idempotency-Replayed"] == "true"
+    assert replayed_deletion.json()["data"] == deleted.json()["data"]
+    with factory() as session:
+        audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.action == "DELETE_CHARACTER_CANDIDATE",
+                    AuditLog.entity_id == edited_candidate["id"],
+                )
+            ).all()
+        )
+        assert len(audits) == 1
+        assert audits[0].entity_type == "character_candidate"
+        assert audits[0].before_hash != audits[0].after_hash
     assert (
         await client.get(f"/api/v1/assets/{edited_candidate['asset_id']}/content")
     ).status_code == 404
@@ -1268,6 +1423,37 @@ async def test_candidate_prompt_is_visible_and_can_generate_an_edited_version(
     )
     assert refused.status_code == 409
     assert refused.json()["error"]["code"] == "CANDIDATE_IN_USE"
+
+
+def test_post_commit_file_cleanup_failure_does_not_change_command_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logged_messages: list[str] = []
+
+    def record_cleanup_error(message: str, *args: object) -> None:
+        logged_messages.append(message % args)
+
+    monkeypatch.setattr(
+        "app.services.domain_commands.logger.exception",
+        record_cleanup_error,
+    )
+
+    def fail_cleanup() -> None:
+        raise OSError("simulated cleanup failure")
+
+    mutation = MutationResult(
+        result={"deleted": True},
+        entity_type="character_candidate",
+        entity_id="93000000-0000-4000-8000-000000000001",
+        before_hash="before",
+        after_hash="after",
+        post_commit=fail_cleanup,
+    )
+
+    _run_post_commit_action(mutation)
+
+    assert len(logged_messages) == 1
+    assert "领域命令已提交，但提交后清理失败" in logged_messages[0]
 
 
 @pytest.mark.anyio

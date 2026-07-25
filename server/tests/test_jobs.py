@@ -962,7 +962,61 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
     assert storyboard_workspace["workflow"]["current_gate"] == "G4_STORYBOARD"
     assert storyboard_workspace["gate"]["status"] == "PENDING_REVIEW"
 
+    project_before_regeneration = (
+        await client.get(f"/api/v1/projects/{project_id}")
+    ).json()["data"]
+    regenerated = await client.post(
+        (
+            f"/api/v1/shot-specs/"
+            f"{storyboard_workspace['shots'][0]['shot_spec_id']}/regenerate"
+        ),
+        json={
+            "expected_version": project_before_regeneration["lock_version"],
+            "actor": "test-director",
+            "note": "保留叙事信息，强化人物行动动机",
+        },
+        headers={"Idempotency-Key": "storyboard-shot-regeneration-v1"},
+    )
+    assert regenerated.status_code == 202, regenerated.text
+    assert regenerated.headers["Idempotency-Replayed"] == "false"
+    assert regenerated.json()["data"]["job"]["job_type"] == "GENERATE_STORYBOARD_TAKE"
+
+    regenerated_replay = await client.post(
+        (
+            f"/api/v1/shot-specs/"
+            f"{storyboard_workspace['shots'][0]['shot_spec_id']}/regenerate"
+        ),
+        json={
+            "expected_version": project_before_regeneration["lock_version"],
+            "actor": "test-director",
+            "note": "保留叙事信息，强化人物行动动机",
+        },
+        headers={"Idempotency-Key": "storyboard-shot-regeneration-v1"},
+    )
+    assert regenerated_replay.status_code == 202
+    assert regenerated_replay.headers["Idempotency-Replayed"] == "true"
+    assert regenerated_replay.json()["data"] == regenerated.json()["data"]
+
+    assert await worker.run_once() is True
+    assert await worker.run_once() is True
+    storyboard_workspace = (
+        await client.get(f"/api/v1/projects/{project_id}/storyboard-workspace")
+    ).json()["data"]
+    assert storyboard_workspace["storyboard"]["status"] == "READY_FOR_REVIEW"
+    assert storyboard_workspace["storyboard"]["animatic_url"]
+
     with Session(get_engine(get_settings().database_url)) as session:
+        regeneration_audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == project_id,
+                    AuditLog.action == "REQUEST_STORYBOARD_SHOT_REGENERATION",
+                )
+            ).all()
+        )
+        assert len(regeneration_audits) == 1
+        assert regeneration_audits[0].entity_type == "job"
+        assert regeneration_audits[0].before_hash != regeneration_audits[0].after_hash
         generation_records = list(
             session.scalars(
                 select(GenerationRecord).where(GenerationRecord.project_id == project_id)

@@ -4,8 +4,8 @@ from fastapi import APIRouter, Depends, Header, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.trace import get_trace_id, success
-from app.db.models import Take
+from app.api.trace import success
+from app.db.models import Job, Take
 from app.db.session import get_session
 from app.domain.commands import CommandActor, DirectorCommand, ExpectedVersion
 from app.schemas import (
@@ -19,11 +19,7 @@ from app.schemas import (
 from app.services.domain_commands import dispatch_domain_command
 from app.services.projects import content_hash
 from app.services.prompt_enhancer import enhance_shot_description
-from app.services.takes import (
-    approve_candidate_identity,
-    create_shot_image_job,
-)
-from app.services.videos import create_shot_video_job
+from app.services.takes import approve_candidate_identity
 from app.services.workspace import shot_or_404, shot_to_read
 
 router = APIRouter(prefix="/api/v1", tags=["takes"])
@@ -91,6 +87,55 @@ def _dispatch_take_command(
     return execution.result, execution.idempotency_replayed
 
 
+def _dispatch_generation_command(
+    session: Session,
+    *,
+    shot_id: str,
+    command_type: str,
+    payload: dict[str, object],
+    idempotency_key: str,
+) -> tuple[dict[str, object], bool]:
+    shot = shot_or_404(session, shot_id)
+    project_id = shot.scene.episode.project_id
+    command_id = str(
+        uuid5(NAMESPACE_URL, f"{project_id}:domain-command:{idempotency_key}")
+    )
+    execution = dispatch_domain_command(
+        session,
+        project_id=project_id,
+        command=DirectorCommand(
+            command_id=command_id,
+            command_type=command_type,
+            actor=CommandActor(type="USER", id="demo-user"),
+            target_object_id=shot.id,
+            target_version_id=shot.id,
+            expected_version=ExpectedVersion(
+                object_lock_version=shot.lock_version,
+                target_version_id=shot.id,
+            ),
+            payload={**payload, "confirmed": True},
+            idempotency_key=idempotency_key,
+        ),
+        request_fingerprint=content_hash(
+            {
+                "route": f"shot-generation:{shot.id}:{command_type}",
+                "payload": payload,
+                "actor": "demo-user",
+                "confirmed": True,
+            }
+        ),
+    )
+    job = session.get(Job, execution.result.get("id"))
+    job_prefix = (
+        "shot-image"
+        if command_type == "REQUEST_SHOT_IMAGE_GENERATION"
+        else "shot-video"
+    )
+    requested_job_key = f"{job_prefix}:{shot.id}:{idempotency_key}"
+    reused_active_job = job is not None and job.idempotency_key != requested_job_key
+    return execution.result, execution.idempotency_replayed or reused_active_job
+
+
 @router.post("/shots/{shot_id}/prompt-enhance")
 async def enhance_prompt(
     shot_id: str,
@@ -113,15 +158,12 @@ def generate_take(
     idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=160),
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
-    job, replayed = create_shot_image_job(
+    job, replayed = _dispatch_generation_command(
         session,
         shot_id=shot_id,
-        prompt=payload.prompt,
-        model=payload.model,
-        resolution=payload.resolution,
-        aspect_ratio=payload.aspect_ratio,
-        request_idempotency_key=idempotency_key,
-        trace_id=get_trace_id(),
+        command_type="REQUEST_SHOT_IMAGE_GENERATION",
+        payload=payload.model_dump(mode="json"),
+        idempotency_key=idempotency_key,
     )
     response.headers["Idempotency-Replayed"] = str(replayed).lower()
     return success(job)
@@ -135,12 +177,12 @@ def generate_video_take(
     idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=160),
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
-    job, replayed = create_shot_video_job(
+    job, replayed = _dispatch_generation_command(
         session,
         shot_id=shot_id,
-        payload=payload,
-        request_idempotency_key=idempotency_key,
-        trace_id=get_trace_id(),
+        command_type="REQUEST_SHOT_VIDEO_GENERATION",
+        payload=payload.model_dump(mode="json"),
+        idempotency_key=idempotency_key,
     )
     response.headers["Idempotency-Replayed"] = str(replayed).lower()
     return success(job)
