@@ -4017,6 +4017,94 @@ def _revised_entity(
     return revised_scene, revised_line
 
 
+def _director_scene_timing(
+    session: Session,
+    *,
+    script_id: str,
+    scene_ordinal: int,
+) -> dict[str, object]:
+    cursor_ms = 0
+    scenes = list(
+        session.scalars(
+            select(ScriptScene)
+            .where(ScriptScene.script_version_id == script_id)
+            .order_by(ScriptScene.ordinal)
+        )
+    )
+    for scene in scenes:
+        lines = list(
+            session.scalars(
+                select(ScriptLine)
+                .where(ScriptLine.script_scene_id == scene.id)
+                .order_by(ScriptLine.ordinal)
+            )
+        )
+        dialogue_window_ms = sum(
+            line.estimated_duration_ms + line.pause_after_ms for line in lines
+        )
+        projected_scene_window_ms = max(scene.duration_ms, dialogue_window_ms)
+        if scene.ordinal == scene_ordinal:
+            return {
+                "script_version_id": script_id,
+                "script_scene_id": scene.id,
+                "scene_start_ms": cursor_ms,
+                "duration_budget_ms": scene.duration_ms,
+                "dialogue_window_ms": dialogue_window_ms,
+                "projected_scene_window_ms": projected_scene_window_ms,
+                "overflow_ms": max(0, dialogue_window_ms - scene.duration_ms),
+            }
+        cursor_ms += projected_scene_window_ms
+    raise RuntimeError("Director Timeline Preview 目标场景丢失")
+
+
+def _director_timeline_preview(
+    session: Session,
+    *,
+    project: Project,
+    base_script: ScriptVersion,
+    revised_script_id: str,
+    scene_ordinal: int,
+) -> dict[str, object]:
+    before = _director_scene_timing(
+        session,
+        script_id=base_script.id,
+        scene_ordinal=scene_ordinal,
+    )
+    after = _director_scene_timing(
+        session,
+        script_id=revised_script_id,
+        scene_ordinal=scene_ordinal,
+    )
+    delta_ms = int(after["projected_scene_window_ms"]) - int(
+        before["projected_scene_window_ms"]
+    )
+    after_overflow_ms = int(after["overflow_ms"])
+    risk = (
+        "DURATION_BUDGET_EXCEEDED"
+        if after_overflow_ms > 0
+        else "DOWNSTREAM_TIMING_SHIFT"
+        if delta_ms != 0
+        else "NO_TIMING_CHANGE"
+    )
+    return {
+        "schema_version": "director-timeline-preview-v1",
+        "projection_mode": "READ_ONLY",
+        "canonical_source": "SCRIPT",
+        "scene_logical_id": (
+            f"script-scene:{project.id}:{base_script.episode_ordinal}:{scene_ordinal}"
+        ),
+        "formal_timeline_version_id": project.current_timeline_version_id,
+        "formal_timeline_unchanged": True,
+        "media_generation": False,
+        "affected_tracks": ["DIALOGUE", "SUBTITLE"],
+        "before": before,
+        "after": after,
+        "downstream_shift_ms": delta_ms,
+        "risk": risk,
+        "validation_status": "REVIEW_REQUIRED" if after_overflow_ms > 0 else "PASS",
+    }
+
+
 def _execute_apply_director_proposal(
     session: Session,
     *,
@@ -4164,6 +4252,13 @@ def _execute_apply_director_proposal(
         ),
         "media_generation": False,
     }
+    impact["comparison"]["timeline_preview"] = _director_timeline_preview(
+        session,
+        project=project,
+        base_script=base_script,
+        revised_script_id=str(result["id"]),
+        scene_ordinal=int(proposal["scene_ordinal"]),
+    )
     impact["invalidated"] = downstream.get("affected_objects", [])
     impact["invalidation_result"] = invalidation_result
     change_set.impact_json = canonical_json(impact)

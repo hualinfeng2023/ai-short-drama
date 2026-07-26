@@ -9,6 +9,7 @@ import {
 } from 'lucide-react'
 import type { DirectorReviewProposal } from '../../api/client'
 import { Button, StatusBadge } from '../ui'
+import { DirectorTimelinePreview } from './DirectorTimelinePreview'
 
 export type DirectorReviewAction =
   | { type: 'EXECUTE'; proposal: DirectorReviewProposal; optionId: string }
@@ -159,22 +160,27 @@ export function DirectorReviewCard({
       ) : null}
 
       {proposal.comparison ? (
-        <div className="director-review__comparison">
-          <article>
-            <span>修改前</span>
-            <p>{directorValues(proposal.comparison.before)}</p>
-          </article>
-          <article>
-            <span>修改后</span>
-            <p>{directorValues(proposal.comparison.after)}</p>
-          </article>
-          <small>
-            估算对白窗口：
-            {(proposal.comparison.estimatedDurationBeforeMs / 1000).toFixed(1)} 秒
-            {' → '}
-            {(proposal.comparison.estimatedDurationAfterMs / 1000).toFixed(1)} 秒
-          </small>
-        </div>
+        <>
+          <div className="director-review__comparison">
+            <article>
+              <span>修改前</span>
+              <p>{directorValues(proposal.comparison.before)}</p>
+            </article>
+            <article>
+              <span>修改后</span>
+              <p>{directorValues(proposal.comparison.after)}</p>
+            </article>
+            <small>
+              估算台词时长（不含停顿）：
+              {(proposal.comparison.estimatedDurationBeforeMs / 1000).toFixed(1)} 秒
+              {' → '}
+              {(proposal.comparison.estimatedDurationAfterMs / 1000).toFixed(1)} 秒
+            </small>
+          </div>
+          {proposal.comparison.timelinePreview ? (
+            <DirectorTimelinePreview preview={proposal.comparison.timelinePreview} />
+          ) : null}
+        </>
       ) : null}
 
       {proposal.status === 'APPLIED_PENDING_APPROVAL' ? (

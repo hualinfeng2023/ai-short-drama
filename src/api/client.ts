@@ -2142,6 +2142,38 @@ export interface DirectorReviewOption {
   estimatedCostUsd: number
 }
 
+export interface DirectorTimelinePreview {
+  schemaVersion: 'director-timeline-preview-v1'
+  projectionMode: 'READ_ONLY'
+  canonicalSource: 'SCRIPT'
+  sceneLogicalId: string
+  formalTimelineVersionId: string | null
+  formalTimelineUnchanged: boolean
+  mediaGeneration: boolean
+  affectedTracks: Array<'DIALOGUE' | 'SUBTITLE'>
+  before: {
+    scriptVersionId: string
+    scriptSceneId: string
+    sceneStartMs: number
+    durationBudgetMs: number
+    dialogueWindowMs: number
+    projectedSceneWindowMs: number
+    overflowMs: number
+  }
+  after: {
+    scriptVersionId: string
+    scriptSceneId: string
+    sceneStartMs: number
+    durationBudgetMs: number
+    dialogueWindowMs: number
+    projectedSceneWindowMs: number
+    overflowMs: number
+  }
+  downstreamShiftMs: number
+  risk: 'DURATION_BUDGET_EXCEEDED' | 'DOWNSTREAM_TIMING_SHIFT' | 'NO_TIMING_CHANGE'
+  validationStatus: 'REVIEW_REQUIRED' | 'PASS'
+}
+
 export interface DirectorReviewProposal {
   proposalId: string
   projectId: string
@@ -2180,6 +2212,7 @@ export interface DirectorReviewProposal {
     estimatedDurationBeforeMs: number
     estimatedDurationAfterMs: number
     mediaGeneration: boolean
+    timelinePreview?: DirectorTimelinePreview
   } | null
   invalidated: Array<{ type: string; id: string; nextStatus?: string }>
   approvalResult: { decision: string; actor: string; at: string } | null
@@ -2236,6 +2269,37 @@ interface ApiDirectorReviewProposal {
     estimated_duration_before_ms: number
     estimated_duration_after_ms: number
     media_generation: boolean
+    timeline_preview?: {
+      schema_version: 'director-timeline-preview-v1'
+      projection_mode: 'READ_ONLY'
+      canonical_source: 'SCRIPT'
+      scene_logical_id: string
+      formal_timeline_version_id: string | null
+      formal_timeline_unchanged: boolean
+      media_generation: boolean
+      affected_tracks: Array<'DIALOGUE' | 'SUBTITLE'>
+      before: {
+        script_version_id: string
+        script_scene_id: string
+        scene_start_ms: number
+        duration_budget_ms: number
+        dialogue_window_ms: number
+        projected_scene_window_ms: number
+        overflow_ms: number
+      }
+      after: {
+        script_version_id: string
+        script_scene_id: string
+        scene_start_ms: number
+        duration_budget_ms: number
+        dialogue_window_ms: number
+        projected_scene_window_ms: number
+        overflow_ms: number
+      }
+      downstream_shift_ms: number
+      risk: 'DURATION_BUDGET_EXCEEDED' | 'DOWNSTREAM_TIMING_SHIFT' | 'NO_TIMING_CHANGE'
+      validation_status: 'REVIEW_REQUIRED' | 'PASS'
+    }
   } | null
   invalidated: Array<{ type: string; id: string; next_status?: string }>
   approval_result: { decision: string; actor: string; at: string } | null
@@ -2302,6 +2366,57 @@ function mapDirectorReviewProposal(
           estimatedDurationAfterMs:
             proposal.comparison.estimated_duration_after_ms,
           mediaGeneration: proposal.comparison.media_generation,
+          ...(proposal.comparison.timeline_preview
+            ? {
+                timelinePreview: {
+                  schemaVersion: proposal.comparison.timeline_preview.schema_version,
+                  projectionMode: proposal.comparison.timeline_preview.projection_mode,
+                  canonicalSource: proposal.comparison.timeline_preview.canonical_source,
+                  sceneLogicalId: proposal.comparison.timeline_preview.scene_logical_id,
+                  formalTimelineVersionId:
+                    proposal.comparison.timeline_preview.formal_timeline_version_id,
+                  formalTimelineUnchanged:
+                    proposal.comparison.timeline_preview.formal_timeline_unchanged,
+                  mediaGeneration: proposal.comparison.timeline_preview.media_generation,
+                  affectedTracks: proposal.comparison.timeline_preview.affected_tracks,
+                  before: {
+                    scriptVersionId:
+                      proposal.comparison.timeline_preview.before.script_version_id,
+                    scriptSceneId:
+                      proposal.comparison.timeline_preview.before.script_scene_id,
+                    sceneStartMs:
+                      proposal.comparison.timeline_preview.before.scene_start_ms,
+                    durationBudgetMs:
+                      proposal.comparison.timeline_preview.before.duration_budget_ms,
+                    dialogueWindowMs:
+                      proposal.comparison.timeline_preview.before.dialogue_window_ms,
+                    projectedSceneWindowMs:
+                      proposal.comparison.timeline_preview.before.projected_scene_window_ms,
+                    overflowMs: proposal.comparison.timeline_preview.before.overflow_ms,
+                  },
+                  after: {
+                    scriptVersionId:
+                      proposal.comparison.timeline_preview.after.script_version_id,
+                    scriptSceneId:
+                      proposal.comparison.timeline_preview.after.script_scene_id,
+                    sceneStartMs:
+                      proposal.comparison.timeline_preview.after.scene_start_ms,
+                    durationBudgetMs:
+                      proposal.comparison.timeline_preview.after.duration_budget_ms,
+                    dialogueWindowMs:
+                      proposal.comparison.timeline_preview.after.dialogue_window_ms,
+                    projectedSceneWindowMs:
+                      proposal.comparison.timeline_preview.after.projected_scene_window_ms,
+                    overflowMs: proposal.comparison.timeline_preview.after.overflow_ms,
+                  },
+                  downstreamShiftMs:
+                    proposal.comparison.timeline_preview.downstream_shift_ms,
+                  risk: proposal.comparison.timeline_preview.risk,
+                  validationStatus:
+                    proposal.comparison.timeline_preview.validation_status,
+                },
+              }
+            : {}),
         }
       : null,
     invalidated: proposal.invalidated.map((item) => ({

@@ -539,6 +539,21 @@ async def test_director_proposal_review_execute_compare_and_rollback(
     assert result["script"]["version"] == 2
     assert result["proposal"]["comparison"]["media_generation"] is False
     assert result["proposal"]["comparison"]["base_script_version_id"] == SCRIPT_ID
+    timeline_preview = result["proposal"]["comparison"]["timeline_preview"]
+    assert timeline_preview["schema_version"] == "director-timeline-preview-v1"
+    assert timeline_preview["projection_mode"] == "READ_ONLY"
+    assert timeline_preview["canonical_source"] == "SCRIPT"
+    assert timeline_preview["scene_logical_id"] == f"script-scene:{PROJECT_ID}:1:1"
+    assert timeline_preview["formal_timeline_unchanged"] is True
+    assert timeline_preview["media_generation"] is False
+    assert timeline_preview["affected_tracks"] == ["DIALOGUE", "SUBTITLE"]
+    assert timeline_preview["before"]["script_version_id"] == SCRIPT_ID
+    assert timeline_preview["after"]["script_version_id"] == result["script"]["id"]
+    assert timeline_preview["before"]["duration_budget_ms"] == 8_000
+    assert timeline_preview["downstream_shift_ms"] == (
+        timeline_preview["after"]["projected_scene_window_ms"]
+        - timeline_preview["before"]["projected_scene_window_ms"]
+    )
     revised_script_id = result["script"]["id"]
     film_ir = (await client.get(f"/api/v1/projects/{PROJECT_ID}/film-ir")).json()["data"]
     proposal_node = next(
