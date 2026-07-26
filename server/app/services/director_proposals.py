@@ -16,12 +16,9 @@ from app.db.models import (
     ScriptVersion,
     Shot,
     ShotSpec,
-    Take,
-    TimelineClip,
-    TimelineItem,
 )
 from app.domain.director import DirectorProposalRequest
-from app.services.projects import content_hash
+from app.services.dependency_analysis import analyze_script_scene_dependencies
 from app.services.text_provider import TextProviderError, generate_director_scene_review
 from app.services.workspace import project_or_404
 
@@ -116,90 +113,11 @@ def _impact(
     project_id: str,
     script_scene: ScriptScene,
 ) -> dict[str, object]:
-    specs = list(
-        session.scalars(select(ShotSpec).where(ShotSpec.script_scene_id == script_scene.id))
+    return analyze_script_scene_dependencies(
+        session,
+        project_id=project_id,
+        script_scene_id=script_scene.id,
     )
-    shot_ids = {item.shot_id for item in specs}
-    take_rows = (
-        list(session.scalars(select(Take).where(Take.shot_id.in_(shot_ids)))) if shot_ids else []
-    )
-    take_ids = {item.id for item in take_rows}
-    timeline_item_ids = (
-        set(
-            session.scalars(
-                select(TimelineItem.id).where(
-                    (TimelineItem.shot_id.in_(shot_ids)) | (TimelineItem.take_id.in_(take_ids))
-                )
-            )
-        )
-        if shot_ids or take_ids
-        else set()
-    )
-    timeline_clip_ids = (
-        set(
-            session.scalars(
-                select(TimelineClip.id).where(
-                    TimelineClip.project_id == project_id,
-                    (
-                        (TimelineClip.source_entity_type == "SHOT")
-                        & TimelineClip.source_entity_id.in_(shot_ids)
-                    )
-                    | (
-                        (TimelineClip.source_entity_type == "TAKE")
-                        & TimelineClip.source_entity_id.in_(take_ids)
-                    ),
-                )
-            )
-        )
-        if shot_ids or take_ids
-        else set()
-    )
-    preserved = list(
-        session.scalars(
-            select(Take).where(
-                Take.shot_id.not_in(shot_ids),
-                Take.approval == "APPROVED",
-            )
-        )
-    )
-    return {
-        "affected_objects": [
-            *[{"type": "Shot", "id": value, "next_status": "SUSPECT"} for value in shot_ids],
-            *[
-                {
-                    "type": "Take",
-                    "id": value.id,
-                    "next_status": "SUSPECT",
-                    "approval_preserved": value.approval == "APPROVED",
-                }
-                for value in take_rows
-            ],
-            *[
-                {"type": "TimelineClip", "id": value, "next_status": "SUSPECT"}
-                for value in timeline_item_ids | timeline_clip_ids
-            ],
-        ],
-        "preserved_objects": [
-            {
-                "type": "Take",
-                "id": item.id,
-                "approval": item.approval,
-                "state_hash": content_hash(
-                    {
-                        "status": item.status,
-                        "approval": item.approval,
-                        "asset_id": item.asset_id,
-                        "is_current": item.is_current,
-                    }
-                ),
-            }
-            for item in preserved
-        ],
-        "shot_ids": sorted(shot_ids),
-        "take_ids": sorted(take_ids),
-        "timeline_item_ids": sorted(timeline_item_ids),
-        "timeline_clip_ids": sorted(timeline_clip_ids),
-    }
 
 
 async def prepare_director_proposal(

@@ -1259,6 +1259,47 @@ class TimelineItem(Base):
     end_ms: Mapped[int] = mapped_column(Integer)
 
 
+class DependencyEdge(Base):
+    __tablename__ = "dependency_edges"
+    __table_args__ = (
+        UniqueConstraint(
+            "change_set_id",
+            "source_type",
+            "source_id",
+            "target_type",
+            "target_id",
+            "relation",
+            name="uq_dependency_edges_change_set_lineage",
+        ),
+        Index(
+            "ix_dependency_edges_project_source",
+            "project_id",
+            "source_type",
+            "source_id",
+        ),
+        Index(
+            "ix_dependency_edges_project_target",
+            "project_id",
+            "target_type",
+            "target_id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"))
+    change_set_id: Mapped[str] = mapped_column(ForeignKey("change_sets.id"), index=True)
+    source_type: Mapped[str] = mapped_column(String(48))
+    source_id: Mapped[str] = mapped_column(String(36))
+    source_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    target_type: Mapped[str] = mapped_column(String(48))
+    target_id: Mapped[str] = mapped_column(String(36))
+    target_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    relation: Mapped[str] = mapped_column(String(64))
+    evidence: Mapped[str] = mapped_column(Text)
+    inferred: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class ChangeSet(Base):
     __tablename__ = "change_sets"
 

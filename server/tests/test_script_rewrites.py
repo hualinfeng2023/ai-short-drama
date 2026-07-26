@@ -249,17 +249,26 @@ async def test_excerpt_rewrite_retry_history_and_apply(client: AsyncClient) -> N
         json=request,
     )
     assert generated.status_code == 201, generated.text
+    assert generated.headers["Idempotency-Replayed"] == "false"
     first = generated.json()["data"]
     assert first["version"] == 1
     assert first["original_text"] == "你现在必须离开这里"
     assert first["proposed_text"] != first["original_text"]
     assert first["status"] == "GENERATED"
+    replayed_generated = await client.post(
+        f"/api/v1/scripts/{SCRIPT_ID}/lines/{LINE_ID}/rewrites",
+        json=request,
+    )
+    assert replayed_generated.status_code == 201
+    assert replayed_generated.headers["Idempotency-Replayed"] == "true"
+    assert replayed_generated.json()["data"] == first
 
     retried = await client.post(
         f"/api/v1/scripts/{SCRIPT_ID}/lines/{LINE_ID}/rewrites",
         json={**request, "parent_revision_id": first["id"]},
     )
     assert retried.status_code == 201, retried.text
+    assert retried.headers["Idempotency-Replayed"] == "false"
     second = retried.json()["data"]
     assert second["version"] == 2
     assert second["parent_revision_id"] == first["id"]
@@ -277,10 +286,22 @@ async def test_excerpt_rewrite_retry_history_and_apply(client: AsyncClient) -> N
         },
     )
     assert applied.status_code == 200, applied.text
+    assert applied.headers["Idempotency-Replayed"] == "false"
     result = applied.json()["data"]
     assert result["rewrite"]["status"] == "APPLIED"
     assert result["script"]["version"] == 2
     assert result["script"]["project_lock_version"] == 9
+    replayed_applied = await client.post(
+        f"/api/v1/script-excerpt-rewrites/{first['id']}/apply",
+        json={
+            "expected_version": 8,
+            "script_id": SCRIPT_ID,
+            "line_id": LINE_ID,
+        },
+    )
+    assert replayed_applied.status_code == 200
+    assert replayed_applied.headers["Idempotency-Replayed"] == "true"
+    assert replayed_applied.json()["data"] == result
 
     factory = sessionmaker(
         bind=get_engine(get_settings().database_url),
@@ -303,6 +324,28 @@ async def test_excerpt_rewrite_retry_history_and_apply(client: AsyncClient) -> N
             json.loads(revised_script.payload_json)["scenes"][0]["lines"][0]["text"]
             == revised_line.text
         )
+        creation_audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.action == "CREATE_SCRIPT_EXCERPT_REWRITE",
+                )
+            ).all()
+        )
+        assert len(creation_audits) == 2
+        assert {audit.entity_type for audit in creation_audits} == {"script_excerpt_revision"}
+        apply_audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.action == "APPLY_SCRIPT_EXCERPT_REWRITE",
+                    AuditLog.entity_id == revised_script.id,
+                )
+            ).all()
+        )
+        assert len(apply_audits) == 1
+        assert apply_audits[0].entity_type == "script_version"
+        assert apply_audits[0].before_hash != apply_audits[0].after_hash
 
     new_history = await client.get(
         f"/api/v1/scripts/{revised_script.id}/lines/{revised_line.id}/rewrites"
@@ -496,6 +539,21 @@ async def test_director_proposal_review_execute_compare_and_rollback(
     assert result["script"]["version"] == 2
     assert result["proposal"]["comparison"]["media_generation"] is False
     assert result["proposal"]["comparison"]["base_script_version_id"] == SCRIPT_ID
+    timeline_preview = result["proposal"]["comparison"]["timeline_preview"]
+    assert timeline_preview["schema_version"] == "director-timeline-preview-v1"
+    assert timeline_preview["projection_mode"] == "READ_ONLY"
+    assert timeline_preview["canonical_source"] == "SCRIPT"
+    assert timeline_preview["scene_logical_id"] == f"script-scene:{PROJECT_ID}:1:1"
+    assert timeline_preview["formal_timeline_unchanged"] is True
+    assert timeline_preview["media_generation"] is False
+    assert timeline_preview["affected_tracks"] == ["DIALOGUE", "SUBTITLE"]
+    assert timeline_preview["before"]["script_version_id"] == SCRIPT_ID
+    assert timeline_preview["after"]["script_version_id"] == result["script"]["id"]
+    assert timeline_preview["before"]["duration_budget_ms"] == 8_000
+    assert timeline_preview["downstream_shift_ms"] == (
+        timeline_preview["after"]["projected_scene_window_ms"]
+        - timeline_preview["before"]["projected_scene_window_ms"]
+    )
     revised_script_id = result["script"]["id"]
     film_ir = (await client.get(f"/api/v1/projects/{PROJECT_ID}/film-ir")).json()["data"]
     proposal_node = next(
@@ -505,9 +563,33 @@ async def test_director_proposal_review_execute_compare_and_rollback(
     )
     assert proposal_node["canonical_kind"] == "DERIVED"
     assert proposal_node["canonical_status"] == "APPLIED_PENDING_APPROVAL"
+    film_ir_edges = film_ir["edges"]
     assert ("PRESERVES", False) in {
-        (edge["relation"], edge["inferred"]) for edge in film_ir["edges"]
+        (edge["relation"], edge["inferred"]) for edge in film_ir_edges
     }
+    logical_script_scene_id = f"script-scene:{PROJECT_ID}:1:1"
+    assert any(
+        edge["relation"] == "PROPOSES_CHANGE_TO"
+        and edge["source"]["type"] == "DirectorProposal"
+        and edge["source"]["id"] == proposal["proposal_id"]
+        and edge["target"]["type"] == "ScriptScene"
+        and edge["target"]["id"] == logical_script_scene_id
+        for edge in film_ir_edges
+    )
+    canvas = (
+        await client.get(f"/api/v1/projects/{PROJECT_ID}/canvas-projection")
+    ).json()["data"]
+    assert any(
+        node["ref"]["type"] == "DirectorProposal"
+        and node["ref"]["id"] == proposal["proposal_id"]
+        for node in canvas["nodes"]
+    )
+    assert any(
+        edge["relation"] == "PROPOSES_CHANGE_TO"
+        and edge["source"]["id"] == proposal["proposal_id"]
+        and edge["target"]["id"] == logical_script_scene_id
+        for edge in canvas["edges"]
+    )
 
     execute_replay = await client.post(
         f"/api/v1/director-review-proposals/{proposal['proposal_id']}/execute",
@@ -648,6 +730,98 @@ async def test_director_proposal_reject_and_approve_state_paths(
     assert approved_data["status"] == "APPROVED"
     assert approved_data["result_script_version_id"] == applied_data["script"]["id"]
     assert approved_data["approval_result"]["decision"] == "APPROVE"
+
+
+@pytest.mark.anyio
+async def test_director_approval_requires_reason_when_timeline_preview_needs_review(
+    client: AsyncClient,
+) -> None:
+    prepare_script()
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        scene = session.get(ScriptScene, SCENE_ID)
+        script = session.get(ScriptVersion, SCRIPT_ID)
+        assert scene is not None
+        assert script is not None
+        scene.duration_ms = 2_000
+        payload = json.loads(script.payload_json)
+        payload["estimated_duration_ms"] = 2_000
+        payload["scenes"][0]["duration_ms"] = 2_000
+        script.payload_json = canonical_json(payload)
+        script.content_hash = content_hash(payload)
+        script.estimated_duration_ms = 2_000
+        session.commit()
+
+    proposal = (
+        await client.post(
+            f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+            json={
+                "expected_version": 8,
+                "target_type": "SCRIPT_SCENE",
+                "target_id": SCENE_ID,
+                "issue_types": ["AI_DIALOGUE"],
+                "actor": "test-director",
+            },
+            headers={"Idempotency-Key": "director-risk-create-v1"},
+        )
+    ).json()["data"]
+    applied = await client.post(
+        f"/api/v1/director-review-proposals/{proposal['proposal_id']}/execute",
+        json={
+            "expected_version": 8,
+            "option_id": proposal["recommended_option"],
+            "actor": "test-director",
+            "confirmed": True,
+        },
+        headers={"Idempotency-Key": "director-risk-apply-v1"},
+    )
+    assert applied.status_code == 200, applied.text
+    timeline_preview = applied.json()["data"]["proposal"]["comparison"]["timeline_preview"]
+    assert timeline_preview["validation_status"] == "REVIEW_REQUIRED"
+    assert timeline_preview["risk"] == "DURATION_BUDGET_EXCEEDED"
+
+    blocked = await client.post(
+        f"/api/v1/director-review-proposals/{proposal['proposal_id']}/decision",
+        json={
+            "expected_version": 9,
+            "decision": "APPROVE",
+            "actor": "test-director",
+            "confirmed": True,
+        },
+        headers={"Idempotency-Key": "director-risk-approve-blocked-v1"},
+    )
+    assert blocked.status_code == 409, blocked.text
+    assert (
+        blocked.json()["error"]["code"]
+        == "DIRECTOR_APPROVAL_OVERRIDE_REASON_REQUIRED"
+    )
+
+    override_reason = "对白超出预算，但已确认下一场可以顺延并会继续复核。"
+    approved = await client.post(
+        f"/api/v1/director-review-proposals/{proposal['proposal_id']}/decision",
+        json={
+            "expected_version": 9,
+            "decision": "APPROVE",
+            "actor": "test-director",
+            "confirmed": True,
+            "override_reason": override_reason,
+        },
+        headers={"Idempotency-Key": "director-risk-approve-override-v1"},
+    )
+    assert approved.status_code == 200, approved.text
+    approved_data = approved.json()["data"]
+    assert approved_data["status"] == "APPROVED"
+    assert approved_data["approval_result"] == {
+        "decision": "APPROVE",
+        "actor": "test-director",
+        "at": approved_data["approval_result"]["at"],
+        "validation_status": "REVIEW_REQUIRED",
+        "risk": "DURATION_BUDGET_EXCEEDED",
+        "override_reason": override_reason,
+    }
 
 
 @pytest.mark.anyio

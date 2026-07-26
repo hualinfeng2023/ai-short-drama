@@ -2,11 +2,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ApiError,
   analyzeRelationshipRevisionImpact,
+  createDirectorReviewProposal,
   createRelationshipGraphRevision,
   createProjectDraft,
+  decideDirectorReviewProposal,
   deleteCharacterVisualCandidate,
   deleteProjectRecord,
   enhanceShotPrompt,
+  fetchCanvasProjection,
   fetchJobs,
   fetchProviderSettings,
   fetchProjectReadiness,
@@ -85,6 +88,30 @@ const apiProject = {
   export_ready: false,
   created_at: '2026-07-13T12:00:00Z',
   updated_at: '2026-07-13T12:00:00Z',
+} as const
+
+const apiCanvasProjection = {
+  schema_version: 'film-canvas-projection-v1',
+  project_id: apiProject.id,
+  project_lock_version: 3,
+  source_projection: 'film-ir-projection-v1',
+  nodes: [{
+    ref: { type: 'Scene', id: 'scene-1', version_id: 'scene-v2' },
+    canonical_kind: 'CANONICAL',
+    canonical_status: 'ACTIVE',
+    approval_status: 'DRAFT',
+    label: '便利店停电',
+    group_key: 'episode:1',
+    detail_route: `/projects/${apiProject.id}/episodes/episode-1`,
+    read_only: true,
+  }],
+  edges: [],
+  view_state_contract: {
+    schema_version: 'film-canvas-view-state-v1',
+    persistence: 'CLIENT_LOCAL',
+    allowed_fields: ['x', 'y', 'viewport.zoom'],
+    forbidden_business_fields: ['approval_status', 'domain_payload'],
+  },
 } as const
 
 const apiRelationshipGraph = {
@@ -292,6 +319,39 @@ describe('project readiness client', () => {
   })
 })
 
+describe('canvas projection client', () => {
+  it('maps the read-only Film IR projection without changing its stable references', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: apiCanvasProjection,
+      trace_id: 'trace-canvas',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const canvas = await fetchCanvasProjection(apiProject.id)
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      `/api/v1/projects/${apiProject.id}/canvas-projection`,
+    )
+    expect(canvas).toMatchObject({
+      schemaVersion: 'film-canvas-projection-v1',
+      sourceProjection: 'film-ir-projection-v1',
+      projectId: apiProject.id,
+      projectLockVersion: 3,
+    })
+    expect(canvas.nodes[0]).toMatchObject({
+      ref: { type: 'Scene', id: 'scene-1', versionId: 'scene-v2' },
+      approvalStatus: 'DRAFT',
+      readOnly: true,
+    })
+    expect(canvas.viewStateContract).toEqual({
+      schemaVersion: 'film-canvas-view-state-v1',
+      persistence: 'CLIENT_LOCAL',
+      allowedFields: ['x', 'y', 'viewport.zoom'],
+      forbiddenBusinessFields: ['approval_status', 'domain_payload'],
+    })
+  })
+})
+
 describe('job error details', () => {
   it('maps persisted relationship blockers for the task page', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
@@ -356,6 +416,57 @@ describe('legacy director proposal compatibility', () => {
 })
 
 describe('director review proposal client', () => {
+  it('sends an explicit Scene target without changing the command contract', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        proposal_id: '44444444-4444-4444-8444-444444444444',
+        project_id: apiProject.id,
+        issue_type: 'STORY_LOGIC',
+        observation: '场景因果需要复核。',
+        rationale: '通过明确 lineage 解析剧本场次。',
+        target_objects: [],
+        alternatives: [],
+        recommended_option: '',
+        confidence: 0.8,
+        affected_objects: [],
+        preserved_objects: [],
+        estimated_time_seconds: 1,
+        estimated_cost_usd: 0,
+        requires_confirmation: true,
+        validation_plan: [],
+        base_script_version_id: '66666666-6666-4666-8666-666666666666',
+        script_scene_id: '55555555-5555-4555-8555-555555555555',
+        scene_ordinal: 1,
+        provider: { provider: 'mock', model: 'director-v1', request_id: null },
+        status: 'PROPOSED',
+        result_script_version_id: null,
+        rollback_script_version_id: null,
+        comparison: null,
+        invalidated: [],
+        approval_result: null,
+        created_at: '2026-07-25T00:00:00Z',
+      },
+      trace_id: 'trace-director-review',
+    }), { status: 201, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await createDirectorReviewProposal(apiProject.id, {
+      expectedVersion: 8,
+      targetType: 'SCENE',
+      targetId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      issueTypes: ['STORY_LOGIC'],
+    })
+
+    const request = fetchMock.mock.calls[0]![1] as RequestInit
+    expect(JSON.parse(String(request.body))).toMatchObject({
+      expected_version: 8,
+      target_type: 'SCENE',
+      target_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      issue_types: ['STORY_LOGIC'],
+    })
+    expect(request.headers).toMatchObject({ 'Idempotency-Key': expect.any(String) })
+  })
+
   it('maps structured options, impact protection, and low-cost comparison', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
       data: [{
@@ -406,7 +517,7 @@ describe('director review proposal client', () => {
         script_scene_id: '55555555-5555-4555-8555-555555555555',
         scene_ordinal: 1,
         provider: { provider: 'mock', model: 'director-v1', request_id: null },
-        status: 'APPLIED_PENDING_APPROVAL',
+        status: 'APPROVED',
         result_script_version_id: '88888888-8888-4888-8888-888888888888',
         rollback_script_version_id: null,
         comparison: {
@@ -415,9 +526,47 @@ describe('director review proposal client', () => {
           estimated_duration_before_ms: 3200,
           estimated_duration_after_ms: 1800,
           media_generation: false,
+          timeline_preview: {
+            schema_version: 'director-timeline-preview-v1',
+            projection_mode: 'READ_ONLY',
+            canonical_source: 'SCRIPT',
+            scene_logical_id: `script-scene:${apiProject.id}:1:1`,
+            formal_timeline_version_id: '99999999-9999-4999-8999-999999999999',
+            formal_timeline_unchanged: true,
+            media_generation: false,
+            affected_tracks: ['DIALOGUE', 'SUBTITLE'],
+            before: {
+              script_version_id: '66666666-6666-4666-8666-666666666666',
+              script_scene_id: '55555555-5555-4555-8555-555555555555',
+              scene_start_ms: 0,
+              duration_budget_ms: 8000,
+              dialogue_window_ms: 3200,
+              projected_scene_window_ms: 8000,
+              overflow_ms: 0,
+            },
+            after: {
+              script_version_id: '88888888-8888-4888-8888-888888888888',
+              script_scene_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+              scene_start_ms: 0,
+              duration_budget_ms: 8000,
+              dialogue_window_ms: 9200,
+              projected_scene_window_ms: 9200,
+              overflow_ms: 1200,
+            },
+            downstream_shift_ms: 1200,
+            risk: 'DURATION_BUDGET_EXCEEDED',
+            validation_status: 'REVIEW_REQUIRED',
+          },
         },
         invalidated: [{ type: 'Shot', id: 'shot-id', next_status: 'SUSPECT' }],
-        approval_result: null,
+        approval_result: {
+          decision: 'APPROVE',
+          actor: '创作者',
+          at: '2026-07-25T00:05:00Z',
+          validation_status: 'REVIEW_REQUIRED',
+          risk: 'DURATION_BUDGET_EXCEEDED',
+          override_reason: '对白略超预算，但已确认下一场可以顺延。',
+        },
         created_at: '2026-07-25T00:00:00Z',
       }],
       trace_id: 'trace-director-review',
@@ -429,7 +578,7 @@ describe('director review proposal client', () => {
       issueType: 'AI_DIALOGUE',
       recommendedOption: 'dialogue-concise',
       sceneOrdinal: 1,
-      status: 'APPLIED_PENDING_APPROVAL',
+      status: 'APPROVED',
       estimatedCostUsd: 0,
     })
     expect(proposal.alternatives[0].proposedChange.changes).toEqual({
@@ -439,8 +588,60 @@ describe('director review proposal client', () => {
       estimatedDurationBeforeMs: 3200,
       estimatedDurationAfterMs: 1800,
       mediaGeneration: false,
+      timelinePreview: {
+        schemaVersion: 'director-timeline-preview-v1',
+        projectionMode: 'READ_ONLY',
+        canonicalSource: 'SCRIPT',
+        formalTimelineUnchanged: true,
+        mediaGeneration: false,
+        affectedTracks: ['DIALOGUE', 'SUBTITLE'],
+        before: {
+          scriptVersionId: '66666666-6666-4666-8666-666666666666',
+          dialogueWindowMs: 3200,
+        },
+        after: {
+          scriptVersionId: '88888888-8888-4888-8888-888888888888',
+          dialogueWindowMs: 9200,
+          overflowMs: 1200,
+        },
+        downstreamShiftMs: 1200,
+        risk: 'DURATION_BUDGET_EXCEEDED',
+        validationStatus: 'REVIEW_REQUIRED',
+      },
     })
     expect(proposal.preservedObjects[0].approval).toBe('APPROVED')
+    expect(proposal.approvalResult).toMatchObject({
+      decision: 'APPROVE',
+      validationStatus: 'REVIEW_REQUIRED',
+      risk: 'DURATION_BUDGET_EXCEEDED',
+      overrideReason: '对白略超预算，但已确认下一场可以顺延。',
+    })
+  })
+
+  it('sends a trimmed override reason for risk-aware approval', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: { code: 'TEST_STOP', message: '只验证请求合同' },
+      trace_id: 'trace-director-decision',
+    }), { status: 409, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(decideDirectorReviewProposal(
+      '44444444-4444-4444-8444-444444444444',
+      {
+        expectedVersion: 9,
+        decision: 'APPROVE',
+        overrideReason: '  对白略超预算，但下一场可以顺延。  ',
+      },
+    )).rejects.toBeInstanceOf(ApiError)
+
+    const request = fetchMock.mock.calls[0]![1] as RequestInit
+    expect(JSON.parse(String(request.body))).toMatchObject({
+      expected_version: 9,
+      decision: 'APPROVE',
+      actor: '创作者',
+      confirmed: true,
+      override_reason: '对白略超预算，但下一场可以顺延。',
+    })
   })
 })
 

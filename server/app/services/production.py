@@ -123,6 +123,7 @@ def approve_proposal(
     assumptions_confirmed: bool,
     actor: str,
     trace_id: str,
+    commit: bool = True,
 ) -> tuple[StoryRead, JobRead, bool]:
     project = project_or_404(session, project_id)
     proposal = session.scalar(
@@ -150,7 +151,9 @@ def approve_proposal(
     )
     if existing_story is not None:
         job, _ = _candidate_job(session, project=project, story=existing_story, trace_id=trace_id)
-        session.commit()
+        session.flush()
+        if commit:
+            session.commit()
         session.refresh(job)
         return story_to_read(existing_story), job_to_read(job), True
     if not assumptions_confirmed:
@@ -239,7 +242,9 @@ def approve_proposal(
         event_type="story.approved",
         payload={"story_version_id": story.id, "version": story.version},
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     session.refresh(job)
     return story_to_read(story), job_to_read(job), replayed
 
@@ -295,7 +300,11 @@ def list_characters(session: Session, project_id: str) -> list[CharacterRead]:
 
 
 def request_character_candidates(
-    session: Session, *, project_id: str, trace_id: str
+    session: Session,
+    *,
+    project_id: str,
+    trace_id: str,
+    commit: bool = True,
 ) -> tuple[JobRead, bool]:
     project = project_or_404(session, project_id)
     if project.current_story_version_id is None:
@@ -313,7 +322,9 @@ def request_character_candidates(
     if story is None:
         raise ValueError("项目当前故事版本不存在")
     job, replayed = _candidate_job(session, project=project, story=story, trace_id=trace_id)
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     session.refresh(job)
     return job_to_read(job), replayed
 
@@ -419,6 +430,7 @@ def lock_character(
     expected_version: int,
     actor: str,
     trace_id: str,
+    commit: bool = True,
 ) -> tuple[CharacterRead, JobRead, bool]:
     project = project_or_404(session, project_id)
     character = session.get(Character, character_id)
@@ -453,6 +465,7 @@ def lock_character(
             expected_version=expected_version,
             actor=actor,
             trace_id=trace_id,
+            commit=commit,
         )
     business_key = (
         f"{project_id}:GENERATE_STORYBOARDS:{character_id}:candidate-{candidate_id}:story-v1"
@@ -536,7 +549,9 @@ def lock_character(
         event_type="character.locked",
         payload={"character_id": character_id, "candidate_id": candidate_id},
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     session.refresh(job)
     return list_characters(session, project_id)[0], job_to_read(job), replayed
 

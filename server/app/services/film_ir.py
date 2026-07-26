@@ -7,6 +7,8 @@ from sqlalchemy.orm import Session
 
 from app.db.models import (
     Asset,
+    AudioCue,
+    AudioTake,
     ChangeSet,
     Character,
     CharacterIdentityVersion,
@@ -15,8 +17,11 @@ from app.db.models import (
     Episode,
     EpisodeOutlineVersion,
     GenerationRecord,
+    LocationVersion,
     Project,
+    PropVersion,
     Scene,
+    ScriptLine,
     ScriptScene,
     ScriptVersion,
     Shot,
@@ -236,6 +241,62 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
             },
         )
 
+    locations = _latest_by(
+        session.scalars(
+            select(LocationVersion)
+            .where(LocationVersion.project_id == project.id)
+            .order_by(LocationVersion.location_key, LocationVersion.version.desc())
+        ),
+        "location_key",
+    )
+    location_logical_ids = {
+        location.id: f"location:{project.id}:{location.location_key}" for location in locations
+    }
+    for location in locations:
+        graph.add_object(
+            object_type="Location",
+            object_id=location_logical_ids[location.id],
+            version_id=location.id,
+            canonical_kind="CANONICAL",
+            status=location.status,
+            table=LocationVersion.__tablename__,
+            row_id=location.id,
+            derived_id=True,
+            attributes={
+                "location_key": location.location_key,
+                "version": location.version,
+                "name": location.name,
+                "content_hash": location.content_hash,
+            },
+        )
+
+    props = _latest_by(
+        session.scalars(
+            select(PropVersion)
+            .where(PropVersion.project_id == project.id)
+            .order_by(PropVersion.prop_key, PropVersion.version.desc())
+        ),
+        "prop_key",
+    )
+    prop_logical_ids = {prop.id: f"prop:{project.id}:{prop.prop_key}" for prop in props}
+    for prop in props:
+        graph.add_object(
+            object_type="Prop",
+            object_id=prop_logical_ids[prop.id],
+            version_id=prop.id,
+            canonical_kind="CANONICAL",
+            status=prop.status,
+            table=PropVersion.__tablename__,
+            row_id=prop.id,
+            derived_id=True,
+            attributes={
+                "prop_key": prop.prop_key,
+                "version": prop.version,
+                "name": prop.name,
+                "content_hash": prop.content_hash,
+            },
+        )
+
     scripts = _latest_by(
         session.scalars(
             select(ScriptVersion)
@@ -268,10 +329,12 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
     )
 
     script_scenes: list[ScriptScene] = []
+    script_line_logical_ids: dict[str, str] = {}
     script_logical_ids = {
         script.id: f"script:{project.id}:{script.episode_ordinal}" for script in scripts
     }
     beat_scene_links: list[tuple[str, str]] = []
+    beat_ids_by_script_scene: dict[str, list[str]] = {}
     for script in scripts:
         script_id = script_logical_ids[script.id]
         graph.add_object(
@@ -349,6 +412,46 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
                 inferred=False,
                 evidence="script_scenes.script_version_id",
             )
+            lines = list(
+                session.scalars(
+                    select(ScriptLine)
+                    .where(ScriptLine.script_scene_id == script_scene.id)
+                    .order_by(ScriptLine.ordinal)
+                )
+            )
+            for line in lines:
+                line_id = (
+                    f"script-line:{project.id}:{script.episode_ordinal}:"
+                    f"{script_scene.ordinal}:{line.ordinal}"
+                )
+                script_line_logical_ids[line.id] = line_id
+                graph.add_object(
+                    object_type="DialogueLine",
+                    object_id=line_id,
+                    version_id=line.id,
+                    canonical_kind="CANONICAL",
+                    status=script.status,
+                    table=ScriptLine.__tablename__,
+                    row_id=line.id,
+                    derived_id=True,
+                    attributes={
+                        "ordinal": line.ordinal,
+                        "speaker_key": line.speaker_key,
+                        "text": line.text,
+                        "line_type": line.line_type,
+                        "emotion": line.emotion,
+                        "estimated_duration_ms": line.estimated_duration_ms,
+                    },
+                )
+                graph.add_edge(
+                    "ScriptScene",
+                    logical_id,
+                    "DialogueLine",
+                    line_id,
+                    "CONTAINS_DIALOGUE",
+                    inferred=False,
+                    evidence="script_lines.script_scene_id",
+                )
 
         payload = _json(script.payload_json, {})
         engine = payload.get("short_drama_engine", {}) if isinstance(payload, dict) else {}
@@ -387,9 +490,21 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
                 inferred=True,
                 evidence="script_versions.payload_json.short_drama_engine.beats",
             )
+            if story is not None:
+                graph.add_edge(
+                    "Story",
+                    f"story:{project.id}",
+                    "Beat",
+                    beat_id,
+                    "STORY_TO_BEAT",
+                    inferred=True,
+                    evidence="Story -> current Script -> derived Beat",
+                )
             scene_ordinal = beat.get("scene_ordinal")
             if isinstance(scene_ordinal, int) and scene_ordinal in script_scene_by_ordinal:
-                beat_scene_links.append((beat_id, script_scene_by_ordinal[scene_ordinal]))
+                target_script_scene_id = script_scene_by_ordinal[scene_ordinal]
+                beat_scene_links.append((beat_id, target_script_scene_id))
+                beat_ids_by_script_scene.setdefault(target_script_scene_id, []).append(beat_id)
             else:
                 graph.warnings.append(
                     FilmIRWarning(
@@ -464,13 +579,20 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
         if shot_ids
         else {}
     )
+    # Downstream rows and ChangeSets can still reference a ScriptScene from an
+    # older ScriptVersion. Map every historical row to the same episode/ordinal
+    # identity so version changes do not break Film IR lineage.
     script_scene_logical_ids = {
-        row.id: (
-            f"script-scene:{project.id}:"
-            f"{next(s.episode_ordinal for s in scripts if s.id == row.script_version_id)}:"
-            f"{row.ordinal}"
-        )
-        for row in script_scenes
+        scene_id: f"script-scene:{project.id}:{episode_ordinal}:{scene_ordinal}"
+        for scene_id, scene_ordinal, episode_ordinal in session.execute(
+            select(
+                ScriptScene.id,
+                ScriptScene.ordinal,
+                ScriptVersion.episode_ordinal,
+            )
+            .join(ScriptVersion, ScriptScene.script_version_id == ScriptVersion.id)
+            .where(ScriptVersion.project_id == project.id)
+        ).all()
     }
     for shot in shots:
         spec = specs.get(shot.id)
@@ -527,6 +649,41 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
                     inferred=False,
                     evidence="shot_specs.script_scene_id -> shot_specs.shot_id -> shots.scene_id",
                 )
+                for beat_id in beat_ids_by_script_scene.get(logical_id, []):
+                    graph.add_edge(
+                        "Beat",
+                        beat_id,
+                        "Scene",
+                        shot.scene_id,
+                        "BEAT_TO_SCENE",
+                        inferred=True,
+                        evidence=(
+                            "beat.scene_ordinal -> script_scenes.ordinal -> "
+                            "shot_specs.script_scene_id -> shots.scene_id"
+                        ),
+                    )
+            if spec.location_version_id in location_logical_ids:
+                graph.add_edge(
+                    "Location",
+                    location_logical_ids[spec.location_version_id],
+                    "Shot",
+                    shot.id,
+                    "LOCATION_FOR_SHOT",
+                    inferred=False,
+                    evidence="shot_specs.location_version_id",
+                )
+            for prop_version_id in _json(spec.prop_version_ids_json, []):
+                prop_id = prop_logical_ids.get(str(prop_version_id))
+                if prop_id:
+                    graph.add_edge(
+                        "Prop",
+                        prop_id,
+                        "Shot",
+                        shot.id,
+                        "PROP_FOR_SHOT",
+                        inferred=False,
+                        evidence="shot_specs.prop_version_ids_json",
+                    )
 
     characters = list(
         session.scalars(
@@ -756,6 +913,135 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
                 evidence="takes.generation_record_id",
             )
 
+    audio_cues = list(
+        session.scalars(
+            select(AudioCue).where(AudioCue.project_id == project.id).order_by(AudioCue.ordinal)
+        )
+    )
+    cue_ids = {cue.id for cue in audio_cues}
+    for cue in audio_cues:
+        graph.add_object(
+            object_type="AudioCue",
+            object_id=cue.id,
+            version_id=cue.content_hash,
+            canonical_kind="DERIVED",
+            status=cue.status,
+            table=AudioCue.__tablename__,
+            row_id=cue.id,
+            attributes={
+                "cue_type": cue.cue_type,
+                "ordinal": cue.ordinal,
+                "start_ms": cue.start_ms,
+                "duration_ms": cue.duration_ms,
+                "script_line_id": cue.script_line_id,
+                "script_scene_id": cue.script_scene_id,
+                "shot_id": cue.shot_id,
+                "voice_profile_id": cue.voice_profile_id,
+            },
+        )
+        line_id = (
+            script_line_logical_ids.get(cue.script_line_id)
+            if cue.script_line_id is not None
+            else None
+        )
+        scene_id = (
+            script_scene_logical_ids.get(cue.script_scene_id)
+            if cue.script_scene_id is not None
+            else None
+        )
+        if line_id:
+            graph.add_edge(
+                "DialogueLine",
+                line_id,
+                "AudioCue",
+                cue.id,
+                "DIALOGUE_TO_AUDIO",
+                inferred=False,
+                evidence="audio_cues.script_line_id",
+            )
+        elif scene_id:
+            graph.add_edge(
+                "ScriptScene",
+                scene_id,
+                "AudioCue",
+                cue.id,
+                "SCENE_TO_AUDIO",
+                inferred=False,
+                evidence="audio_cues.script_scene_id",
+            )
+        if cue.shot_id:
+            graph.add_edge(
+                "Shot",
+                cue.shot_id,
+                "AudioCue",
+                cue.id,
+                "SHOT_TO_AUDIO",
+                inferred=False,
+                evidence="audio_cues.shot_id",
+            )
+
+    audio_takes = (
+        list(
+            session.scalars(
+                select(AudioTake)
+                .where(
+                    AudioTake.project_id == project.id,
+                    AudioTake.audio_cue_id.in_(cue_ids),
+                )
+                .order_by(AudioTake.audio_cue_id, AudioTake.version)
+            )
+        )
+        if cue_ids
+        else []
+    )
+    for take in audio_takes:
+        graph.add_object(
+            object_type="AudioTake",
+            object_id=take.id,
+            version_id=str(take.version),
+            canonical_kind="GENERATED",
+            status=take.status,
+            approval=take.approval,
+            table=AudioTake.__tablename__,
+            row_id=take.id,
+            attributes={
+                "audio_cue_id": take.audio_cue_id,
+                "version": take.version,
+                "asset_id": take.asset_id,
+                "is_current": take.is_current,
+                "generation_record_id": take.generation_record_id,
+                "quality_status": take.quality_status,
+            },
+        )
+        graph.add_edge(
+            "AudioCue",
+            take.audio_cue_id,
+            "AudioTake",
+            take.id,
+            "GENERATED_AUDIO_TAKE",
+            inferred=False,
+            evidence="audio_takes.audio_cue_id",
+        )
+        graph.add_edge(
+            "AudioTake",
+            take.id,
+            "Asset",
+            take.asset_id,
+            "OUTPUT_ASSET",
+            inferred=False,
+            evidence="audio_takes.asset_id",
+        )
+        if take.generation_record_id:
+            graph.add_edge(
+                "GenerationRecord",
+                take.generation_record_id,
+                "AudioTake",
+                take.id,
+                "PRODUCED_AUDIO_TAKE",
+                inferred=False,
+                evidence="audio_takes.generation_record_id",
+            )
+
     director_change_sets = list(
         session.scalars(
             select(ChangeSet)
@@ -942,6 +1228,8 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
             source_type = {
                 "SHOT": "Shot",
                 "TAKE": "Take",
+                "AUDIO_CUE": "AudioCue",
+                "AUDIO_TAKE": "AudioTake",
             }.get(clip.source_entity_type.upper())
             if source_type:
                 graph.add_edge(

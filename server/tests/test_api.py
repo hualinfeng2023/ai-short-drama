@@ -1,16 +1,18 @@
 import asyncio
-from uuid import UUID
+from datetime import UTC, datetime
+from uuid import UUID, uuid4
 
 import pytest
-from app.config import get_settings
-from app.db.models import Asset, BriefVersion, IdempotencyKey
-from app.db.session import get_engine
-from app.main import app
-from app.seed import EPISODE_ID, PROJECT_ID, SCENE_IDS, SHOT_IDS
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
+
+from app.config import get_settings
+from app.db.models import Asset, AuditLog, BriefVersion, IdempotencyKey, Project, ReviewRecord, Shot
+from app.db.session import get_engine
+from app.main import app
+from app.seed import EPISODE_ID, PROJECT_ID, SCENE_IDS, SHOT_IDS
 
 pytestmark = pytest.mark.anyio
 
@@ -136,6 +138,112 @@ async def test_workspace_and_entity_reads(client: AsyncClient) -> None:
     assert shot.json()["data"]["code"] == "S01"
 
 
+async def test_shot_edits_use_command_boundary_with_conflict_and_approved_protection(
+    client: AsyncClient,
+) -> None:
+    shot_id = SHOT_IDS[5]
+    current = (await client.get(f"/api/v1/shots/{shot_id}")).json()["data"]
+    payload = {
+        "expected_version": current["lock_version"],
+        "description": "女孩走进工作室，林悦先收起自己的手机，再递出一杯水。",
+        "dialogue": "先坐。你可以慢慢说。",
+        "actor": "镜头编辑测试",
+    }
+    headers = {"Idempotency-Key": "shot-edit-command-v1"}
+    updated = await client.patch(f"/api/v1/shots/{shot_id}", json=payload, headers=headers)
+    assert updated.status_code == 200
+    assert updated.headers["Idempotency-Replayed"] == "false"
+    assert updated.json()["data"]["description"] == payload["description"]
+    assert updated.json()["data"]["lock_version"] == current["lock_version"] + 1
+
+    replayed = await client.patch(f"/api/v1/shots/{shot_id}", json=payload, headers=headers)
+    assert replayed.status_code == 200
+    assert replayed.headers["Idempotency-Replayed"] == "true"
+    assert replayed.json()["data"] == updated.json()["data"]
+
+    stale = await client.patch(
+        f"/api/v1/shots/{shot_id}",
+        json={**payload, "description": "过期客户端不应覆盖", "actor": "过期客户端"},
+        headers={"Idempotency-Key": "shot-edit-stale-v1"},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["error"]["code"] == "SHOT_VERSION_CONFLICT"
+
+    approved = await client.patch(
+        f"/api/v1/shots/{SHOT_IDS[0]}",
+        json={
+            "expected_version": 1,
+            "description": "不应原地覆盖已批准镜头",
+            "actor": "镜头编辑测试",
+        },
+        headers={"Idempotency-Key": "shot-edit-approved-v1"},
+    )
+    assert approved.status_code == 409
+    assert approved.json()["error"]["code"] == "APPROVED_SHOT_EDIT_REQUIRES_REVISION"
+
+    with Session(get_engine(get_settings().database_url)) as session:
+        audit = session.scalar(
+            select(AuditLog).where(
+                AuditLog.project_id == PROJECT_ID,
+                AuditLog.action == "UPDATE_SHOT_SPEC",
+            )
+        )
+        assert audit is not None
+
+
+async def test_scene_shot_reorder_is_command_audited_and_idempotent(
+    client: AsyncClient,
+) -> None:
+    workspace = (await client.get(f"/api/v1/projects/{PROJECT_ID}/workspace")).json()["data"]
+    project_version = workspace["project"]["lock_version"]
+    scene_id = SCENE_IDS[2]
+    original_ids = [
+        item["id"]
+        for item in sorted(
+            (shot for shot in workspace["shots"] if shot["scene_id"] == scene_id),
+            key=lambda shot: shot["ordinal"],
+        )
+    ]
+    requested_ids = list(reversed(original_ids))
+    payload = {
+        "expected_version": project_version,
+        "shot_ids": requested_ids,
+        "actor": "镜头排序测试",
+    }
+    headers = {"Idempotency-Key": "scene-shot-order-v1"}
+    reordered = await client.put(
+        f"/api/v1/scenes/{scene_id}/shots/order",
+        json=payload,
+        headers=headers,
+    )
+    assert reordered.status_code == 200
+    assert reordered.headers["Idempotency-Replayed"] == "false"
+    assert reordered.json()["data"]["shot_ids"] == requested_ids
+    assert reordered.json()["data"]["project_lock_version"] == project_version + 1
+
+    replayed = await client.put(
+        f"/api/v1/scenes/{scene_id}/shots/order",
+        json=payload,
+        headers=headers,
+    )
+    assert replayed.status_code == 200
+    assert replayed.headers["Idempotency-Replayed"] == "true"
+    assert replayed.json()["data"] == reordered.json()["data"]
+
+    with Session(get_engine(get_settings().database_url)) as session:
+        persisted = session.scalars(
+            select(Shot).where(Shot.scene_id == scene_id).order_by(Shot.ordinal)
+        ).all()
+        assert [shot.id for shot in persisted] == requested_ids
+        audit = session.scalar(
+            select(AuditLog).where(
+                AuditLog.project_id == PROJECT_ID,
+                AuditLog.action == "REORDER_SCENE_SHOTS",
+            )
+        )
+        assert audit is not None
+
+
 async def test_error_envelope(client: AsyncClient) -> None:
     response = await client.get("/api/v1/shots/does-not-exist")
     assert response.status_code == 404
@@ -188,6 +296,13 @@ async def test_project_create_is_idempotent(client: AsyncClient) -> None:
     with Session(get_engine(get_settings().database_url)) as session:
         assert session.scalar(select(func.count(BriefVersion.id))) == 2
         assert session.scalar(select(func.count(IdempotencyKey.id))) == 1
+        audit = session.scalar(
+            select(AuditLog).where(
+                AuditLog.project_id == project_id,
+                AuditLog.action == "CREATE_PROJECT",
+            )
+        )
+        assert audit is not None and audit.entity_id == project_id
 
 
 async def test_project_delete_removes_full_owned_graph(client: AsyncClient) -> None:
@@ -203,8 +318,10 @@ async def test_project_delete_removes_full_owned_graph(client: AsyncClient) -> N
     deleted = await client.delete(f"/api/v1/projects/{project_id}")
 
     assert deleted.status_code == 200
+    assert deleted.headers["Idempotency-Replayed"] == "false"
     assert deleted.json()["data"]["project_id"] == project_id
     assert deleted.json()["data"]["deleted"] is True
+    assert deleted.json()["data"]["audit_mode"] == "DELETE_TOMBSTONE"
     assert deleted.json()["data"]["deleted_rows"] > 1
     assert deleted.json()["data"]["deleted_files"] == len(asset_paths)
     assert all(not path.exists() for path in asset_paths)
@@ -212,7 +329,17 @@ async def test_project_delete_removes_full_owned_graph(client: AsyncClient) -> N
     assert (await client.get("/api/v1/projects")).json()["data"] == []
 
     repeated = await client.delete(f"/api/v1/projects/{project_id}")
-    assert repeated.status_code == 404
+    assert repeated.status_code == 200
+    assert repeated.headers["Idempotency-Replayed"] == "true"
+    assert repeated.json()["data"] == deleted.json()["data"]
+    with Session(get_engine(get_settings().database_url)) as session:
+        tombstone = session.scalar(
+            select(IdempotencyKey).where(
+                IdempotencyKey.scope == "domain-command:project-delete",
+                IdempotencyKey.resource_id == project_id,
+            )
+        )
+        assert tombstone is not None
 
 
 async def test_project_name_is_generated_from_brief_and_can_be_suggested_again(
@@ -432,6 +559,28 @@ async def test_project_patch_uses_optimistic_lock_and_versions_brief(
     assert result["project"]["name"] == "便利店停电夜"
     assert result["project"]["target_duration_sec"] == 90
     assert result["brief_version"] == 2
+    assert updated.headers["Idempotency-Replayed"] == "false"
+
+    replayed = await client.patch(
+        f"/api/v1/projects/{project_id}",
+        json={
+            "expected_version": 1,
+            "name": "便利店停电夜",
+            "target_duration_sec": 90,
+            "platform_targets": [
+                {
+                    "platform": "douyin",
+                    "priority": "PRIMARY",
+                    "aspect_ratio": "9:16",
+                    "target_duration_sec": 90,
+                    "caption_mode": "BOTH",
+                }
+            ],
+        },
+    )
+    assert replayed.status_code == 200
+    assert replayed.headers["Idempotency-Replayed"] == "true"
+    assert replayed.json()["data"] == result
 
     stale = await client.patch(
         f"/api/v1/projects/{project_id}",
@@ -453,6 +602,70 @@ async def test_project_patch_uses_optimistic_lock_and_versions_brief(
             select(func.count(BriefVersion.id)).where(BriefVersion.project_id == project_id)
         )
         assert brief_count == 2
+        audit = session.scalar(
+            select(AuditLog).where(
+                AuditLog.project_id == project_id,
+                AuditLog.action == "UPDATE_PROJECT_BRIEF",
+            )
+        )
+        assert audit is not None
+
+
+async def test_generic_review_decision_is_command_audited_and_idempotent(
+    client: AsyncClient,
+) -> None:
+    review_id = str(uuid4())
+    entity_id = str(uuid4())
+    with Session(get_engine(get_settings().database_url)) as session:
+        project = session.get(Project, PROJECT_ID)
+        assert project is not None
+        expected_version = project.lock_version
+        session.add(
+            ReviewRecord(
+                id=review_id,
+                project_id=project.id,
+                entity_type="storyboard",
+                entity_id=entity_id,
+                gate_key="STORYBOARD_QC",
+                risk_level="LOW",
+                status="PENDING_REVIEW",
+                decision=None,
+                issues_json="[]",
+                note=None,
+                actor=None,
+                decided_at=None,
+                created_at=datetime.now(UTC),
+            )
+        )
+        session.commit()
+
+    request = {
+        "expected_version": expected_version,
+        "decision": "APPROVE",
+        "issues": [],
+        "note": "结构检查通过",
+        "actor": "reviewer-1",
+    }
+    endpoint = f"/api/v1/reviews/{review_id}/decide"
+    decided = await client.post(endpoint, json=request)
+    assert decided.status_code == 200
+    assert decided.headers["Idempotency-Replayed"] == "false"
+    assert decided.json()["data"]["review"]["status"] == "APPROVED"
+
+    replayed = await client.post(endpoint, json=request)
+    assert replayed.status_code == 200
+    assert replayed.headers["Idempotency-Replayed"] == "true"
+    assert replayed.json()["data"] == decided.json()["data"]
+
+    with Session(get_engine(get_settings().database_url)) as session:
+        audit = session.scalar(
+            select(AuditLog).where(
+                AuditLog.project_id == PROJECT_ID,
+                AuditLog.action == "DECIDE_REVIEW",
+                AuditLog.entity_id == review_id,
+            )
+        )
+        assert audit is not None
 
 
 async def test_brief_v3_persists_independent_narrative_targeting(client: AsyncClient) -> None:

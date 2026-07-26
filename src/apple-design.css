@@ -1449,7 +1449,6 @@ summary:focus-visible,
   }
 
   .content-area { padding-bottom: calc(var(--layout-mobile-navigation-clearance) + env(safe-area-inset-bottom)); }
-  :root { --layout-content-inline-padding: var(--space-6); }
   .page { min-height: calc(100vh - 68px); padding: var(--space-8) var(--layout-content-inline-padding) var(--space-12); }
 
   .mobile-project-nav-trigger { display: inline-flex; flex-shrink: 0; }
@@ -1680,8 +1679,6 @@ summary:focus-visible,
 /* Phones and narrow tablets */
 
 @media (max-width: 760px) {
-  :root { --layout-content-inline-padding: var(--space-4); }
-
   .topbar {
     height: 60px;
     gap: var(--space-2);

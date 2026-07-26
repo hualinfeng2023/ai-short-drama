@@ -307,6 +307,88 @@ async def create_graph(client: AsyncClient, graph: dict[str, object] | None = No
     return response.json()["data"]
 
 
+@pytest.mark.anyio
+async def test_relationship_graph_commands_are_idempotent_and_audited(
+    client: AsyncClient,
+) -> None:
+    prepare_relationship_project()
+    request = {
+        "expected_project_version": 1,
+        "story_bible_version_id": STORY_BIBLE_ID,
+        "graph": valid_graph(),
+        "actor": "command-author",
+    }
+    headers = {"Idempotency-Key": "relationship-graph-create-command-v1"}
+    created = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/relationship-graphs",
+        json=request,
+        headers=headers,
+    )
+    assert created.status_code == 201, created.text
+    assert created.headers["Idempotency-Replayed"] == "false"
+    graph = created.json()["data"]
+    replayed = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/relationship-graphs",
+        json=request,
+        headers=headers,
+    )
+    assert replayed.status_code == 201
+    assert replayed.headers["Idempotency-Replayed"] == "true"
+    assert replayed.json()["data"] == graph
+
+    lock_request = {
+        "expected_project_version": 2,
+        "expected_graph_version": 1,
+        "actor": "command-author",
+    }
+    lock_headers = {"Idempotency-Key": "relationship-lock-command-v1"}
+    locked = await client.post(
+        (
+            f"/api/v1/relationship-graphs/{graph['id']}"
+            "/relationships/protagonist-witness/lock"
+        ),
+        json=lock_request,
+        headers=lock_headers,
+    )
+    assert locked.status_code == 200, locked.text
+    assert locked.headers["Idempotency-Replayed"] == "false"
+    replayed_lock = await client.post(
+        (
+            f"/api/v1/relationship-graphs/{graph['id']}"
+            "/relationships/protagonist-witness/lock"
+        ),
+        json=lock_request,
+        headers=lock_headers,
+    )
+    assert replayed_lock.status_code == 200
+    assert replayed_lock.headers["Idempotency-Replayed"] == "true"
+    assert replayed_lock.json()["data"] == locked.json()["data"]
+
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        audits = list(
+            session.scalars(
+                select(AuditLog)
+                .where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.action.in_(
+                        {"CREATE_RELATIONSHIP_GRAPH", "SET_RELATIONSHIP_LOCK"}
+                    ),
+                )
+                .order_by(AuditLog.created_at)
+            ).all()
+        )
+        assert [audit.action for audit in audits] == [
+            "CREATE_RELATIONSHIP_GRAPH",
+            "SET_RELATIONSHIP_LOCK",
+        ]
+        assert all(audit.entity_type == "relationship_graph" for audit in audits)
+        assert all(audit.before_hash != audit.after_hash for audit in audits)
+
+
 async def lock_character_for_test(
     client: AsyncClient,
     character_data: dict,
@@ -491,9 +573,9 @@ async def lock_character_for_test(
         },
     )
     assert locked.status_code == 200, locked.text
-    final_workspace = (
-        await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")
-    ).json()["data"]
+    final_workspace = (await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")).json()[
+        "data"
+    ]
     final_character = next(
         item for item in final_workspace["characters"] if item["id"] == character_id
     )
@@ -608,9 +690,9 @@ async def test_character_profile_writes_use_idempotent_command_boundary(
         json={"expected_project_version": 2, "expected_graph_version": 1, "actor": "reviewer"},
     )
     assert approved.status_code == 200, approved.text
-    workspace = (
-        await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")
-    ).json()["data"]
+    workspace = (await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")).json()[
+        "data"
+    ]
     character = workspace["characters"][0]
     character_id = character["id"]
 
@@ -639,9 +721,9 @@ async def test_character_profile_writes_use_idempotent_command_boundary(
     assert update_conflict.status_code == 409
     assert update_conflict.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
 
-    refreshed = (
-        await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")
-    ).json()["data"]
+    refreshed = (await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")).json()[
+        "data"
+    ]
     current = next(item for item in refreshed["characters"] if item["id"] == character_id)
     confirm_request = {
         "expected_version": current["lock_version"],
@@ -713,9 +795,7 @@ async def test_character_visual_flow_requires_manual_generation_and_lock(
     protagonist = next(item for item in workspace["characters"] if item["name"] == "林岚")
     assert protagonist["profile"]["identity_fields"]["age"] == "26岁"
     assert protagonist["profile"]["appearance_fields"]["height"].startswith("未指定")
-    assert protagonist["profile"]["summary"].startswith(
-        "26岁 · 待明确职业 · 留齐肩碎发"
-    )
+    assert protagonist["profile"]["summary"].startswith("26岁 · 待明确职业 · 留齐肩碎发")
     assert "30岁左右" not in protagonist["profile"]["summary"]
 
     factory = sessionmaker(bind=get_engine(get_settings().database_url), expire_on_commit=False)
@@ -809,8 +889,7 @@ async def test_character_visual_flow_requires_manual_generation_and_lock(
             )
             assert len(jobs) == 5
             assert all(
-                "RGB 255,255,255，#FFFFFF" in json.loads(job.input_json)["prompt"]
-                for job in jobs
+                "RGB 255,255,255，#FFFFFF" in json.loads(job.input_json)["prompt"] for job in jobs
             )
             failed_job_id = jobs[0].id
             jobs[0].status = "FAILED"
@@ -893,8 +972,7 @@ async def test_character_visual_flow_requires_manual_generation_and_lock(
                 item for item in current_character["identities"] if item["id"] == identity_id
             )
             current_view = next(
-                item for item in current_identity["assets"]
-                if item["view_type"] == "THREE_QUARTER"
+                item for item in current_identity["assets"] if item["view_type"] == "THREE_QUARTER"
             )
             adjustment = await client.post(
                 (
@@ -908,9 +986,7 @@ async def test_character_visual_flow_requires_manual_generation_and_lock(
                     "actor": "tester",
                 },
                 headers={
-                    "Idempotency-Key": (
-                        f"identity-view-adjustment-{identity_id}-three-quarter"
-                    )
+                    "Idempotency-Key": (f"identity-view-adjustment-{identity_id}-three-quarter")
                 },
             )
             assert adjustment.status_code == 202, adjustment.text
@@ -928,9 +1004,7 @@ async def test_character_visual_flow_requires_manual_generation_and_lock(
                     "actor": "tester",
                 },
                 headers={
-                    "Idempotency-Key": (
-                        f"identity-view-adjustment-{identity_id}-three-quarter"
-                    )
+                    "Idempotency-Key": (f"identity-view-adjustment-{identity_id}-three-quarter")
                 },
             )
             assert adjustment_replay.status_code == 202
@@ -944,8 +1018,7 @@ async def test_character_visual_flow_requires_manual_generation_and_lock(
                     session.scalars(
                         select(AuditLog).where(
                             AuditLog.project_id == PROJECT_ID,
-                            AuditLog.action
-                            == "REQUEST_CHARACTER_IDENTITY_VIEW_GENERATION",
+                            AuditLog.action == "REQUEST_CHARACTER_IDENTITY_VIEW_GENERATION",
                             AuditLog.entity_id == adjustment_job_id,
                         )
                     ).all()
@@ -1043,9 +1116,7 @@ async def test_character_visual_flow_requires_manual_generation_and_lock(
         "payload": {"label": "雨夜受伤", "injury": "额角轻伤", "wetness": "湿发"},
         "actor": "tester",
     }
-    state_change_headers = {
-        "Idempotency-Key": f"apply-character-state-change-{first['id']}"
-    }
+    state_change_headers = {"Idempotency-Key": f"apply-character-state-change-{first['id']}"}
     state_changed = await client.post(
         f"/api/v1/projects/{PROJECT_ID}/characters/{first['id']}/changes",
         json=state_change_payload,
@@ -1097,9 +1168,7 @@ async def test_character_visual_flow_requires_manual_generation_and_lock(
     ]
     first = next(item for item in refreshed["characters"] if item["id"] == first["id"])
     locked_identity_id = first["locked_identity_version_id"]
-    locked_identity = next(
-        item for item in first["identities"] if item["id"] == locked_identity_id
-    )
+    locked_identity = next(item for item in first["identities"] if item["id"] == locked_identity_id)
     locked_front = next(
         asset for asset in locked_identity["assets"] if asset["view_type"] == "FRONT"
     )
@@ -1124,11 +1193,7 @@ async def test_character_visual_flow_requires_manual_generation_and_lock(
     )
     assert revised_character["locked_identity_version_id"] == locked_identity_id
     pending_revision = max(
-        (
-            item
-            for item in revised_character["identities"]
-            if item["locked_at"] is None
-        ),
+        (item for item in revised_character["identities"] if item["locked_at"] is None),
         key=lambda item: item["version"],
     )
     assert pending_revision["status"] == "GENERATING_DOSSIER"
@@ -1191,16 +1256,10 @@ async def test_character_generation_auto_confirms_summary_and_creates_distinct_r
         assert batch is not None
         batch_prompt = json.loads(batch.prompt_json)
     variant_keys = {item["variant_key"] for item in payloads}
-    variant_labels = {
-        variant["key"]: variant["label"]
-        for variant in CANDIDATE_VARIANTS
-    }
+    variant_labels = {variant["key"]: variant["label"] for variant in CANDIDATE_VARIANTS}
     assert len(variant_keys) == 3
     assert variant_keys <= set(variant_labels)
-    assert {
-        item["key"]
-        for item in batch_prompt["candidate_variants"]
-    } == variant_keys
+    assert {item["key"] for item in batch_prompt["candidate_variants"]} == variant_keys
     assert "视觉方向：" not in batch_prompt["prompt"]
     assert "不得依据提示词语言、规范语言、主市场、角色姓名、职业" in batch_prompt["prompt"]
     assert "RGB 255,255,255，#FFFFFF" in batch_prompt["prompt"]
@@ -1345,9 +1404,7 @@ async def test_candidate_prompt_is_visible_and_can_generate_an_edited_version(
         "expected_version": character["lock_version"],
         "actor": "tester",
     }
-    deletion_headers = {
-        "Idempotency-Key": f"delete-character-candidate-{edited_candidate['id']}"
-    }
+    deletion_headers = {"Idempotency-Key": f"delete-character-candidate-{edited_candidate['id']}"}
     deleted = await client.request(
         "DELETE",
         (
@@ -1408,9 +1465,7 @@ async def test_candidate_prompt_is_visible_and_can_generate_an_edited_version(
         "data"
     ]
     character = next(item for item in refreshed["characters"] if item["id"] == character["id"])
-    protected_source = next(
-        item for item in character["candidates"] if item["id"] == source["id"]
-    )
+    protected_source = next(item for item in character["candidates"] if item["id"] == source["id"])
     assert protected_source["deletable"] is False
     assert protected_source["delete_block_reason"] == "该形象已经用于角色基准，不能删除"
     refused = await client.request(
@@ -1479,9 +1534,7 @@ async def test_character_generation_blocks_when_newer_story_identity_is_pending(
         source_bible = session.get(StoryBibleVersion, STORY_BIBLE_ID)
         assert source_bible is not None
         payload = json.loads(source_bible.payload_json)
-        protagonist = next(
-            item for item in payload["characters"] if item["key"] == "protagonist"
-        )
+        protagonist = next(item for item in payload["characters"] if item["key"] == "protagonist")
         protagonist["ethnicity"] = "亚裔美国人"
         pending_bible = StoryBibleVersion(
             id="91000000-0000-4000-8000-000000000099",
@@ -1504,13 +1557,11 @@ async def test_character_generation_blocks_when_newer_story_identity_is_pending(
         session.add(pending_bible)
         session.commit()
 
-    stale_workspace = (
-        await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")
-    ).json()["data"]
+    stale_workspace = (await client.get(f"/api/v1/projects/{PROJECT_ID}/character-visuals")).json()[
+        "data"
+    ]
     stale_character = next(
-        item
-        for item in stale_workspace["characters"]
-        if item["character_key"] == "protagonist"
+        item for item in stale_workspace["characters"] if item["character_key"] == "protagonist"
     )
     assert stale_character["source_stale"] is True
     assert stale_character["pending_source_changes"]["changed_fields"] == ["ethnicity"]
@@ -1929,7 +1980,7 @@ async def test_relationship_revision_impact_diff_and_script_staleness(client: As
         f"/api/v1/projects/{PROJECT_ID}/relationship-revisions",
         json={**impact_payload, "confirmed": True, "impact_hash": "0" * 64},
     )
-    assert stale_confirmation.status_code == 409
+    assert stale_confirmation.status_code == 409, stale_confirmation.text
     assert stale_confirmation.json()["error"]["code"] == "RELATIONSHIP_REVISION_IMPACT_STALE"
 
     created = await client.post(
@@ -2177,17 +2228,12 @@ async def test_character_revision_requires_review_and_creates_synchronized_draft
         json={
             **request,
             "changes": {
-                key: value
-                for key, value in request["changes"].items()
-                if key != "visual_notes"
+                key: value for key, value in request["changes"].items() if key != "visual_notes"
             },
         },
     )
     assert unsynchronized.status_code == 422
-    assert (
-        unsynchronized.json()["error"]["code"]
-        == "CHARACTER_ETHNICITY_VISUAL_SYNC_REQUIRED"
-    )
+    assert unsynchronized.json()["error"]["code"] == "CHARACTER_ETHNICITY_VISUAL_SYNC_REQUIRED"
 
     reviewed = await client.post(
         f"/api/v1/projects/{PROJECT_ID}/character-revision-review",
@@ -2229,6 +2275,7 @@ async def test_character_revision_requires_review_and_creates_synchronized_draft
         },
     )
     assert confirmed.status_code == 201, confirmed.text
+    assert confirmed.headers["Idempotency-Replayed"] == "false"
     revision = confirmed.json()["data"]
     assert revision["story_bible"]["status"] == "DRAFT"
     assert revision["story_bible"]["payload"]["characters"][0]["role"] == "母女旧案的共同追查者"
@@ -2239,6 +2286,18 @@ async def test_character_revision_requires_review_and_creates_synchronized_draft
     assert revision["relationship_graph"]["project_lock_version"] == 3
     assert revision["relationship_graph"]["graph"]["edges"][0]["locked"] is False
     assert "请重新核对相关关系" in revision["relationship_graph"]["graph"]["generation_notes"][-1]
+    replayed = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/character-revisions",
+        json={
+            **request,
+            "confirmed": True,
+            "impact_hash": review["impact_hash"],
+            "actor": "test-author",
+        },
+    )
+    assert replayed.status_code == 201
+    assert replayed.headers["Idempotency-Replayed"] == "true"
+    assert replayed.json()["data"] == revision
 
     factory = sessionmaker(bind=get_engine(get_settings().database_url), expire_on_commit=False)
     with factory() as session:
@@ -2254,3 +2313,15 @@ async def test_character_revision_requires_review_and_creates_synchronized_draft
         assert source_graph is not None and source_graph.status == "SUPERSEDED"
         assert project is not None and project.lock_version == 3
         assert change_set is not None and change_set.status == "CONFIRMED"
+        audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.action == "CREATE_CHARACTER_REVISION",
+                    AuditLog.entity_id == change_set.id,
+                )
+            ).all()
+        )
+        assert len(audits) == 1
+        assert audits[0].entity_type == "change_set"
+        assert audits[0].before_hash != audits[0].after_hash

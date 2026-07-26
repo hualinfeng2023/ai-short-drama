@@ -60,6 +60,11 @@ import {
 } from '../api/client'
 import { RelationshipGraphSection, type RelationshipCharacter } from '../components/relationship-graph/RelationshipGraphSection'
 import { ImpactConfirmModal } from '../components/ConfirmModal'
+import {
+  DirectorReviewCard,
+  directorApprovalRequiresOverride,
+  type DirectorReviewAction,
+} from '../components/director-review/DirectorReviewCard'
 import { Button, Modal, PageHeader, SelectControl, StatusBadge, getStatusLabel } from '../components/ui'
 import { ServiceRequiredState } from '../components/ServiceRequiredState'
 import { useStudio } from '../store/StudioContext'
@@ -206,40 +211,6 @@ interface ScriptTextSelection {
 }
 
 type ScriptRewriteMenuMode = 'ACTIONS' | 'TONE' | 'CUSTOM'
-
-type DirectorReviewAction =
-  | { type: 'EXECUTE'; proposal: DirectorReviewProposal; optionId: string }
-  | {
-      type: 'DECIDE'
-      proposal: DirectorReviewProposal
-      decision: 'APPROVE' | 'REJECT' | 'ROLLBACK'
-    }
-
-const DIRECTOR_ISSUE_LABELS: Record<DirectorReviewProposal['issueType'], string> = {
-  STORY_LOGIC: '故事逻辑',
-  CHARACTER_MOTIVATION: '人物动机',
-  AI_DIALOGUE: '对白自然度',
-  PACING: '场景节奏',
-}
-
-const DIRECTOR_FIELD_LABELS: Record<string, string> = {
-  text: '对白',
-  purpose: '场景目的',
-  emotion: '情绪',
-  speech_rate: '语速',
-  pause_after_ms: '句后停顿',
-  bgm_intent: '背景音乐意图',
-  sfx_intents: '音效意图',
-}
-
-function directorValues(value: Record<string, unknown>): string {
-  return Object.entries(value)
-    .map(([key, item]) => {
-      const display = Array.isArray(item) ? item.join('、') : String(item)
-      return `${DIRECTOR_FIELD_LABELS[key] ?? key}：${display}`
-    })
-    .join('；')
-}
 
 const SCRIPT_REWRITE_ACTION_LABELS: Record<ScriptExcerptRewriteAction, string> = {
   REWRITE: '改写',
@@ -518,6 +489,7 @@ export function StoryPage() {
   const [directorReviewError, setDirectorReviewError] = useState<string | null>(null)
   const [directorOptionSelections, setDirectorOptionSelections] = useState<Record<string, string>>({})
   const [directorReviewAction, setDirectorReviewAction] = useState<DirectorReviewAction | null>(null)
+  const [directorApprovalOverrideReason, setDirectorApprovalOverrideReason] = useState('')
   const [relationshipFocus, setRelationshipFocus] = useState<{
     graphId: string
     relationshipKey: string
@@ -693,9 +665,13 @@ export function StoryPage() {
         : await decideDirectorReviewProposal(action.proposal.proposalId, {
             expectedVersion: project.lockVersion,
             decision: action.decision,
+            overrideReason: directorApprovalRequiresOverride(action)
+              ? directorApprovalOverrideReason
+              : undefined,
           })
       upsertDirectorProposal(next)
       setDirectorReviewAction(null)
+      setDirectorApprovalOverrideReason('')
       await load()
       await refreshProjects()
       setNotice(
@@ -711,6 +687,9 @@ export function StoryPage() {
       setDirectorReviewError(
         reason instanceof ApiError && reason.code === 'VERSION_CONFLICT'
           ? '项目版本已经变化，请刷新后重新确认。'
+          : reason instanceof ApiError
+            && reason.code === 'DIRECTOR_APPROVAL_OVERRIDE_REASON_REQUIRED'
+            ? '低成本时间线预览仍需调整；请填写至少 8 个字的覆盖理由。'
           : reason instanceof Error
             ? reason.message
             : 'Director 操作失败',
@@ -718,6 +697,11 @@ export function StoryPage() {
     } finally {
       setDirectorReviewBusyScene(null)
     }
+  }
+
+  function openDirectorReviewAction(action: DirectorReviewAction) {
+    setDirectorApprovalOverrideReason('')
+    setDirectorReviewAction(action)
   }
 
   async function confirmApproveScript() {
@@ -1048,174 +1032,18 @@ export function StoryPage() {
   function renderDirectorReview(
     scene: NonNullable<typeof latestScript>['scenes'][number],
   ) {
-    const proposal = directorReviewProposals.find(
-      (item) => item.sceneOrdinal === scene.ordinal,
-    )
-    const busy = directorReviewBusyScene === scene.ordinal
-    if (!proposal) {
-      return (
-        <section className="director-review-entry">
-          <div>
-            <span><WandSparkles size={14} />AI Director</span>
-            <strong>审查这一场的逻辑、动机、对白与节奏</strong>
-            <p>先给出判断和方案，不会自动修改剧本或触发媒体生成。</p>
-          </div>
-          <Button
-            disabled={busy}
-            onClick={() => void reviewScriptScene(scene)}
-            size="sm"
-            variant="secondary"
-          >
-            {busy ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}
-            开始审查
-          </Button>
-        </section>
-      )
-    }
-    const selectedOptionId =
-      directorOptionSelections[proposal.proposalId] ?? proposal.recommendedOption
-    const selectedOption =
-      proposal.alternatives.find((item) => item.optionId === selectedOptionId)
-      ?? proposal.alternatives[0]
-    const finalStatus = ['APPROVED', 'REJECTED', 'ROLLED_BACK'].includes(proposal.status)
+    const proposal = directorReviewProposals.find((item) => item.sceneOrdinal === scene.ordinal)
     return (
-      <section className={`director-review director-review--${proposal.status.toLowerCase()}`}>
-        <header>
-          <div>
-            <span><WandSparkles size={14} />AI Director · {DIRECTOR_ISSUE_LABELS[proposal.issueType]}</span>
-            <strong>{proposal.observation}</strong>
-          </div>
-          <StatusBadge status={proposal.status} />
-        </header>
-        <p>{proposal.rationale}</p>
-        <div className="director-review__meta">
-          <span>判断置信度 {Math.round(proposal.confidence * 100)}%</span>
-          <span>{proposal.estimatedCostUsd === 0 ? '不触发媒体生成' : `预计成本 $${proposal.estimatedCostUsd}`}</span>
-          <span>影响 {proposal.affectedObjects.length} 项 · 保留 {proposal.preservedObjects.length} 项</span>
-        </div>
-
-        {proposal.status === 'PROPOSED' ? (
-          <>
-            <div className="director-review__options" role="radiogroup" aria-label="Director 修复方案">
-              {proposal.alternatives.map((option) => {
-                const selected = option.optionId === selectedOption?.optionId
-                return (
-                  <button
-                    aria-checked={selected}
-                    className={selected ? 'is-selected' : ''}
-                    key={option.optionId}
-                    onClick={() => setDirectorOptionSelections((current) => ({
-                      ...current,
-                      [proposal.proposalId]: option.optionId,
-                    }))}
-                    role="radio"
-                    type="button"
-                  >
-                    <span>
-                      <strong>{option.title}</strong>
-                      {option.optionId === proposal.recommendedOption ? <em>推荐</em> : null}
-                    </span>
-                    <p>{option.rationale}</p>
-                    <small>{directorValues(option.proposedChange.changes)}</small>
-                  </button>
-                )
-              })}
-            </div>
-            <footer>
-              <Button
-                disabled={busy}
-                onClick={() => setDirectorReviewAction({
-                  type: 'DECIDE',
-                  proposal,
-                  decision: 'REJECT',
-                })}
-                size="sm"
-                variant="ghost"
-              >
-                <X size={14} />拒绝建议
-              </Button>
-              <Button
-                disabled={busy || !selectedOption}
-                onClick={() => selectedOption && setDirectorReviewAction({
-                  type: 'EXECUTE',
-                  proposal,
-                  optionId: selectedOption.optionId,
-                })}
-                size="sm"
-              >
-                <Check size={14} />采用所选方案
-              </Button>
-            </footer>
-          </>
-        ) : null}
-
-        {proposal.comparison ? (
-          <div className="director-review__comparison">
-            <article>
-              <span>修改前</span>
-              <p>{directorValues(proposal.comparison.before)}</p>
-            </article>
-            <article>
-              <span>修改后</span>
-              <p>{directorValues(proposal.comparison.after)}</p>
-            </article>
-            <small>
-              估算对白窗口：
-              {(proposal.comparison.estimatedDurationBeforeMs / 1000).toFixed(1)} 秒
-              {' → '}
-              {(proposal.comparison.estimatedDurationAfterMs / 1000).toFixed(1)} 秒
-            </small>
-          </div>
-        ) : null}
-
-        {proposal.status === 'APPLIED_PENDING_APPROVAL' ? (
-          <footer>
-            <Button
-              disabled={busy}
-              onClick={() => setDirectorReviewAction({
-                type: 'DECIDE',
-                proposal,
-                decision: 'ROLLBACK',
-              })}
-              size="sm"
-              variant="secondary"
-            >
-              <RotateCcw size={14} />回退修改
-            </Button>
-            <Button
-              disabled={busy}
-              onClick={() => setDirectorReviewAction({
-                type: 'DECIDE',
-                proposal,
-                decision: 'APPROVE',
-              })}
-              size="sm"
-            >
-              <Check size={14} />批准修改版
-            </Button>
-          </footer>
-        ) : null}
-
-        {finalStatus ? (
-          <footer>
-            <span>
-              {proposal.status === 'APPROVED'
-                ? '修改版已批准，审计记录已保存。'
-                : proposal.status === 'ROLLED_BACK'
-                  ? '恢复版本已创建，两个版本均可追溯。'
-                  : '建议已拒绝，没有修改剧本。'}
-            </span>
-            <Button
-              disabled={busy}
-              onClick={() => void reviewScriptScene(scene)}
-              size="sm"
-              variant="ghost"
-            >
-              <RefreshCw size={14} />重新审查
-            </Button>
-          </footer>
-        ) : null}
-      </section>
+      <DirectorReviewCard
+        busy={directorReviewBusyScene === scene.ordinal}
+        onAction={openDirectorReviewAction}
+        onReview={() => void reviewScriptScene(scene)}
+        onSelectOption={(proposalId, optionId) => {
+          setDirectorOptionSelections((current) => ({ ...current, [proposalId]: optionId }))
+        }}
+        proposal={proposal ?? null}
+        selectedOptionId={proposal ? directorOptionSelections[proposal.proposalId] : undefined}
+      />
     )
   }
 
@@ -1689,6 +1517,10 @@ export function StoryPage() {
             ? 'danger'
             : 'primary'
         }
+        confirmDisabled={
+          directorApprovalRequiresOverride(directorReviewAction)
+          && directorApprovalOverrideReason.trim().length < 8
+        }
         items={directorReviewAction ? [
           {
             icon: <GitMerge size={16} />,
@@ -1709,10 +1541,20 @@ export function StoryPage() {
             title: `保护 ${directorReviewAction.proposal.preservedObjects.length} 项范围外资产`,
             detail: '范围外 Approved Take 将通过状态哈希校验保持不变。',
           },
+          ...(directorApprovalRequiresOverride(directorReviewAction)
+            ? [{
+                icon: <AlertTriangle size={16} />,
+                title: '时长门禁需要人工覆盖',
+                detail: '批准不会触发昂贵生成，但必须记录接受当前时长风险的原因。',
+              }]
+            : []),
         ] : []}
         loading={directorReviewBusyScene !== null}
         onClose={() => {
-          if (directorReviewBusyScene === null) setDirectorReviewAction(null)
+          if (directorReviewBusyScene === null) {
+            setDirectorReviewAction(null)
+            setDirectorApprovalOverrideReason('')
+          }
         }}
         onConfirm={() => void confirmDirectorReviewAction()}
         open={directorReviewAction !== null}
@@ -1726,7 +1568,25 @@ export function StoryPage() {
                 ? '回退到修改前内容？'
                 : '拒绝这条 Director 建议？'
         }
-      />
+      >
+        {directorApprovalRequiresOverride(directorReviewAction) ? (
+          <label className="director-approval-override">
+            <strong>覆盖理由</strong>
+            <span>说明为什么当前时长风险仍可接受，以及后续如何复核。</span>
+            <textarea
+              autoFocus
+              maxLength={1000}
+              onChange={(event) => setDirectorApprovalOverrideReason(event.target.value)}
+              placeholder="例如：对白略超预算，但下一场留有节奏余量；批准后仍会在配音前复核。"
+              rows={3}
+              value={directorApprovalOverrideReason}
+            />
+            <small>
+              至少 8 个字 · 当前 {directorApprovalOverrideReason.trim().length} 字
+            </small>
+          </label>
+        ) : null}
+      </ImpactConfirmModal>
 
       {scriptRewriteMenuOpen && scriptSelection ? createPortal((
         <div

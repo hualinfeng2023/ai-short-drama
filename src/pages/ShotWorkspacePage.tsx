@@ -146,6 +146,8 @@ export function ShotWorkspacePage() {
   const [description, setDescription] = useState(currentShot.description)
   const [dialogue, setDialogue] = useState(currentShot.dialogue)
   const [dirty, setDirty] = useState(false)
+  const [shotSaving, setShotSaving] = useState(false)
+  const [reorderSaving, setReorderSaving] = useState(false)
   const [generateOpen, setGenerateOpen] = useState(false)
   const [videoOpen, setVideoOpen] = useState(false)
   const [videoPrompt, setVideoPrompt] = useState('')
@@ -344,15 +346,22 @@ export function ShotWorkspacePage() {
     setSelectedShotIds(sceneShots.map((shot) => shot.id))
   }
 
-  function moveSelectedShotsInScene(direction: 'up' | 'down') {
-    if (selectedShotIds.length === 0) return
+  async function moveSelectedShotsInScene(direction: 'up' | 'down') {
+    if (selectedShotIds.length === 0 || reorderSaving) return
     const nextOrder = moveSelectedShots(scene.shotIds, selectedShotIds, direction)
     if (nextOrder.join('|') === scene.shotIds.join('|')) {
       notify(direction === 'up' ? '已在当前场景最前，无法继续上移。' : '已在当前场景最后，无法继续下移。', 'info')
       return
     }
-    reorderSceneShots(scene.id, nextOrder)
-    notify(`已${direction === 'up' ? '上移' : '下移'} ${selectedShotIds.length} 个镜头。`)
+    setReorderSaving(true)
+    try {
+      await reorderSceneShots(scene.id, nextOrder)
+      notify(`已${direction === 'up' ? '上移' : '下移'} ${selectedShotIds.length} 个镜头。`)
+    } catch (error) {
+      notify(error instanceof Error ? error.message : '镜头排序保存失败', 'error')
+    } finally {
+      setReorderSaving(false)
+    }
   }
 
   const selectedReviewCount = selectedShotIds.filter((shotId) => {
@@ -360,9 +369,28 @@ export function ShotWorkspacePage() {
     return shot?.status === 'PENDING_REVIEW'
   }).length
 
-  function saveShot() {
-    updateShot(currentShot.id, { description, dialogue })
-    setDirty(false)
+  async function saveShot() {
+    if (shotSaving) return
+    setShotSaving(true)
+    try {
+      await updateShot(currentShot.id, { description, dialogue })
+      setDirty(false)
+      notify('镜头修改已保存。')
+    } catch (error) {
+      notify(error instanceof Error ? error.message : '镜头修改保存失败', 'error')
+    } finally {
+      setShotSaving(false)
+    }
+  }
+
+  async function updateShotParameter(
+    patch: Pick<Partial<typeof currentShot>, 'shotSize' | 'cameraMovement'>,
+  ) {
+    try {
+      await updateShot(currentShot.id, patch)
+    } catch (error) {
+      notify(error instanceof Error ? error.message : '镜头参数保存失败', 'error')
+    }
   }
 
   async function intelligentlyEnhanceDescription() {
@@ -463,8 +491,8 @@ export function ShotWorkspacePage() {
             <span>{selectedShotIds.length > 0 ? `已选 ${selectedShotIds.length} 个镜头` : '点选镜头或全选当前场景'}</span>
             <div>
               <Button disabled={sceneShots.length === 0} onClick={selectAllSceneShots} size="sm" variant="ghost">全选</Button>
-              <Button disabled={selectedShotIds.length === 0} onClick={() => moveSelectedShotsInScene('up')} size="sm" variant="ghost"><ArrowUp size={14} />上移</Button>
-              <Button disabled={selectedShotIds.length === 0} onClick={() => moveSelectedShotsInScene('down')} size="sm" variant="ghost"><ArrowDown size={14} />下移</Button>
+              <Button disabled={selectedShotIds.length === 0 || reorderSaving} onClick={() => void moveSelectedShotsInScene('up')} size="sm" variant="ghost"><ArrowUp size={14} />上移</Button>
+              <Button disabled={selectedShotIds.length === 0 || reorderSaving} onClick={() => void moveSelectedShotsInScene('down')} size="sm" variant="ghost"><ArrowDown size={14} />下移</Button>
               {selectedReviewCount > 0 ? (
                 <Link className="button button--secondary button--sm" to="/reviews">
                   <ShieldCheck size={14} />审核 {selectedReviewCount} 个
@@ -519,7 +547,7 @@ export function ShotWorkspacePage() {
         <header className="shot-toolbar">
           <div><p className="eyebrow">场景 {scene.code} · {scene.title}</p><h1>{currentShot.code} · {currentShot.title}</h1></div>
           <div><StatusBadge status={currentShot.status} />
-            <Button disabled={!dirty} onClick={saveShot} size="sm" variant="secondary"><Save size={15} />{dirty ? '保存修改' : '已保存'}</Button>
+            <Button disabled={!dirty || shotSaving} onClick={() => void saveShot()} size="sm" variant="secondary"><Save size={15} />{shotSaving ? '保存中' : dirty ? '保存修改' : '已保存'}</Button>
           </div>
         </header>
 
@@ -579,7 +607,7 @@ export function ShotWorkspacePage() {
               <FormField className="field" label="生图模型"><SelectControl aria-label="生图模型" onChange={(event) => selectImageModel(event.target.value)} value={selectedImageModel}>{imageModels.map((option) => <option key={option.id} value={option.id}>{option.label} · {option.id}</option>)}</SelectControl></FormField>
               <div className="field-grid"><FormField label="分辨率"><SelectControl aria-label="分辨率" onChange={(event) => setSelectedImageResolution(event.target.value as ImageResolution)} value={selectedImageResolution}>{imageResolutions.map((resolution) => <option key={resolution} value={resolution}>{resolution}</option>)}</SelectControl></FormField><FormField label="画面比例"><SelectControl aria-label="画面比例" onChange={(event) => setSelectedImageAspectRatio(event.target.value as ImageAspectRatio)} value={selectedImageAspectRatio}>{IMAGE_ASPECT_RATIOS.map((option) => <option key={option.id} value={option.id}>{option.id} · {option.label}</option>)}</SelectControl></FormField></div>
             </details>
-            <div className="field-grid"><label>景别<SelectControl aria-label="景别" value={currentShot.shotSize} onChange={(event) => updateShot(currentShot.id, { shotSize: event.target.value as typeof currentShot.shotSize })}><option value="WS">全景（WS）</option><option value="MS">中景（MS）</option><option value="MCU">中近景（MCU）</option><option value="CU">近景（CU）</option></SelectControl></label><label>运动<SelectControl aria-label="镜头运动" value={currentShot.cameraMovement} onChange={(event) => updateShot(currentShot.id, { cameraMovement: event.target.value as typeof currentShot.cameraMovement })}><option value="STATIC">固定镜头</option><option value="PAN">摇镜</option><option value="DOLLY_IN">推镜</option><option value="TRACK">跟拍</option><option value="HANDHELD">手持</option></SelectControl></label></div>
+            <div className="field-grid"><label>景别<SelectControl aria-label="景别" value={currentShot.shotSize} onChange={(event) => void updateShotParameter({ shotSize: event.target.value as typeof currentShot.shotSize })}><option value="WS">全景（WS）</option><option value="MS">中景（MS）</option><option value="MCU">中近景（MCU）</option><option value="CU">近景（CU）</option></SelectControl></label><label>运动<SelectControl aria-label="镜头运动" value={currentShot.cameraMovement} onChange={(event) => void updateShotParameter({ cameraMovement: event.target.value as typeof currentShot.cameraMovement })}><option value="STATIC">固定镜头</option><option value="PAN">摇镜</option><option value="DOLLY_IN">推镜</option><option value="TRACK">跟拍</option><option value="HANDHELD">手持</option></SelectControl></label></div>
             <label className="field"><span className="field__heading"><span>画面描述</span><span className="field__actions"><button disabled={apiStatus !== 'connected' || enhancingDescription || description.trim().length < 3} onClick={(event) => { event.preventDefault(); void intelligentlyEnhanceDescription() }} type="button">{enhancingDescription ? <LoaderCircle className="spin" size={12} /> : <Lightbulb size={12} />}{enhancingDescription ? '正在优化' : '优化画面描述'}</button>{descriptionBeforeEnhance !== null ? <button onClick={(event) => { event.preventDefault(); undoDescriptionEnhancement() }} type="button"><RotateCcw size={12} />撤销</button> : null}</span></span><textarea onChange={(event) => { setDescription(event.target.value); setDirty(true); setEnhanceNote(null) }} value={description} />{enhanceNote ? <small className="field__note">{enhanceNote}</small> : null}</label>
             <FormField className="field" label="对白" optional><textarea onChange={(event) => { setDialogue(event.target.value); setDirty(true) }} placeholder="无对白" value={dialogue} /></FormField>
           </section> : null}

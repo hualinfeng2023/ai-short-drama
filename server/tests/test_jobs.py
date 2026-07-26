@@ -14,9 +14,12 @@ from app.db.models import (
     Asset,
     AudioTake,
     AuditLog,
+    ChangeSet,
     Character,
     CharacterCandidate,
     CharacterIdentityAsset,
+    DependencyEdge,
+    Episode,
     ExportArtifact,
     ExportRecord,
     GenerationRecord,
@@ -24,6 +27,7 @@ from app.db.models import (
     LipSyncTake,
     Project,
     ProposalVersion,
+    Scene,
     Shot,
     Take,
     TimelineItem,
@@ -37,6 +41,7 @@ from app.jobs.handlers.proposal import (
 from app.jobs.registry import registered_job_types
 from app.jobs.worker import PersistentJobWorker
 from app.seed import PROJECT_ID
+from app.services.dependency_analysis import apply_dependency_invalidation
 from app.services.events import latest_event_sequence, list_events
 from app.services.jobs import (
     claim_next_job,
@@ -540,6 +545,14 @@ async def test_proposal_job_is_persisted_idempotent_and_processed(
         assert session.scalar(
             select(ProposalVersion).where(ProposalVersion.project_id == project["id"])
         )
+        audit = session.scalar(
+            select(AuditLog).where(
+                AuditLog.project_id == project["id"],
+                AuditLog.action == "REQUEST_DIRECTOR_PROPOSAL_GENERATION",
+                AuditLog.entity_id == job["id"],
+            )
+        )
+        assert audit is not None
 
 
 @pytest.mark.parametrize("target_duration", [45, 90])
@@ -639,6 +652,7 @@ async def test_confirming_direction_retries_existing_failed_story_structure_job(
         headers={"Idempotency-Key": "story-retry-first-approval-v1"},
     )
     assert approved.status_code == 202
+    assert approved.headers["Idempotency-Replayed"] == "false"
     job_id = approved.json()["data"]["id"]
 
     with Session(get_engine(get_settings().database_url)) as session:
@@ -666,6 +680,21 @@ async def test_confirming_direction_retries_existing_failed_story_structure_job(
     assert retried.json()["data"]["status"] == "RETRY_WAIT"
     assert retried.json()["data"]["stage"] == "等待重试"
     assert retried.json()["data"]["error_code"] is None
+    with Session(get_engine(get_settings().database_url)) as session:
+        audits = list(
+            session.scalars(
+                select(AuditLog)
+                .where(
+                    AuditLog.project_id == project_id,
+                    AuditLog.action == "REQUEST_STORY_STRUCTURE_GENERATION",
+                    AuditLog.entity_id == job_id,
+                )
+                .order_by(AuditLog.created_at)
+            ).all()
+        )
+        assert len(audits) == 2
+        assert all(audit.entity_type == "job" for audit in audits)
+        assert all(audit.before_hash != audit.after_hash for audit in audits)
 
 
 async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> None:
@@ -677,7 +706,29 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
         headers={"Idempotency-Key": "story-directions-v1"},
     )
     assert queued.status_code == 202
+    assert queued.headers["Idempotency-Replayed"] == "false"
     assert queued.json()["data"]["max_attempts"] == 2
+    replayed_queued = await client.post(
+        f"/api/v1/projects/{project_id}/story-directions",
+        json={"expected_version": 1},
+        headers={"Idempotency-Key": "story-directions-v1"},
+    )
+    assert replayed_queued.status_code == 202
+    assert replayed_queued.headers["Idempotency-Replayed"] == "true"
+    assert replayed_queued.json()["data"] == queued.json()["data"]
+    with Session(get_engine(get_settings().database_url)) as session:
+        direction_audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == project_id,
+                    AuditLog.action == "REQUEST_STORY_DIRECTION_GENERATION",
+                    AuditLog.entity_id == queued.json()["data"]["id"],
+                )
+            ).all()
+        )
+        assert len(direction_audits) == 1
+        assert direction_audits[0].entity_type == "job"
+        assert direction_audits[0].before_hash != direction_audits[0].after_hash
     worker = PersistentJobWorker(get_settings())
     assert await worker.run_once() is True
     directions = (await client.get(f"/api/v1/projects/{project_id}/story-directions")).json()[
@@ -707,9 +758,35 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
         headers={"Idempotency-Key": "story-direction-merge-v1"},
     )
     assert merged.status_code == 200
+    assert merged.headers["Idempotency-Replayed"] == "false"
     merged_direction = merged.json()["data"]
     assert merged_direction["direction_key"] == "merged"
     assert len(merged_direction["source_proposal_ids"]) == 2
+    replayed_merge = await client.post(
+        f"/api/v1/projects/{project_id}/story-directions/merge",
+        json={
+            "expected_version": 3,
+            "source_proposal_ids": [directions[0]["id"], directions[1]["id"]],
+            "title": "情绪与强情节融合版",
+        },
+        headers={"Idempotency-Key": "story-direction-merge-v1"},
+    )
+    assert replayed_merge.status_code == 200
+    assert replayed_merge.headers["Idempotency-Replayed"] == "true"
+    assert replayed_merge.json()["data"] == merged_direction
+    with Session(get_engine(get_settings().database_url)) as session:
+        merge_audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == project_id,
+                    AuditLog.action == "MERGE_STORY_DIRECTIONS",
+                    AuditLog.entity_id == merged_direction["id"],
+                )
+            ).all()
+        )
+        assert len(merge_audits) == 1
+        assert merge_audits[0].entity_type == "proposal_version"
+        assert merge_audits[0].before_hash != merge_audits[0].after_hash
 
     estimate = (await client.get(f"/api/v1/projects/{project_id}/story-package-estimate")).json()[
         "data"
@@ -728,7 +805,29 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
         headers={"Idempotency-Key": "story-package-v1"},
     )
     assert structure_job.status_code == 202
+    assert structure_job.headers["Idempotency-Replayed"] == "false"
     assert structure_job.json()["data"]["job_type"] == "GENERATE_STORY_STRUCTURE"
+    replayed_structure_job = await client.post(
+        f"/api/v1/projects/{project_id}/story-dna/{merged_direction['version']}/approve",
+        json={"expected_version": 4, "actor": "test-writer"},
+        headers={"Idempotency-Key": "story-package-v1"},
+    )
+    assert replayed_structure_job.status_code == 202
+    assert replayed_structure_job.headers["Idempotency-Replayed"] == "true"
+    assert replayed_structure_job.json()["data"] == structure_job.json()["data"]
+    with Session(get_engine(get_settings().database_url)) as session:
+        audits = list(
+            session.scalars(
+                select(AuditLog).where(
+                    AuditLog.project_id == project_id,
+                    AuditLog.action == "REQUEST_STORY_STRUCTURE_GENERATION",
+                    AuditLog.entity_id == structure_job.json()["data"]["id"],
+                )
+            ).all()
+        )
+        assert len(audits) == 1
+        assert audits[0].entity_type == "job"
+        assert audits[0].before_hash != audits[0].after_hash
     assert await worker.run_once() is True
     workspace = (await client.get(f"/api/v1/projects/{project_id}/story-workspace")).json()["data"]
     assert len(workspace["story_dna_versions"]) == 1
@@ -962,14 +1061,11 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
     assert storyboard_workspace["workflow"]["current_gate"] == "G4_STORYBOARD"
     assert storyboard_workspace["gate"]["status"] == "PENDING_REVIEW"
 
-    project_before_regeneration = (
-        await client.get(f"/api/v1/projects/{project_id}")
-    ).json()["data"]
+    project_before_regeneration = (await client.get(f"/api/v1/projects/{project_id}")).json()[
+        "data"
+    ]
     regenerated = await client.post(
-        (
-            f"/api/v1/shot-specs/"
-            f"{storyboard_workspace['shots'][0]['shot_spec_id']}/regenerate"
-        ),
+        (f"/api/v1/shot-specs/{storyboard_workspace['shots'][0]['shot_spec_id']}/regenerate"),
         json={
             "expected_version": project_before_regeneration["lock_version"],
             "actor": "test-director",
@@ -982,10 +1078,7 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
     assert regenerated.json()["data"]["job"]["job_type"] == "GENERATE_STORYBOARD_TAKE"
 
     regenerated_replay = await client.post(
-        (
-            f"/api/v1/shot-specs/"
-            f"{storyboard_workspace['shots'][0]['shot_spec_id']}/regenerate"
-        ),
+        (f"/api/v1/shot-specs/{storyboard_workspace['shots'][0]['shot_spec_id']}/regenerate"),
         json={
             "expected_version": project_before_regeneration["lock_version"],
             "actor": "test-director",
@@ -1176,6 +1269,10 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
         "Timeline",
         "TimelineClip",
         "Character",
+        "DialogueLine",
+        "Location",
+        "AudioCue",
+        "AudioTake",
     } <= film_ir_types
     assert (
         next(item for item in film_ir_objects if item["type"] == "Story")["canonical_kind"]
@@ -1191,11 +1288,16 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
     )
     relations = {(edge["relation"], edge["inferred"]) for edge in film_ir["edges"]}
     assert ("STORY_TO_SCRIPT", False) in relations
+    assert ("STORY_TO_BEAT", True) in relations
     assert ("DERIVES_BEAT", True) in relations
     assert ("BEAT_TO_SCRIPT_SCENE", True) in relations
+    assert ("BEAT_TO_SCENE", True) in relations
     assert ("REALIZED_AS_SCENE", False) in relations
     assert ("SPECIFIES_SHOT", False) in relations
+    assert ("LOCATION_FOR_SHOT", False) in relations
     assert ("GENERATED_TAKE", False) in relations
+    assert ("DIALOGUE_TO_AUDIO", False) in relations
+    assert ("GENERATED_AUDIO_TAKE", False) in relations
     assert ("CONTAINS_CLIP", False) in relations
 
     director_project = (await client.get(f"/api/v1/projects/{project_id}")).json()["data"]
@@ -1217,6 +1319,61 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
     assert director_proposal["affected_objects"]
     assert director_proposal["preserved_objects"]
     assert all(item["approval"] == "APPROVED" for item in director_proposal["preserved_objects"])
+
+    with Session(get_engine(get_settings().database_url)) as session:
+        change_set = session.get(ChangeSet, director_proposal["proposal_id"])
+        assert change_set is not None
+        dependency_impact = json.loads(change_set.impact_json)["impact"]
+        dependency_relations = {edge["relation"] for edge in dependency_impact["dependency_edges"]}
+        assert {
+            "SPECIFIES",
+            "REALIZES",
+            "GENERATED_TAKE",
+            "OUTPUT_ASSET",
+            "USED_BY_TIMELINE",
+            "DRIVES_AUDIO",
+            "GENERATED_AUDIO_TAKE",
+        } <= dependency_relations
+        persisted_edges = list(
+            session.scalars(
+                select(DependencyEdge).where(
+                    DependencyEdge.project_id == project_id,
+                    DependencyEdge.change_set_id == change_set.id,
+                )
+            )
+        )
+        assert {edge.relation for edge in persisted_edges} == dependency_relations
+        assert all(edge.evidence for edge in persisted_edges)
+        affected_types = {item["type"] for item in dependency_impact["affected_objects"]}
+        assert {"ShotSpec", "Shot", "Take", "AudioCue", "AudioTake", "Asset"} <= affected_types
+        affected_take_ids = {
+            item["id"] for item in dependency_impact["affected_objects"] if item["type"] == "Take"
+        }
+        affected_takes = list(session.scalars(select(Take).where(Take.id.in_(affected_take_ids))))
+        preserved_take_ids = {
+            item["id"] for item in dependency_impact["preserved_objects"] if item["type"] == "Take"
+        }
+        current_project_take_ids = set(
+            session.scalars(
+                select(Take.id)
+                .join(Shot, Take.shot_id == Shot.id)
+                .join(Scene, Shot.scene_id == Scene.id)
+                .join(Episode, Scene.episode_id == Episode.id)
+                .where(Episode.project_id == project_id)
+            )
+        )
+        assert preserved_take_ids <= current_project_take_ids
+        approvals_before = {take.id: take.approval for take in affected_takes}
+        invalidated = apply_dependency_invalidation(
+            session,
+            project_id=project_id,
+            impact=dependency_impact,
+        )
+        assert invalidated["Shot"] > 0
+        assert invalidated["AudioCue"] > 0
+        assert all(take.status == "SUSPECT" for take in affected_takes)
+        assert {take.id: take.approval for take in affected_takes} == approvals_before
+        session.rollback()
 
     with Session(get_engine(get_settings().database_url)) as session:
         generated_takes = list(
@@ -1332,6 +1489,25 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
             .count()
             == 28
         )
+        command_actions = set(
+            session.scalars(
+                select(AuditLog.action).where(
+                    AuditLog.project_id == project_id,
+                    AuditLog.action.in_(
+                        [
+                            "APPROVE_PREPRODUCTION",
+                            "CREATE_EXPORT_PROFILE",
+                            "CREATE_EXPORT_MATRIX",
+                        ]
+                    ),
+                )
+            ).all()
+        )
+        assert command_actions == {
+            "APPROVE_PREPRODUCTION",
+            "CREATE_EXPORT_PROFILE",
+            "CREATE_EXPORT_MATRIX",
+        }
 
 
 async def test_unchanged_progress_checkpoint_does_not_emit_duplicate_event(
@@ -1485,15 +1661,44 @@ async def test_cancel_retry_and_worker_completion(client: AsyncClient) -> None:
         f"/api/v1/jobs/{job_id}/cancel",
         headers={"Idempotency-Key": "cancel-job-v1"},
     )
+    assert cancelled.headers["Idempotency-Replayed"] == "false"
     assert cancelled.json()["data"]["status"] == "CANCELLED"
+    replayed_cancel = await client.post(
+        f"/api/v1/jobs/{job_id}/cancel",
+        headers={"Idempotency-Key": "cancel-job-v1"},
+    )
+    assert replayed_cancel.headers["Idempotency-Replayed"] == "true"
+    assert replayed_cancel.json()["data"] == cancelled.json()["data"]
     retry = await client.post(
         f"/api/v1/jobs/{job_id}/retry",
         headers={"Idempotency-Key": "retry-job-v1"},
     )
+    assert retry.headers["Idempotency-Replayed"] == "false"
     assert retry.json()["data"]["status"] == "RETRY_WAIT"
+    replayed_retry = await client.post(
+        f"/api/v1/jobs/{job_id}/retry",
+        headers={"Idempotency-Key": "retry-job-v1"},
+    )
+    assert replayed_retry.headers["Idempotency-Replayed"] == "true"
+    assert replayed_retry.json()["data"] == retry.json()["data"]
     assert (
         datetime.fromisoformat(retry.json()["data"]["available_at"].replace("Z", "+00:00")) >= now
     )
+    with Session(get_engine(get_settings().database_url)) as session:
+        audits = list(
+            session.scalars(
+                select(AuditLog)
+                .where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.entity_id == job_id,
+                    AuditLog.action.in_(["CANCEL_JOB", "RETRY_JOB"]),
+                )
+                .order_by(AuditLog.created_at)
+            ).all()
+        )
+        assert [audit.action for audit in audits] == ["CANCEL_JOB", "RETRY_JOB"]
+        assert all(audit.entity_type == "job" for audit in audits)
+        assert all(audit.before_hash != audit.after_hash for audit in audits)
 
     worker = PersistentJobWorker(get_settings())
     assert await worker.run_once() is True
@@ -1559,8 +1764,16 @@ async def test_failed_job_exposes_and_executes_recovery_actions(client: AsyncCli
         headers={"Idempotency-Key": "save-intermediate-v1"},
     )
     assert saved.status_code == 200
+    assert saved.headers["Idempotency-Replayed"] == "false"
     assert saved.json()["data"]["status"] == "FAILED"
     assert saved.json()["data"]["error_details"]["recovery"]["intermediate_result_saved"] is True
+    replayed_saved = await client.post(
+        f"/api/v1/jobs/{job_id}/recovery",
+        json={"action": "SAVE_INTERMEDIATE"},
+        headers={"Idempotency-Key": "save-intermediate-v1"},
+    )
+    assert replayed_saved.headers["Idempotency-Replayed"] == "true"
+    assert replayed_saved.json()["data"] == saved.json()["data"]
 
     resumed = await client.post(
         f"/api/v1/jobs/{job_id}/recovery",
@@ -1568,6 +1781,7 @@ async def test_failed_job_exposes_and_executes_recovery_actions(client: AsyncCli
         headers={"Idempotency-Key": "retry-failed-parts-v1"},
     )
     assert resumed.status_code == 200
+    assert resumed.headers["Idempotency-Replayed"] == "false"
     assert resumed.json()["data"]["status"] == "RETRY_WAIT"
     assert resumed.json()["data"]["progress"] == 64
     with Session(get_engine(get_settings().database_url)) as session:
@@ -1577,6 +1791,20 @@ async def test_failed_job_exposes_and_executes_recovery_actions(client: AsyncCli
         assert directive["action"] == "RETRY_FAILED_PARTS"
         assert directive["failed_part_ids"] == ["shot-03"]
         assert persisted.output_json is not None
+        audits = list(
+            session.scalars(
+                select(AuditLog)
+                .where(
+                    AuditLog.project_id == PROJECT_ID,
+                    AuditLog.entity_id == job_id,
+                    AuditLog.action == "RECOVER_JOB",
+                )
+                .order_by(AuditLog.created_at)
+            ).all()
+        )
+        assert len(audits) == 2
+        assert all(audit.entity_type == "job" for audit in audits)
+        assert all(audit.before_hash != audit.after_hash for audit in audits)
 
     worker = PersistentJobWorker(get_settings())
     assert await worker.run_once() is True
@@ -1902,6 +2130,12 @@ async def test_approved_story_builds_character_assets_and_real_preview(
     assert approved.status_code == 202
     assert approved.json()["data"]["story"]["status"] == "APPROVED"
     assert approved.json()["data"]["job"]["job_type"] == "GENERATE_CHARACTER_CANDIDATES"
+    requested_candidates = await client.post(
+        f"/api/v1/projects/{project_id}/characters/candidates",
+        headers={"Idempotency-Key": "request-character-candidates-v1"},
+    )
+    assert requested_candidates.status_code == 202
+    assert requested_candidates.json()["data"]["id"] == approved.json()["data"]["job"]["id"]
     assert await worker.run_once() is True
 
     characters = (await client.get(f"/api/v1/projects/{project_id}/characters/candidates")).json()[
@@ -1961,6 +2195,26 @@ async def test_approved_story_builds_character_assets_and_real_preview(
         "fallback": "KEN_BURNS",
         "timeline_gap": False,
     }
+    with Session(get_engine(get_settings().database_url)) as session:
+        command_actions = set(
+            session.scalars(
+                select(AuditLog.action).where(
+                    AuditLog.project_id == project_id,
+                    AuditLog.action.in_(
+                        [
+                            "APPROVE_PROPOSAL",
+                            "REQUEST_CHARACTER_CANDIDATES",
+                            "LOCK_CHARACTER_CANDIDATE",
+                        ]
+                    ),
+                )
+            ).all()
+        )
+        assert command_actions == {
+            "APPROVE_PROPOSAL",
+            "REQUEST_CHARACTER_CANDIDATES",
+            "LOCK_CHARACTER_CANDIDATE",
+        }
 
 
 async def test_revision_compare_approve_export_and_rollback_closed_loop(
@@ -2178,6 +2432,14 @@ async def test_revision_compare_approve_export_and_rollback_closed_loop(
     assert rollback_replay.headers["Idempotency-Replayed"] == "true"
     assert rollback_replay.json()["data"] == rollback.json()["data"]
     with Session(get_engine(get_settings().database_url)) as session:
+        export_command = session.scalar(
+            select(AuditLog).where(
+                AuditLog.project_id == project_id,
+                AuditLog.action == "CREATE_EXPORT",
+                AuditLog.entity_id == export_id,
+            )
+        )
+        assert export_command is not None
         timeline_command_audits = list(
             session.scalars(
                 select(AuditLog)

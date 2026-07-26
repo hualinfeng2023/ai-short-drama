@@ -78,3 +78,4 @@ class DirectorProposalDecisionRequest(BaseModel):
     decision: Literal["APPROVE", "REJECT", "ROLLBACK"]
     actor: str = Field(default="demo-user", min_length=1, max_length=80)
     confirmed: bool
+    override_reason: str | None = Field(default=None, min_length=8, max_length=1000)

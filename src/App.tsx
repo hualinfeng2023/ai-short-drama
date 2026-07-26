@@ -23,6 +23,7 @@ function lazyRoute<T extends ComponentType>(loader: () => Promise<T>) {
 
 const CharactersPage = lazyRoute(() => import('./pages/CharactersPage').then((module) => module.CharactersPage))
 const EpisodePage = lazyRoute(() => import('./pages/EpisodePage').then((module) => module.EpisodePage))
+const FilmCanvasPage = lazyRoute(() => import('./pages/FilmCanvasPage').then((module) => module.FilmCanvasPage))
 const NewProjectPage = lazyRoute(() => import('./pages/NewProjectPage').then((module) => module.NewProjectPage))
 const PreviewPage = lazyRoute(() => import('./pages/PreviewPage').then((module) => module.PreviewPage))
 const PreproductionPage = lazyRoute(() => import('./pages/PreproductionPage').then((module) => module.PreproductionPage))
@@ -44,6 +45,7 @@ export function App() {
         <Route path="projects" element={<ProjectsPage />} />
         <Route path="projects/new" element={<NewProjectPage />} />
         <Route path="projects/:projectId" element={<ProjectBriefPage />} />
+        <Route path="projects/:projectId/canvas" element={<FilmCanvasPage />} />
         <Route path="projects/:projectId/story" element={<StoryPage />} />
         <Route path="projects/:projectId/preproduction" element={<PreproductionPage />} />
         <Route path="projects/:projectId/storyboard" element={<StoryboardPage />} />

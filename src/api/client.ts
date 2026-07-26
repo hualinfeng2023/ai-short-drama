@@ -92,6 +92,76 @@ interface ApiProjectSummary extends ApiProject {
   shot_count: number
 }
 
+interface ApiCanvasReference {
+  type: string
+  id: string
+  version_id: string | null
+}
+
+interface ApiCanvasProjection {
+  schema_version: 'film-canvas-projection-v1'
+  project_id: string
+  project_lock_version: number
+  source_projection: 'film-ir-projection-v1'
+  nodes: Array<{
+    ref: ApiCanvasReference
+    canonical_kind: string
+    canonical_status: string
+    approval_status: string
+    label: string
+    group_key: string
+    detail_route: string
+    read_only: boolean
+  }>
+  edges: Array<{
+    source: ApiCanvasReference
+    target: ApiCanvasReference
+    relation: string
+    inferred: boolean
+  }>
+  view_state_contract: {
+    schema_version: 'film-canvas-view-state-v1'
+    persistence: 'CLIENT_LOCAL'
+    allowed_fields: string[]
+    forbidden_business_fields: string[]
+  }
+}
+
+export interface CanvasReference {
+  type: string
+  id: string
+  versionId: string | null
+}
+
+export interface CanvasProjection {
+  schemaVersion: 'film-canvas-projection-v1'
+  projectId: string
+  projectLockVersion: number
+  sourceProjection: 'film-ir-projection-v1'
+  nodes: Array<{
+    ref: CanvasReference
+    canonicalKind: string
+    canonicalStatus: string
+    approvalStatus: string
+    label: string
+    groupKey: string
+    detailRoute: string
+    readOnly: true
+  }>
+  edges: Array<{
+    source: CanvasReference
+    target: CanvasReference
+    relation: string
+    inferred: boolean
+  }>
+  viewStateContract: {
+    schemaVersion: 'film-canvas-view-state-v1'
+    persistence: 'CLIENT_LOCAL'
+    allowedFields: string[]
+    forbiddenBusinessFields: string[]
+  }
+}
+
 interface ApiProjectReadiness {
   project_id: string
   workflow_mode: ProjectReadiness['workflowMode']
@@ -1162,8 +1232,8 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   return payload.data as T
 }
 
-export function mapWorkspace(workspace: ApiWorkspace): Pick<AppState, 'project' | 'jobs'> {
-  const mapIdentityReview = (review: ApiIdentityReviewRecord) => ({
+function mapIdentityReview(review: ApiIdentityReviewRecord) {
+  return {
     decision: review.decision,
     issues: review.issues,
     ...(review.note == null ? {} : { note: review.note }),
@@ -1172,8 +1242,11 @@ export function mapWorkspace(workspace: ApiWorkspace): Pick<AppState, 'project' 
     ...(review.score == null ? {} : { score: review.score }),
     referenceAssetIds: review.reference_asset_ids,
     ...(review.look_version == null ? {} : { lookVersion: review.look_version }),
-  })
-  const shots: Shot[] = workspace.shots.map((shot) => ({
+  }
+}
+
+function mapApiShot(shot: ApiShot): Shot {
+  return {
     id: shot.id,
     sceneId: shot.scene_id,
     code: shot.code,
@@ -1240,7 +1313,11 @@ export function mapWorkspace(workspace: ApiWorkspace): Pick<AppState, 'project' 
     ...(shot.latest_identity_review == null
       ? {}
       : { latestIdentityReview: mapIdentityReview(shot.latest_identity_review) }),
-  }))
+  }
+}
+
+export function mapWorkspace(workspace: ApiWorkspace): Pick<AppState, 'project' | 'jobs'> {
+  const shots = workspace.shots.map(mapApiShot)
   const scenes: Scene[] = workspace.scenes.map((scene) => ({
     id: scene.id,
     code: scene.code,
@@ -1266,6 +1343,61 @@ export async function fetchWorkspace(projectId: string, signal?: AbortSignal) {
     { signal },
   )
   return mapWorkspace(workspace)
+}
+
+export async function updatePersistedShot(
+  shotId: string,
+  expectedVersion: number,
+  patch: Pick<Partial<Shot>, 'description' | 'dialogue' | 'shotSize' | 'cameraMovement'>,
+): Promise<Shot> {
+  const result = await requestJson<ApiShot>(`/api/v1/shots/${shotId}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': crypto.randomUUID(),
+    },
+    body: JSON.stringify({
+      expected_version: expectedVersion,
+      ...(patch.description === undefined ? {} : { description: patch.description }),
+      ...(patch.dialogue === undefined ? {} : { dialogue: patch.dialogue }),
+      ...(patch.shotSize === undefined ? {} : { shot_size: patch.shotSize }),
+      ...(patch.cameraMovement === undefined
+        ? {}
+        : { camera_movement: patch.cameraMovement }),
+      actor: '创作者',
+    }),
+  })
+  return mapApiShot(result)
+}
+
+export async function reorderPersistedSceneShots(
+  sceneId: string,
+  expectedVersion: number,
+  shotIds: string[],
+): Promise<{ sceneId: string; projectLockVersion: number; shotIds: string[]; shots: Shot[] }> {
+  const result = await requestJson<{
+    scene_id: string
+    project_lock_version: number
+    shot_ids: string[]
+    shots: ApiShot[]
+  }>(`/api/v1/scenes/${sceneId}/shots/order`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': crypto.randomUUID(),
+    },
+    body: JSON.stringify({
+      expected_version: expectedVersion,
+      shot_ids: shotIds,
+      actor: '创作者',
+    }),
+  })
+  return {
+    sceneId: result.scene_id,
+    projectLockVersion: result.project_lock_version,
+    shotIds: result.shot_ids,
+    shots: result.shots.map(mapApiShot),
+  }
 }
 
 export async function fetchRuntimeConfig(signal?: AbortSignal): Promise<RuntimeConfig> {
@@ -1499,6 +1631,49 @@ export async function fetchProjects(signal?: AbortSignal): Promise<ProjectSummar
 export async function fetchProject(projectId: string, signal?: AbortSignal) {
   const project = await requestJson<ApiProject>(`/api/v1/projects/${projectId}`, { signal })
   return mapProject(project)
+}
+
+export async function fetchCanvasProjection(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<CanvasProjection> {
+  const projection = await requestJson<ApiCanvasProjection>(
+    `/api/v1/projects/${projectId}/canvas-projection`,
+    { signal },
+  )
+  const mapReference = (ref: ApiCanvasReference): CanvasReference => ({
+    type: ref.type,
+    id: ref.id,
+    versionId: ref.version_id,
+  })
+  return {
+    schemaVersion: projection.schema_version,
+    projectId: projection.project_id,
+    projectLockVersion: projection.project_lock_version,
+    sourceProjection: projection.source_projection,
+    nodes: projection.nodes.map((node) => ({
+      ref: mapReference(node.ref),
+      canonicalKind: node.canonical_kind,
+      canonicalStatus: node.canonical_status,
+      approvalStatus: node.approval_status,
+      label: node.label,
+      groupKey: node.group_key,
+      detailRoute: node.detail_route,
+      readOnly: true,
+    })),
+    edges: projection.edges.map((edge) => ({
+      source: mapReference(edge.source),
+      target: mapReference(edge.target),
+      relation: edge.relation,
+      inferred: edge.inferred,
+    })),
+    viewStateContract: {
+      schemaVersion: projection.view_state_contract.schema_version,
+      persistence: projection.view_state_contract.persistence,
+      allowedFields: projection.view_state_contract.allowed_fields,
+      forbiddenBusinessFields: projection.view_state_contract.forbidden_business_fields,
+    },
+  }
 }
 
 export async function fetchProjectReadiness(
@@ -1967,6 +2142,38 @@ export interface DirectorReviewOption {
   estimatedCostUsd: number
 }
 
+export interface DirectorTimelinePreview {
+  schemaVersion: 'director-timeline-preview-v1'
+  projectionMode: 'READ_ONLY'
+  canonicalSource: 'SCRIPT'
+  sceneLogicalId: string
+  formalTimelineVersionId: string | null
+  formalTimelineUnchanged: boolean
+  mediaGeneration: boolean
+  affectedTracks: Array<'DIALOGUE' | 'SUBTITLE'>
+  before: {
+    scriptVersionId: string
+    scriptSceneId: string
+    sceneStartMs: number
+    durationBudgetMs: number
+    dialogueWindowMs: number
+    projectedSceneWindowMs: number
+    overflowMs: number
+  }
+  after: {
+    scriptVersionId: string
+    scriptSceneId: string
+    sceneStartMs: number
+    durationBudgetMs: number
+    dialogueWindowMs: number
+    projectedSceneWindowMs: number
+    overflowMs: number
+  }
+  downstreamShiftMs: number
+  risk: 'DURATION_BUDGET_EXCEEDED' | 'DOWNSTREAM_TIMING_SHIFT' | 'NO_TIMING_CHANGE'
+  validationStatus: 'REVIEW_REQUIRED' | 'PASS'
+}
+
 export interface DirectorReviewProposal {
   proposalId: string
   projectId: string
@@ -2005,9 +2212,17 @@ export interface DirectorReviewProposal {
     estimatedDurationBeforeMs: number
     estimatedDurationAfterMs: number
     mediaGeneration: boolean
+    timelinePreview?: DirectorTimelinePreview
   } | null
   invalidated: Array<{ type: string; id: string; nextStatus?: string }>
-  approvalResult: { decision: string; actor: string; at: string } | null
+  approvalResult: {
+    decision: string
+    actor: string
+    at: string
+    validationStatus?: 'REVIEW_REQUIRED' | 'PASS' | null
+    risk?: DirectorTimelinePreview['risk'] | null
+    overrideReason?: string | null
+  } | null
   createdAt: string
 }
 
@@ -2061,9 +2276,47 @@ interface ApiDirectorReviewProposal {
     estimated_duration_before_ms: number
     estimated_duration_after_ms: number
     media_generation: boolean
+    timeline_preview?: {
+      schema_version: 'director-timeline-preview-v1'
+      projection_mode: 'READ_ONLY'
+      canonical_source: 'SCRIPT'
+      scene_logical_id: string
+      formal_timeline_version_id: string | null
+      formal_timeline_unchanged: boolean
+      media_generation: boolean
+      affected_tracks: Array<'DIALOGUE' | 'SUBTITLE'>
+      before: {
+        script_version_id: string
+        script_scene_id: string
+        scene_start_ms: number
+        duration_budget_ms: number
+        dialogue_window_ms: number
+        projected_scene_window_ms: number
+        overflow_ms: number
+      }
+      after: {
+        script_version_id: string
+        script_scene_id: string
+        scene_start_ms: number
+        duration_budget_ms: number
+        dialogue_window_ms: number
+        projected_scene_window_ms: number
+        overflow_ms: number
+      }
+      downstream_shift_ms: number
+      risk: 'DURATION_BUDGET_EXCEEDED' | 'DOWNSTREAM_TIMING_SHIFT' | 'NO_TIMING_CHANGE'
+      validation_status: 'REVIEW_REQUIRED' | 'PASS'
+    }
   } | null
   invalidated: Array<{ type: string; id: string; next_status?: string }>
-  approval_result: { decision: string; actor: string; at: string } | null
+  approval_result: {
+    decision: string
+    actor: string
+    at: string
+    validation_status?: 'REVIEW_REQUIRED' | 'PASS' | null
+    risk?: DirectorTimelinePreview['risk'] | null
+    override_reason?: string | null
+  } | null
   created_at: string
 }
 
@@ -2127,6 +2380,57 @@ function mapDirectorReviewProposal(
           estimatedDurationAfterMs:
             proposal.comparison.estimated_duration_after_ms,
           mediaGeneration: proposal.comparison.media_generation,
+          ...(proposal.comparison.timeline_preview
+            ? {
+                timelinePreview: {
+                  schemaVersion: proposal.comparison.timeline_preview.schema_version,
+                  projectionMode: proposal.comparison.timeline_preview.projection_mode,
+                  canonicalSource: proposal.comparison.timeline_preview.canonical_source,
+                  sceneLogicalId: proposal.comparison.timeline_preview.scene_logical_id,
+                  formalTimelineVersionId:
+                    proposal.comparison.timeline_preview.formal_timeline_version_id,
+                  formalTimelineUnchanged:
+                    proposal.comparison.timeline_preview.formal_timeline_unchanged,
+                  mediaGeneration: proposal.comparison.timeline_preview.media_generation,
+                  affectedTracks: proposal.comparison.timeline_preview.affected_tracks,
+                  before: {
+                    scriptVersionId:
+                      proposal.comparison.timeline_preview.before.script_version_id,
+                    scriptSceneId:
+                      proposal.comparison.timeline_preview.before.script_scene_id,
+                    sceneStartMs:
+                      proposal.comparison.timeline_preview.before.scene_start_ms,
+                    durationBudgetMs:
+                      proposal.comparison.timeline_preview.before.duration_budget_ms,
+                    dialogueWindowMs:
+                      proposal.comparison.timeline_preview.before.dialogue_window_ms,
+                    projectedSceneWindowMs:
+                      proposal.comparison.timeline_preview.before.projected_scene_window_ms,
+                    overflowMs: proposal.comparison.timeline_preview.before.overflow_ms,
+                  },
+                  after: {
+                    scriptVersionId:
+                      proposal.comparison.timeline_preview.after.script_version_id,
+                    scriptSceneId:
+                      proposal.comparison.timeline_preview.after.script_scene_id,
+                    sceneStartMs:
+                      proposal.comparison.timeline_preview.after.scene_start_ms,
+                    durationBudgetMs:
+                      proposal.comparison.timeline_preview.after.duration_budget_ms,
+                    dialogueWindowMs:
+                      proposal.comparison.timeline_preview.after.dialogue_window_ms,
+                    projectedSceneWindowMs:
+                      proposal.comparison.timeline_preview.after.projected_scene_window_ms,
+                    overflowMs: proposal.comparison.timeline_preview.after.overflow_ms,
+                  },
+                  downstreamShiftMs:
+                    proposal.comparison.timeline_preview.downstream_shift_ms,
+                  risk: proposal.comparison.timeline_preview.risk,
+                  validationStatus:
+                    proposal.comparison.timeline_preview.validation_status,
+                },
+              }
+            : {}),
         }
       : null,
     invalidated: proposal.invalidated.map((item) => ({
@@ -2134,7 +2438,16 @@ function mapDirectorReviewProposal(
       id: item.id,
       nextStatus: item.next_status,
     })),
-    approvalResult: proposal.approval_result,
+    approvalResult: proposal.approval_result
+      ? {
+          decision: proposal.approval_result.decision,
+          actor: proposal.approval_result.actor,
+          at: proposal.approval_result.at,
+          validationStatus: proposal.approval_result.validation_status,
+          risk: proposal.approval_result.risk,
+          overrideReason: proposal.approval_result.override_reason,
+        }
+      : null,
     createdAt: proposal.created_at,
   }
 }
@@ -2154,6 +2467,7 @@ export async function createDirectorReviewProposal(
   projectId: string,
   input: {
     expectedVersion: number
+    targetType?: 'SCRIPT_SCENE' | 'SCENE'
     targetId: string
     issueTypes: DirectorReviewIssueType[]
     instruction?: string
@@ -2169,7 +2483,7 @@ export async function createDirectorReviewProposal(
       },
       body: JSON.stringify({
         expected_version: input.expectedVersion,
-        target_type: 'SCRIPT_SCENE',
+        target_type: input.targetType ?? 'SCRIPT_SCENE',
         target_id: input.targetId,
         issue_types: input.issueTypes,
         instruction: input.instruction,
@@ -2208,6 +2522,7 @@ export async function decideDirectorReviewProposal(
   input: {
     expectedVersion: number
     decision: 'APPROVE' | 'REJECT' | 'ROLLBACK'
+    overrideReason?: string
   },
 ): Promise<DirectorReviewProposal> {
   const result = await requestJson<ApiDirectorReviewProposal>(
@@ -2223,6 +2538,9 @@ export async function decideDirectorReviewProposal(
         decision: input.decision,
         actor: '创作者',
         confirmed: true,
+        ...(input.overrideReason?.trim()
+          ? { override_reason: input.overrideReason.trim() }
+          : {}),
       }),
     },
   )
@@ -3385,7 +3703,10 @@ export async function confirmCharacterRevision(projectId: string, input: {
 }): Promise<void> {
   await requestJson(`/api/v1/projects/${projectId}/character-revisions`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': `character-revision-${input.impactHash}`,
+    },
     body: JSON.stringify({
       base_story_bible_id: input.baseStoryBibleId,
       base_relationship_graph_id: input.baseRelationshipGraphId,
@@ -3458,7 +3779,10 @@ export async function applyScriptExcerptRewrite(
     }
   }>(`/api/v1/script-excerpt-rewrites/${revisionId}/apply`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': `script-rewrite-apply-${revisionId}`,
+    },
     body: JSON.stringify({
       expected_version: input.expectedVersion,
       script_id: input.scriptId,
@@ -4816,11 +5140,17 @@ export async function updatePersistedShotCharacterBindings(
   })
 }
 
-export async function approvePersistedCandidateIdentity(shotId: string): Promise<void> {
+export async function approvePersistedCandidateIdentity(
+  shotId: string,
+  expectedVersion: number,
+): Promise<void> {
   await requestJson<ApiShot>(`/api/v1/shots/${shotId}/takes/candidate/identity-approve`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ actor: 'demo-user' }),
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': crypto.randomUUID(),
+    },
+    body: JSON.stringify({ expected_version: expectedVersion, actor: 'demo-user' }),
   })
 }
 

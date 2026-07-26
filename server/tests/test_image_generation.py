@@ -69,6 +69,96 @@ pytestmark = pytest.mark.anyio
             },
         ),
         (
+            "CANCEL_JOB",
+            {
+                "project_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
+            "RETRY_JOB",
+            {
+                "project_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
+            "RECOVER_JOB",
+            {
+                "project_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
+            "REQUEST_STORY_DIRECTION_GENERATION",
+            {
+                "project_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
+            "REQUEST_STORY_STRUCTURE_GENERATION",
+            {
+                "project_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
+            "MERGE_STORY_DIRECTIONS",
+            {
+                "project_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
+            "CREATE_CHARACTER_REVISION",
+            {
+                "project_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
+            "CREATE_SCRIPT_EXCERPT_REWRITE",
+            {
+                "project_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        (
+            "APPLY_SCRIPT_EXCERPT_REWRITE",
+            {
+                "project_lock_version": 1,
+                "target_version_id": "96000000-0000-4000-8000-000000000002",
+            },
+        ),
+        *[
+            (
+                command_type,
+                {
+                    "project_lock_version": 1,
+                    "target_version_id": "96000000-0000-4000-8000-000000000002",
+                },
+            )
+            for command_type in (
+                "CREATE_RELATIONSHIP_GRAPH",
+                "UPDATE_RELATIONSHIP_GRAPH",
+                "SUBMIT_RELATIONSHIP_GRAPH",
+                "WITHDRAW_RELATIONSHIP_GRAPH",
+                "REJECT_RELATIONSHIP_GRAPH",
+                "APPROVE_RELATIONSHIP_GRAPH",
+                "CREATE_RELATIONSHIP_GRAPH_REVISION",
+                "CREATE_CONFIRMED_RELATIONSHIP_REVISION",
+                "SET_RELATIONSHIP_LOCK",
+                "APPROVE_PROPOSAL",
+                "REQUEST_CHARACTER_CANDIDATES",
+                "LOCK_CHARACTER_CANDIDATE",
+                "APPROVE_PREPRODUCTION",
+                "CREATE_EXPORT",
+                "CREATE_EXPORT_PROFILE",
+                "CREATE_EXPORT_MATRIX",
+            )
+        ],
+        (
             "APPLY_CHARACTER_CHANGE",
             {
                 "object_lock_version": 1,

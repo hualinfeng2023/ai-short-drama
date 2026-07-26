@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.db.models import (
+    Project,
     ScriptExcerptRevision,
     ScriptLine,
     ScriptScene,
@@ -14,7 +15,7 @@ from app.db.models import (
 )
 from app.services.creative_story import revise_script
 from app.services.events import append_event
-from app.services.projects import version_conflict
+from app.services.projects import content_hash, version_conflict
 from app.services.text_provider import (
     TextProviderError,
     generate_script_excerpt_rewrite,
@@ -72,9 +73,36 @@ def script_excerpt_rewrite_to_read(
     }
 
 
-async def create_script_excerpt_rewrite(
+def script_excerpt_revision_state_hash(revision: ScriptExcerptRevision) -> str:
+    return content_hash(
+        {
+            "id": revision.id,
+            "project_id": revision.project_id,
+            "base_script_version_id": revision.base_script_version_id,
+            "base_line_id": revision.base_line_id,
+            "parent_revision_id": revision.parent_revision_id,
+            "applied_script_version_id": revision.applied_script_version_id,
+            "version": revision.version,
+            "selection_start": revision.selection_start,
+            "selection_end": revision.selection_end,
+            "original_text": revision.original_text,
+            "proposed_text": revision.proposed_text,
+            "action": revision.action,
+            "custom_instruction": revision.custom_instruction,
+            "tone": revision.tone,
+            "rationale": revision.rationale,
+            "status": revision.status,
+            "provider": revision.provider,
+            "model": revision.model,
+            "applied_at": (
+                revision.applied_at.isoformat() if revision.applied_at is not None else None
+            ),
+        }
+    )
+
+
+def _validated_rewrite_source(
     session: Session,
-    settings: Settings,
     *,
     script_id: str,
     line_id: str,
@@ -85,7 +113,14 @@ async def create_script_excerpt_rewrite(
     custom_instruction: str | None,
     tone: str | None,
     parent_revision_id: str | None,
-) -> dict[str, object]:
+) -> tuple[
+    Project,
+    ScriptVersion,
+    ScriptScene,
+    ScriptLine,
+    ScriptExcerptRevision | None,
+    str,
+]:
     script, scene, line = _script_line_context(
         session,
         script_id=script_id,
@@ -142,15 +177,31 @@ async def create_script_excerpt_rewrite(
                 },
             )
 
+    return project, script, scene, line, parent, selected_text
+
+
+async def generate_script_excerpt_rewrite_candidate(
+    session: Session,
+    settings: Settings,
+    **kwargs: object,
+) -> dict[str, object]:
+    project, script, scene, line, parent, selected_text = _validated_rewrite_source(
+        session,
+        **kwargs,
+    )
     try:
         result = await generate_script_excerpt_rewrite(
             settings,
             selected_text=selected_text,
             full_line=line.text,
             scene_context=f"{scene.heading}；场景目的：{scene.purpose}",
-            action=action,
-            tone=tone,
-            custom_instruction=custom_instruction,
+            action=str(kwargs["action"]),
+            tone=kwargs.get("tone") if isinstance(kwargs.get("tone"), str) else None,
+            custom_instruction=(
+                kwargs.get("custom_instruction")
+                if isinstance(kwargs.get("custom_instruction"), str)
+                else None
+            ),
         )
     except TextProviderError as exc:
         raise HTTPException(
@@ -162,6 +213,43 @@ async def create_script_excerpt_rewrite(
                 "details": exc.details,
             },
         ) from exc
+    return {
+        "project_id": project.id,
+        "script_id": script.id,
+        "scene_id": scene.id,
+        "line_id": line.id,
+        "parent_revision_id": parent.id if parent else None,
+        "original_text": selected_text,
+        "proposed_text": str(result.payload["rewritten_text"]),
+        "rationale": str(result.payload["rationale"]),
+        "provider": result.provider,
+        "model": result.model,
+    }
+
+
+def persist_script_excerpt_rewrite(
+    session: Session,
+    *,
+    proposed_text: str,
+    rationale: str,
+    provider: str,
+    model: str,
+    original_text: str,
+    commit: bool = True,
+    **kwargs: object,
+) -> dict[str, object]:
+    project, script, scene, line, parent, selected_text = _validated_rewrite_source(
+        session,
+        **kwargs,
+    )
+    if selected_text != original_text:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "SCRIPT_REWRITE_SOURCE_CHANGED",
+                "message": "原文已经变化，请基于最新剧本重新选择并改写",
+            },
+        )
 
     version = (
         session.scalar(
@@ -185,17 +273,21 @@ async def create_script_excerpt_rewrite(
         scene_ordinal=scene.ordinal,
         line_ordinal=line.ordinal,
         version=version,
-        selection_start=selection_start,
-        selection_end=selection_end,
+        selection_start=int(kwargs["selection_start"]),
+        selection_end=int(kwargs["selection_end"]),
         original_text=selected_text,
-        proposed_text=str(result.payload["rewritten_text"]),
-        action=action,
-        custom_instruction=custom_instruction,
-        tone=tone,
-        rationale=str(result.payload["rationale"]),
+        proposed_text=proposed_text,
+        action=str(kwargs["action"]),
+        custom_instruction=(
+            kwargs.get("custom_instruction")
+            if isinstance(kwargs.get("custom_instruction"), str)
+            else None
+        ),
+        tone=kwargs.get("tone") if isinstance(kwargs.get("tone"), str) else None,
+        rationale=rationale,
         status="GENERATED",
-        provider=result.provider,
-        model=result.model,
+        provider=provider,
+        model=model,
         created_at=datetime.now(UTC),
         applied_at=None,
     )
@@ -209,12 +301,35 @@ async def create_script_excerpt_rewrite(
             "revision_id": revision.id,
             "script_id": script.id,
             "line_id": line.id,
-            "action": action,
+            "action": str(kwargs["action"]),
             "version": version,
         },
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     return script_excerpt_rewrite_to_read(revision)
+
+
+async def create_script_excerpt_rewrite(
+    session: Session,
+    settings: Settings,
+    **kwargs: object,
+) -> dict[str, object]:
+    generated = await generate_script_excerpt_rewrite_candidate(
+        session,
+        settings,
+        **kwargs,
+    )
+    return persist_script_excerpt_rewrite(
+        session,
+        **kwargs,
+        original_text=str(generated["original_text"]),
+        proposed_text=str(generated["proposed_text"]),
+        rationale=str(generated["rationale"]),
+        provider=str(generated["provider"]),
+        model=str(generated["model"]),
+    )
 
 
 def list_script_excerpt_rewrites(
@@ -248,6 +363,7 @@ def apply_script_excerpt_rewrite(
     script_id: str,
     line_id: str,
     expected_version: int,
+    commit: bool = True,
 ) -> dict[str, object]:
     revision = session.get(ScriptExcerptRevision, revision_id)
     if revision is None:
@@ -300,6 +416,7 @@ def apply_script_excerpt_rewrite(
         scope="LINE",
         entity_id=line.id,
         changes={"text": revised_text},
+        commit=False,
     )
     revision = session.get(ScriptExcerptRevision, revision_id)
     if revision is None:
@@ -318,7 +435,9 @@ def apply_script_excerpt_rewrite(
             "script_id": str(script_result["id"]),
         },
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     return {
         "rewrite": script_excerpt_rewrite_to_read(revision),
         "script": script_result,

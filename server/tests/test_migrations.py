@@ -3,8 +3,9 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from app.config import SERVER_ROOT
 from sqlalchemy import create_engine, inspect, text
+
+from app.config import SERVER_ROOT
 
 
 def test_v1_upgrade_recovers_from_partial_sqlite_ddl(
@@ -54,6 +55,7 @@ def test_v1_upgrade_recovers_from_partial_sqlite_ddl(
         "script_scenes",
         "script_lines",
         "script_excerpt_revisions",
+        "dependency_edges",
         "character_look_versions",
         "voice_profiles",
         "location_versions",
@@ -203,7 +205,105 @@ def test_v1_upgrade_recovers_from_partial_sqlite_ddl(
         "base_relationship_graph_id",
         "result_relationship_graph_id",
     }
-    assert revision == "0025_script_excerpt_revisions"
+    assert {item["name"] for item in inspector.get_columns("dependency_edges")} >= {
+        "project_id",
+        "change_set_id",
+        "source_type",
+        "source_id",
+        "source_version_id",
+        "target_type",
+        "target_id",
+        "target_version_id",
+        "relation",
+        "evidence",
+        "inferred",
+    }
+    assert {
+        "ix_dependency_edges_change_set_id",
+        "ix_dependency_edges_project_source",
+        "ix_dependency_edges_project_target",
+    } <= {item["name"] for item in inspector.get_indexes("dependency_edges")}
+    assert revision == "0026_dependency_edges"
     if platform_targets is not None:
         assert '"priority":"PRIMARY"' in platform_targets
     command.check(config)
+
+
+def test_dependency_edge_migration_backfills_and_rolls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "dependency-edge-migration"
+    data_dir.mkdir()
+    database_url = f"sqlite:///{data_dir / 'app.db'}"
+    monkeypatch.setenv("DATA_DIR", str(data_dir))
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = Config(str(SERVER_ROOT / "alembic.ini"))
+    command.upgrade(config, "0025_script_excerpt_revisions")
+    engine = create_engine(database_url)
+    project_id = "10000000-0000-4000-8000-000000000001"
+    change_set_id = "20000000-0000-4000-8000-000000000001"
+    impact = (
+        '{"impact":{"dependency_edges":[{"source":{"type":"ScriptScene",'
+        '"id":"30000000-0000-4000-8000-000000000001"},'
+        '"target":{"type":"ShotSpec","id":"40000000-0000-4000-8000-000000000001"},'
+        '"relation":"SPECIFIES","evidence":"shot_specs.script_scene_id","inferred":false}]}}'
+    )
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO projects (
+                    id, name, idea, genre, style, target_duration_sec, aspect_ratio,
+                    target_platform, status, lock_version, available_points,
+                    timeline_version, preview_approved, export_ready, created_at, updated_at
+                ) VALUES (
+                    :id, '迁移测试项目', '验证依赖边回填', 'drama', 'cinematic', 60, '9:16',
+                    'douyin', 'DRAFT', 1, 100, 1, 0, 0,
+                    '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z'
+                )
+                """
+            ),
+            {"id": project_id},
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO change_sets (
+                    id, project_id, scope_json, instruction, impact_json, estimate_json,
+                    status, created_at
+                ) VALUES (
+                    :id, :project_id, '{}', '迁移回填测试', :impact, '{}',
+                    'PROPOSED', '2026-07-26T00:00:00Z'
+                )
+                """
+            ),
+            {"id": change_set_id, "project_id": project_id, "impact": impact},
+        )
+
+    command.upgrade(config, "head")
+    with engine.connect() as connection:
+        edge = connection.execute(
+            text(
+                """
+                SELECT project_id, change_set_id, source_type, target_type, relation,
+                       evidence, inferred
+                FROM dependency_edges
+                """
+            )
+        ).mappings().one()
+    assert dict(edge) == {
+        "project_id": project_id,
+        "change_set_id": change_set_id,
+        "source_type": "ScriptScene",
+        "target_type": "ShotSpec",
+        "relation": "SPECIFIES",
+        "evidence": "shot_specs.script_scene_id",
+        "inferred": 0,
+    }
+
+    command.downgrade(config, "0025_script_excerpt_revisions")
+    assert "dependency_edges" not in inspect(engine).get_table_names()
+    command.upgrade(config, "head")
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT COUNT(*) FROM dependency_edges")).scalar_one() == 1

@@ -110,6 +110,7 @@ def create_export(
     actor: str,
     idempotency_key: str,
     trace_id: str,
+    commit: bool = True,
 ) -> tuple[ExportRead, JobRead, bool]:
     job_key = f"export:{project_id}:{idempotency_key}"
     existing_job = session.scalar(select(Job).where(Job.idempotency_key == job_key))
@@ -204,7 +205,9 @@ def create_export(
         event_type="export.created",
         payload={"export_id": export.id, "timeline_id": timeline.id, "profile": profile},
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     session.refresh(job)
     return export_to_read(export), job_to_read(job), replayed
 

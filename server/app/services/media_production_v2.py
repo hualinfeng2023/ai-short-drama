@@ -752,6 +752,7 @@ def decide_review(
     issues: list[str],
     note: str | None,
     actor: str,
+    commit: bool = True,
 ) -> tuple[dict[str, object], Job | None]:
     review = session.get(ReviewRecord, review_id)
     if review is None:
@@ -760,7 +761,12 @@ def decide_review(
     if project.lock_version != expected_version:
         raise version_conflict(project, expected_version)
     if review.status != "PENDING_REVIEW":
-        return list_reviews(session, project.id)[0], None
+        return {
+            "id": review.id,
+            "status": review.status,
+            "decision": review.decision,
+            "entity_id": review.entity_id,
+        }, None
     now = datetime.now(UTC)
     review.status = "APPROVED" if decision == "APPROVE" else "REJECTED"
     review.decision = decision
@@ -816,7 +822,9 @@ def decide_review(
         event_type="review.decided",
         payload={"review_id": review.id, "decision": decision, "entity_id": review.entity_id},
     )
-    session.commit()
+    session.flush()
+    if commit:
+        session.commit()
     return {
         "id": review.id,
         "status": review.status,

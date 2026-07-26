@@ -1,10 +1,13 @@
+from uuid import NAMESPACE_URL, uuid4, uuid5
+
 from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.trace import success
-from app.db.models import Scene, Shot
+from app.db.models import BriefVersion, Project, Scene, Shot, ShotSpec
 from app.db.session import get_session
+from app.domain.commands import CommandActor, DirectorCommand, ExpectedVersion
 from app.schemas import (
     BriefAvoidancesSuggestionRead,
     BriefAvoidancesSuggestionRequest,
@@ -23,19 +26,24 @@ from app.schemas import (
     ProjectReadinessRead,
     ProjectUpdate,
     SceneRead,
+    SceneShotOrderRequest,
+    ShotSpecUpdateRequest,
 )
 from app.services.brief_assistant import (
     suggest_brief_avoidances,
     suggest_brief_blocking_questions,
     suggest_brief_requirements,
 )
+from app.services.domain_commands import (
+    dispatch_domain_command,
+    dispatch_project_create_command,
+    dispatch_project_delete_command,
+)
 from app.services.project_naming import ProjectNamingError, suggest_project_name
 from app.services.project_readiness import get_project_readiness
 from app.services.projects import (
-    create_project,
-    delete_project,
+    content_hash,
     list_brief_versions,
-    update_project,
 )
 from app.services.story_rewriter import StoryRewriteError, rewrite_story_idea
 from app.services.workspace import (
@@ -63,9 +71,33 @@ async def create(
     idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=160),
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
-    result = await create_project(session, payload, idempotency_key)
-    response.headers["Idempotency-Replayed"] = str(result.idempotency_replayed).lower()
-    return success(result)
+    fingerprint = content_hash(
+        {
+            "route": "projects:create",
+            "project": payload.model_dump(mode="json"),
+            "actor": "demo-user",
+        }
+    )
+    command_id = str(uuid5(NAMESPACE_URL, f"CREATE_PROJECT:{idempotency_key}"))
+    execution = await dispatch_project_create_command(
+        session,
+        command=DirectorCommand(
+            command_id=command_id,
+            command_type="CREATE_PROJECT",
+            actor=CommandActor(type="USER", id="demo-user"),
+            target_object_id=command_id,
+            target_version_id=command_id,
+            expected_version=ExpectedVersion(
+                project_lock_version=1,
+                target_version_id=command_id,
+            ),
+            payload={"project": payload.model_dump(mode="json"), "confirmed": True},
+            idempotency_key=idempotency_key,
+        ),
+        request_fingerprint=fingerprint,
+    )
+    response.headers["Idempotency-Replayed"] = str(execution.idempotency_replayed).lower()
+    return success(execution.result)
 
 
 @router.post("/projects/{project_id}/name-suggestions")
@@ -160,8 +192,42 @@ def project(project_id: str, session: Session = Depends(get_session)) -> dict[st
 
 
 @router.delete("/projects/{project_id}")
-def remove_project(project_id: str, session: Session = Depends(get_session)) -> dict[str, object]:
-    return success(delete_project(session, project_id))
+def remove_project(
+    project_id: str,
+    response: Response,
+    idempotency_key: str | None = Header(
+        default=None, alias="Idempotency-Key", min_length=8, max_length=160
+    ),
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    project_model = session.get(Project, project_id)
+    fingerprint = content_hash(
+        {
+            "route": f"projects:delete:{project_id}",
+            "actor": "demo-user",
+        }
+    )
+    effective_key = idempotency_key or f"project-delete-{project_id}"
+    execution = dispatch_project_delete_command(
+        session,
+        project_id=project_id,
+        command=DirectorCommand(
+            command_id=str(uuid5(NAMESPACE_URL, f"{project_id}:DELETE_PROJECT:{effective_key}")),
+            command_type="DELETE_PROJECT",
+            actor=CommandActor(type="USER", id="demo-user"),
+            target_object_id=project_id,
+            target_version_id=project_id,
+            expected_version=ExpectedVersion(
+                project_lock_version=project_model.lock_version if project_model else 1,
+                target_version_id=project_id,
+            ),
+            payload={"confirmed": True},
+            idempotency_key=effective_key,
+        ),
+        request_fingerprint=fingerprint,
+    )
+    response.headers["Idempotency-Replayed"] = str(execution.idempotency_replayed).lower()
+    return success(execution.result)
 
 
 @router.get("/projects/{project_id}/brief-versions")
@@ -177,9 +243,51 @@ def brief_versions(
 def edit_project(
     project_id: str,
     payload: ProjectUpdate,
+    response: Response,
+    idempotency_key: str | None = Header(
+        default=None, alias="Idempotency-Key", min_length=8, max_length=160
+    ),
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
-    return success(update_project(session, project_id, payload))
+    project_model = project_or_404(session, project_id)
+    latest_brief = session.scalar(
+        select(BriefVersion)
+        .where(BriefVersion.project_id == project_id)
+        .order_by(BriefVersion.version.desc())
+    )
+    target_version_id = latest_brief.id if latest_brief is not None else project_model.id
+    changes = payload.model_dump(mode="json", exclude={"expected_version"}, exclude_none=True)
+    fingerprint = content_hash(
+        {
+            "route": f"projects:update:{project_id}",
+            "expected_version": payload.expected_version,
+            "changes": changes,
+            "actor": "demo-user",
+        }
+    )
+    effective_key = idempotency_key or f"project-update-{fingerprint}"
+    execution = dispatch_domain_command(
+        session,
+        project_id=project_id,
+        command=DirectorCommand(
+            command_id=str(
+                uuid5(NAMESPACE_URL, f"{project_id}:UPDATE_PROJECT_BRIEF:{effective_key}")
+            ),
+            command_type="UPDATE_PROJECT_BRIEF",
+            actor=CommandActor(type="USER", id="demo-user"),
+            target_object_id=project_id,
+            target_version_id=target_version_id,
+            expected_version=ExpectedVersion(
+                project_lock_version=payload.expected_version,
+                target_version_id=target_version_id,
+            ),
+            payload={"changes": changes, "confirmed": True},
+            idempotency_key=effective_key,
+        ),
+        request_fingerprint=fingerprint,
+    )
+    response.headers["Idempotency-Replayed"] = str(execution.idempotency_replayed).lower()
+    return success(execution.result)
 
 
 @router.get("/projects/{project_id}/workspace")
@@ -224,3 +332,109 @@ def scene(scene_id: str, session: Session = Depends(get_session)) -> dict[str, o
 @router.get("/shots/{shot_id}")
 def shot(shot_id: str, session: Session = Depends(get_session)) -> dict[str, object]:
     return success(shot_to_read(session, shot_or_404(session, shot_id)))
+
+
+@router.patch("/shots/{shot_id}")
+def update_shot_spec(
+    shot_id: str,
+    payload: ShotSpecUpdateRequest,
+    response: Response,
+    idempotency_key: str | None = Header(
+        default=None,
+        alias="Idempotency-Key",
+        min_length=8,
+        max_length=160,
+    ),
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    shot_model = shot_or_404(session, shot_id)
+    project_id = shot_model.scene.episode.project_id
+    spec = session.scalar(select(ShotSpec).where(ShotSpec.shot_id == shot_model.id))
+    target_version_id = spec.id if spec is not None else shot_model.id
+    command_id = (
+        str(uuid5(NAMESPACE_URL, f"{project_id}:domain-command:{idempotency_key}"))
+        if idempotency_key
+        else str(uuid4())
+    )
+    changes = payload.model_dump(
+        mode="json",
+        exclude={"expected_version", "actor"},
+        exclude_none=True,
+    )
+    execution = dispatch_domain_command(
+        session,
+        project_id=project_id,
+        command=DirectorCommand(
+            command_id=command_id,
+            command_type="UPDATE_SHOT_SPEC",
+            actor=CommandActor(type="USER", id=payload.actor),
+            target_object_id=shot_model.id,
+            target_version_id=target_version_id,
+            expected_version=ExpectedVersion(
+                object_lock_version=payload.expected_version,
+                target_version_id=target_version_id,
+            ),
+            payload={**changes, "confirmed": True},
+            idempotency_key=idempotency_key or f"shot-update-adapter:{command_id}",
+        ),
+        request_fingerprint=content_hash(
+            {
+                "route": f"shot-update:{shot_model.id}",
+                "expected_version": payload.expected_version,
+                "changes": changes,
+            }
+        ),
+    )
+    response.headers["Idempotency-Replayed"] = str(execution.idempotency_replayed).lower()
+    return success(execution.result)
+
+
+@router.put("/scenes/{scene_id}/shots/order")
+def reorder_scene_shots(
+    scene_id: str,
+    payload: SceneShotOrderRequest,
+    response: Response,
+    idempotency_key: str | None = Header(
+        default=None,
+        alias="Idempotency-Key",
+        min_length=8,
+        max_length=160,
+    ),
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    scene_model = scene_or_404(session, scene_id)
+    project = scene_model.episode.project
+    command_id = (
+        str(uuid5(NAMESPACE_URL, f"{project.id}:domain-command:{idempotency_key}"))
+        if idempotency_key
+        else str(uuid4())
+    )
+    execution = dispatch_domain_command(
+        session,
+        project_id=project.id,
+        command=DirectorCommand(
+            command_id=command_id,
+            command_type="REORDER_SCENE_SHOTS",
+            actor=CommandActor(type="USER", id=payload.actor),
+            target_object_id=scene_model.id,
+            target_version_id=scene_model.id,
+            expected_version=ExpectedVersion(
+                project_lock_version=payload.expected_version,
+                target_version_id=scene_model.id,
+            ),
+            payload={
+                "shot_ids": payload.shot_ids,
+                "confirmed": True,
+            },
+            idempotency_key=idempotency_key or f"shot-order-adapter:{command_id}",
+        ),
+        request_fingerprint=content_hash(
+            {
+                "route": f"scene-shot-order:{scene_model.id}",
+                "expected_version": payload.expected_version,
+                "shot_ids": payload.shot_ids,
+            }
+        ),
+    )
+    response.headers["Idempotency-Replayed"] = str(execution.idempotency_replayed).lower()
+    return success(execution.result)

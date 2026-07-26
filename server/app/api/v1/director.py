@@ -206,6 +206,7 @@ def decide_director_proposal(
             payload={
                 "decision": payload.decision,
                 "confirmed": payload.confirmed,
+                "override_reason": payload.override_reason,
             },
             idempotency_key=idempotency_key,
         ),
