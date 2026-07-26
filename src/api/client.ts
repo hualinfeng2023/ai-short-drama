@@ -2329,6 +2329,7 @@ export async function createDirectorReviewProposal(
   projectId: string,
   input: {
     expectedVersion: number
+    targetType?: 'SCRIPT_SCENE' | 'SCENE'
     targetId: string
     issueTypes: DirectorReviewIssueType[]
     instruction?: string
@@ -2344,7 +2345,7 @@ export async function createDirectorReviewProposal(
       },
       body: JSON.stringify({
         expected_version: input.expectedVersion,
-        target_type: 'SCRIPT_SCENE',
+        target_type: input.targetType ?? 'SCRIPT_SCENE',
         target_id: input.targetId,
         issue_types: input.issueTypes,
         instruction: input.instruction,

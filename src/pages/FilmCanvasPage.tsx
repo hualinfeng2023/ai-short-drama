@@ -13,18 +13,36 @@ import {
   type Viewport,
 } from '@xyflow/react'
 import '@xyflow/react/dist/base.css'
-import { ArrowUpRight, RefreshCw } from 'lucide-react'
+import { AlertTriangle, ArrowUpRight, GitMerge, LockKeyhole, RefreshCw } from 'lucide-react'
 import { Link, useParams } from 'react-router'
-import { fetchCanvasProjection, type CanvasProjection, type CanvasReference } from '../api/client'
 import {
+  ApiError,
+  createDirectorReviewProposal,
+  decideDirectorReviewProposal,
+  executeDirectorReviewProposal,
+  fetchCanvasProjection,
+  fetchDirectorReviewProposals,
+  type CanvasProjection,
+  type CanvasReference,
+  type DirectorReviewProposal,
+} from '../api/client'
+import {
+  canvasProjectionSignature,
   createCanvasViewState,
   parseCanvasViewState,
   projectCanvasGraph,
+  resolveDirectorReviewTarget,
   type FilmCanvasEdge,
   type FilmCanvasNode,
 } from '../canvas/filmCanvasProjection'
+import { ImpactConfirmModal } from '../components/ConfirmModal'
+import {
+  DirectorReviewCard,
+  type DirectorReviewAction,
+} from '../components/director-review/DirectorReviewCard'
 import { PageLoadingSkeleton } from '../components/PageLoadingSkeleton'
 import { Button, PageHeader, StatusBadge, Surface, getStatusLabel } from '../components/ui'
+import { useToast } from '../store/ToastContext'
 
 const VIEW_STATE_KEY_PREFIX = 'film-canvas-view-state-v1'
 const DEFAULT_VIEWPORT: Viewport = { x: 0, y: 0, zoom: 1 }
@@ -84,6 +102,7 @@ const nodeTypes = { filmObject: FilmObjectNode }
 
 export function FilmCanvasPage() {
   const { projectId } = useParams()
+  const { notify } = useToast()
   const [projection, setProjection] = useState<CanvasProjection | null>(null)
   const [nodes, setNodes] = useState<FilmCanvasNode[]>([])
   const [edges, setEdges] = useState<FilmCanvasEdge[]>([])
@@ -91,12 +110,18 @@ export function FilmCanvasPage() {
   const [hasSavedViewport, setHasSavedViewport] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const projectionLockRef = useRef<number | null>(null)
+  const [directorProposals, setDirectorProposals] = useState<DirectorReviewProposal[]>([])
+  const [directorSelections, setDirectorSelections] = useState<Record<string, string>>({})
+  const [directorBusy, setDirectorBusy] = useState(false)
+  const [directorError, setDirectorError] = useState<string | null>(null)
+  const [directorAction, setDirectorAction] = useState<DirectorReviewAction | null>(null)
+  const projectionSignatureRef = useRef<string | null>(null)
 
   const load = useCallback(async (signal?: AbortSignal, force = false) => {
     if (!projectId) return
     const nextProjection = await fetchCanvasProjection(projectId, signal)
-    if (!force && projectionLockRef.current === nextProjection.projectLockVersion) return
+    const nextSignature = canvasProjectionSignature(nextProjection)
+    if (!force && projectionSignatureRef.current === nextSignature) return
     let saved = null
     try {
       saved = parseCanvasViewState(
@@ -112,13 +137,13 @@ export function FilmCanvasPage() {
     setEdges(graph.edges)
     setViewport(graph.viewport ?? DEFAULT_VIEWPORT)
     setHasSavedViewport(graph.viewport !== null)
-    projectionLockRef.current = nextProjection.projectLockVersion
+    projectionSignatureRef.current = nextSignature
   }, [projectId])
 
   useEffect(() => {
     const controller = new AbortController()
     let hasSnapshot = false
-    projectionLockRef.current = null
+    projectionSignatureRef.current = null
     setLoading(true)
     setError(null)
     const refresh = async () => {
@@ -143,6 +168,28 @@ export function FilmCanvasPage() {
       window.clearInterval(interval)
     }
   }, [load])
+
+  const loadDirectorProposals = useCallback(async (signal?: AbortSignal) => {
+    if (!projectId) return
+    const next = await fetchDirectorReviewProposals(projectId, signal)
+    setDirectorProposals(next)
+  }, [projectId])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    const refresh = () => {
+      void loadDirectorProposals(controller.signal).catch((reason: unknown) => {
+        if (reason instanceof DOMException && reason.name === 'AbortError') return
+        setDirectorError(reason instanceof Error ? reason.message : 'Director 建议读取失败')
+      })
+    }
+    refresh()
+    const interval = window.setInterval(refresh, PROJECTION_REFRESH_INTERVAL_MS)
+    return () => {
+      controller.abort()
+      window.clearInterval(interval)
+    }
+  }, [loadDirectorProposals])
 
   useEffect(() => {
     if (!projection || !projectId) return
@@ -173,6 +220,113 @@ export function FilmCanvasPage() {
     () => nodes.filter((node) => node.selected).map((node) => node.data.projection.ref),
     [nodes],
   )
+
+  const directorTarget = useMemo(
+    () => projection && selectedNode
+      ? resolveDirectorReviewTarget(projection, selectedNode.data.projection.ref)
+      : null,
+    [projection, selectedNode],
+  )
+
+  const selectedDirectorProposal = useMemo(() => {
+    if (!projection || !directorTarget || !selectedNode) return null
+    const selectedRef = selectedNode.data.projection.ref
+    const logicalScriptSceneId = selectedRef.type === 'ScriptScene'
+      ? selectedRef.id
+      : projection.edges.find(
+        (edge) => edge.relation === 'REALIZED_AS_SCENE'
+          && edge.target.type === 'Scene'
+          && edge.target.id === selectedRef.id,
+      )?.source.id
+    const proposalIds = projection.edges
+      .filter(
+        (edge) => edge.relation === 'PROPOSES_CHANGE_TO'
+          && edge.target.type === 'ScriptScene'
+          && edge.target.id === logicalScriptSceneId,
+      )
+      .map((edge) => edge.source.id)
+      .reverse()
+    return proposalIds
+      .map((proposalId) => directorProposals.find((item) => item.proposalId === proposalId))
+      .find((item): item is DirectorReviewProposal => item !== undefined)
+      ?? directorProposals.find((item) => item.scriptSceneId === directorTarget.scriptSceneId)
+      ?? null
+  }, [directorProposals, directorTarget, projection, selectedNode])
+
+  function upsertDirectorProposal(next: DirectorReviewProposal) {
+    setDirectorProposals((current) => [
+      next,
+      ...current.filter((item) => item.proposalId !== next.proposalId),
+    ])
+    setDirectorSelections((current) => ({
+      ...current,
+      [next.proposalId]: current[next.proposalId] ?? next.recommendedOption,
+    }))
+  }
+
+  async function reviewSelectedObject() {
+    if (!projectId || !projection || !directorTarget || directorBusy) return
+    setDirectorBusy(true)
+    setDirectorError(null)
+    try {
+      const proposal = await createDirectorReviewProposal(projectId, {
+        expectedVersion: projection.projectLockVersion,
+        targetType: directorTarget.targetType,
+        targetId: directorTarget.targetId,
+        issueTypes: ['STORY_LOGIC', 'CHARACTER_MOTIVATION', 'AI_DIALOGUE', 'PACING'],
+        instruction: '检查故事因果、人物当下目标、对白 AI 味和场景节奏。',
+      })
+      upsertDirectorProposal(proposal)
+      await load(undefined, true)
+      notify('Director 已完成审查，请选择修复方案。')
+    } catch (reason) {
+      setDirectorError(
+        reason instanceof ApiError && reason.code === 'VERSION_CONFLICT'
+          ? '项目版本已经变化，请等待画布刷新后重新审查。'
+          : reason instanceof Error ? reason.message : 'Director 审查失败',
+      )
+    } finally {
+      setDirectorBusy(false)
+    }
+  }
+
+  async function confirmDirectorAction() {
+    if (!directorAction || !projection || directorBusy) return
+    const action = directorAction
+    setDirectorBusy(true)
+    setDirectorError(null)
+    try {
+      const next = action.type === 'EXECUTE'
+        ? await executeDirectorReviewProposal(action.proposal.proposalId, {
+            expectedVersion: projection.projectLockVersion,
+            optionId: action.optionId,
+          })
+        : await decideDirectorReviewProposal(action.proposal.proposalId, {
+            expectedVersion: projection.projectLockVersion,
+            decision: action.decision,
+          })
+      upsertDirectorProposal(next)
+      setDirectorAction(null)
+      await Promise.all([load(undefined, true), loadDirectorProposals()])
+      notify(
+        action.type === 'EXECUTE'
+          ? '修改版剧本已创建；受影响下游对象已标记为需要复核。'
+          : action.decision === 'APPROVE'
+            ? 'Director 修改版已批准。'
+            : action.decision === 'ROLLBACK'
+              ? '恢复版本已创建，全部版本均可追溯。'
+              : 'Director 建议已拒绝，剧本未发生变化。',
+      )
+    } catch (reason) {
+      setDirectorError(
+        reason instanceof ApiError && reason.code === 'VERSION_CONFLICT'
+          ? '项目版本已经变化，请等待画布刷新后重新确认。'
+          : reason instanceof Error ? reason.message : 'Director 操作失败',
+      )
+    } finally {
+      setDirectorBusy(false)
+    }
+  }
 
   if (!projectId) {
     return <div className="page"><p role="alert">缺少项目编号，无法读取创作画布。</p></div>
@@ -209,7 +363,7 @@ export function FilmCanvasPage() {
               } catch {
                 // 本地存储不可用时直接重建当前会话布局。
               }
-              projectionLockRef.current = null
+              projectionSignatureRef.current = null
               void load(undefined, true)
             }}
             variant="secondary"
@@ -278,6 +432,105 @@ export function FilmCanvasPage() {
           )}
         </Surface>
       </div>
+      {selectedNode && ['Scene', 'ScriptScene'].includes(selectedNode.data.projection.ref.type) ? (
+        <Surface className="film-canvas-director">
+          <header>
+            <div>
+              <p className="eyebrow">同一 Command 边界</p>
+              <h2>AI Director 场景审查</h2>
+            </div>
+            <small>Proposal → 用户确认 → Command → ChangeSet</small>
+          </header>
+          {directorError ? (
+            <div className="brief-save-message brief-save-message--error" role="alert">
+              {directorError}
+            </div>
+          ) : null}
+          {directorTarget ? (
+            <DirectorReviewCard
+              busy={directorBusy}
+              onAction={setDirectorAction}
+              onReview={() => void reviewSelectedObject()}
+              onSelectOption={(proposalId, optionId) => {
+                setDirectorSelections((current) => ({ ...current, [proposalId]: optionId }))
+              }}
+              proposal={selectedDirectorProposal}
+              selectedOptionId={
+                selectedDirectorProposal
+                  ? directorSelections[selectedDirectorProposal.proposalId]
+                  : undefined
+              }
+              targetLabel={`“${selectedNode.data.projection.label}”`}
+            />
+          ) : (
+            <div className="film-canvas-director__unavailable">
+              <AlertTriangle size={18} />
+              <div>
+                <strong>暂不能从这个节点发起 Director 审查</strong>
+                <p>
+                  当前 Scene 尚未通过 ShotSpec 建立到 ScriptScene 的明确 lineage。
+                  请先在现有故事与分镜流程中建立关联；画布不会用名称或数组位置猜测目标。
+                </p>
+              </div>
+            </div>
+          )}
+        </Surface>
+      ) : null}
+
+      <ImpactConfirmModal
+        cancelLabel="暂不处理"
+        confirmLabel={
+          directorAction?.type === 'EXECUTE'
+            ? '确认创建修改版'
+            : directorAction?.decision === 'APPROVE'
+              ? '批准修改版'
+              : directorAction?.decision === 'ROLLBACK'
+                ? '创建恢复版本'
+                : '拒绝建议'
+        }
+        confirmVariant={
+          directorAction?.type === 'DECIDE' && directorAction.decision === 'REJECT'
+            ? 'danger'
+            : 'primary'
+        }
+        items={directorAction ? [
+          {
+            icon: <GitMerge size={16} />,
+            title: directorAction.type === 'EXECUTE' ? '创建新剧本版本' : '记录明确决策',
+            detail: directorAction.type === 'EXECUTE'
+              ? '原剧本不会被覆盖；所选修改将写入新的 ScriptVersion。'
+              : '本次批准、拒绝或回退会进入 Proposal 与 Command 审计记录。',
+          },
+          {
+            icon: <AlertTriangle size={16} />,
+            title: `影响 ${directorAction.proposal.affectedObjects.length} 项下游对象`,
+            detail: directorAction.proposal.affectedObjects.length
+              ? '作用域内镜头、Take 与时间线片段会标记为需要复核。'
+              : '当前尚无绑定的生产资产，不需要触发重生成。',
+          },
+          {
+            icon: <LockKeyhole size={16} />,
+            title: `保护 ${directorAction.proposal.preservedObjects.length} 项范围外资产`,
+            detail: '范围外 Approved Take 将通过状态哈希校验保持不变。',
+          },
+        ] : []}
+        loading={directorBusy}
+        onClose={() => {
+          if (!directorBusy) setDirectorAction(null)
+        }}
+        onConfirm={() => void confirmDirectorAction()}
+        open={directorAction !== null}
+        subtitle="该操作只修改已展示的影响范围，不会触发正式视频、配音或音乐生成。"
+        title={
+          directorAction?.type === 'EXECUTE'
+            ? '采用 Director 修复方案？'
+            : directorAction?.decision === 'APPROVE'
+              ? '批准这次修改？'
+              : directorAction?.decision === 'ROLLBACK'
+                ? '回退到修改前内容？'
+                : '拒绝这条 Director 建议？'
+        }
+      />
     </div>
   )
 }

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ApiError,
   analyzeRelationshipRevisionImpact,
+  createDirectorReviewProposal,
   createRelationshipGraphRevision,
   createProjectDraft,
   deleteCharacterVisualCandidate,
@@ -414,6 +415,57 @@ describe('legacy director proposal compatibility', () => {
 })
 
 describe('director review proposal client', () => {
+  it('sends an explicit Scene target without changing the command contract', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        proposal_id: '44444444-4444-4444-8444-444444444444',
+        project_id: apiProject.id,
+        issue_type: 'STORY_LOGIC',
+        observation: '场景因果需要复核。',
+        rationale: '通过明确 lineage 解析剧本场次。',
+        target_objects: [],
+        alternatives: [],
+        recommended_option: '',
+        confidence: 0.8,
+        affected_objects: [],
+        preserved_objects: [],
+        estimated_time_seconds: 1,
+        estimated_cost_usd: 0,
+        requires_confirmation: true,
+        validation_plan: [],
+        base_script_version_id: '66666666-6666-4666-8666-666666666666',
+        script_scene_id: '55555555-5555-4555-8555-555555555555',
+        scene_ordinal: 1,
+        provider: { provider: 'mock', model: 'director-v1', request_id: null },
+        status: 'PROPOSED',
+        result_script_version_id: null,
+        rollback_script_version_id: null,
+        comparison: null,
+        invalidated: [],
+        approval_result: null,
+        created_at: '2026-07-25T00:00:00Z',
+      },
+      trace_id: 'trace-director-review',
+    }), { status: 201, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await createDirectorReviewProposal(apiProject.id, {
+      expectedVersion: 8,
+      targetType: 'SCENE',
+      targetId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      issueTypes: ['STORY_LOGIC'],
+    })
+
+    const request = fetchMock.mock.calls[0]![1] as RequestInit
+    expect(JSON.parse(String(request.body))).toMatchObject({
+      expected_version: 8,
+      target_type: 'SCENE',
+      target_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      issue_types: ['STORY_LOGIC'],
+    })
+    expect(request.headers).toMatchObject({ 'Idempotency-Key': expect.any(String) })
+  })
+
   it('maps structured options, impact protection, and low-cost comparison', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
       data: [{

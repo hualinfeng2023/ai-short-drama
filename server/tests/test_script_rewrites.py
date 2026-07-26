@@ -548,9 +548,33 @@ async def test_director_proposal_review_execute_compare_and_rollback(
     )
     assert proposal_node["canonical_kind"] == "DERIVED"
     assert proposal_node["canonical_status"] == "APPLIED_PENDING_APPROVAL"
+    film_ir_edges = film_ir["edges"]
     assert ("PRESERVES", False) in {
-        (edge["relation"], edge["inferred"]) for edge in film_ir["edges"]
+        (edge["relation"], edge["inferred"]) for edge in film_ir_edges
     }
+    logical_script_scene_id = f"script-scene:{PROJECT_ID}:1:1"
+    assert any(
+        edge["relation"] == "PROPOSES_CHANGE_TO"
+        and edge["source"]["type"] == "DirectorProposal"
+        and edge["source"]["id"] == proposal["proposal_id"]
+        and edge["target"]["type"] == "ScriptScene"
+        and edge["target"]["id"] == logical_script_scene_id
+        for edge in film_ir_edges
+    )
+    canvas = (
+        await client.get(f"/api/v1/projects/{PROJECT_ID}/canvas-projection")
+    ).json()["data"]
+    assert any(
+        node["ref"]["type"] == "DirectorProposal"
+        and node["ref"]["id"] == proposal["proposal_id"]
+        for node in canvas["nodes"]
+    )
+    assert any(
+        edge["relation"] == "PROPOSES_CHANGE_TO"
+        and edge["source"]["id"] == proposal["proposal_id"]
+        and edge["target"]["id"] == logical_script_scene_id
+        for edge in canvas["edges"]
+    )
 
     execute_replay = await client.post(
         f"/api/v1/director-review-proposals/{proposal['proposal_id']}/execute",

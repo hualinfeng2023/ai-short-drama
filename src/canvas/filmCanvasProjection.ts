@@ -59,8 +59,66 @@ export interface FilmCanvasGraph {
   viewport: Viewport | null
 }
 
+export interface DirectorReviewTarget {
+  targetType: 'SCRIPT_SCENE' | 'SCENE'
+  targetId: string
+  scriptSceneId: string
+}
+
 export function canvasNodeId(ref: CanvasReference): string {
   return `${ref.type}:${ref.id}`
+}
+
+export function canvasProjectionSignature(projection: CanvasProjection): string {
+  const nodes = projection.nodes.map((node) => [
+    node.ref.type,
+    node.ref.id,
+    node.ref.versionId,
+    node.canonicalStatus,
+    node.approvalStatus,
+  ])
+  const edges = projection.edges.map((edge) => [
+    edge.source.type,
+    edge.source.id,
+    edge.source.versionId,
+    edge.relation,
+    edge.target.type,
+    edge.target.id,
+    edge.target.versionId,
+    edge.inferred,
+  ])
+  return JSON.stringify([projection.projectLockVersion, nodes, edges])
+}
+
+export function resolveDirectorReviewTarget(
+  projection: CanvasProjection,
+  selected: CanvasReference,
+): DirectorReviewTarget | null {
+  if (selected.type === 'ScriptScene' && selected.versionId) {
+    return {
+      targetType: 'SCRIPT_SCENE',
+      targetId: selected.versionId,
+      scriptSceneId: selected.versionId,
+    }
+  }
+  if (selected.type !== 'Scene') return null
+
+  const lineage = projection.edges.find(
+    (edge) => edge.relation === 'REALIZED_AS_SCENE'
+      && edge.source.type === 'ScriptScene'
+      && edge.target.type === 'Scene'
+      && edge.target.id === selected.id,
+  )
+  if (!lineage) return null
+  const scriptScene = projection.nodes.find(
+    (node) => node.ref.type === 'ScriptScene' && node.ref.id === lineage.source.id,
+  )
+  if (!scriptScene?.ref.versionId) return null
+  return {
+    targetType: 'SCENE',
+    targetId: selected.id,
+    scriptSceneId: scriptScene.ref.versionId,
+  }
 }
 
 function isFiniteNumber(value: unknown): value is number {

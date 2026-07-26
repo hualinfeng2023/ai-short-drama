@@ -579,13 +579,20 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
         if shot_ids
         else {}
     )
+    # Downstream rows and ChangeSets can still reference a ScriptScene from an
+    # older ScriptVersion. Map every historical row to the same episode/ordinal
+    # identity so version changes do not break Film IR lineage.
     script_scene_logical_ids = {
-        row.id: (
-            f"script-scene:{project.id}:"
-            f"{next(s.episode_ordinal for s in scripts if s.id == row.script_version_id)}:"
-            f"{row.ordinal}"
-        )
-        for row in script_scenes
+        scene_id: f"script-scene:{project.id}:{episode_ordinal}:{scene_ordinal}"
+        for scene_id, scene_ordinal, episode_ordinal in session.execute(
+            select(
+                ScriptScene.id,
+                ScriptScene.ordinal,
+                ScriptVersion.episode_ordinal,
+            )
+            .join(ScriptVersion, ScriptScene.script_version_id == ScriptVersion.id)
+            .where(ScriptVersion.project_id == project.id)
+        ).all()
     }
     for shot in shots:
         spec = specs.get(shot.id)

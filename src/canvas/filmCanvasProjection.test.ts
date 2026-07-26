@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import type { CanvasProjection } from '../api/client'
 import {
+  canvasProjectionSignature,
   canvasNodeId,
   createCanvasViewState,
   parseCanvasViewState,
   projectCanvasGraph,
+  resolveDirectorReviewTarget,
 } from './filmCanvasProjection'
 
 const projection: CanvasProjection = {
@@ -132,5 +134,63 @@ describe('Film Canvas projection adapter', () => {
       nodes: {},
       selected: [],
     }), 'project-1')).toBeNull()
+  })
+
+  it('changes the projection signature when domain status changes without a lock bump', () => {
+    const unchanged = { ...projection, nodes: [...projection.nodes], edges: [...projection.edges] }
+    const statusChanged: CanvasProjection = {
+      ...projection,
+      nodes: projection.nodes.map((node) => node.ref.id === 'scene-1'
+        ? { ...node, canonicalStatus: 'SUSPECT' }
+        : node),
+    }
+
+    expect(canvasProjectionSignature(unchanged)).toBe(canvasProjectionSignature(projection))
+    expect(canvasProjectionSignature(statusChanged)).not.toBe(canvasProjectionSignature(projection))
+  })
+
+  it('resolves ScriptScene and Scene review targets through explicit lineage only', () => {
+    const scriptSceneRef = {
+      type: 'ScriptScene',
+      id: 'script-scene:project-1:1:1',
+      versionId: 'script-scene-version-2',
+    }
+    const withLineage: CanvasProjection = {
+      ...projection,
+      nodes: [
+        ...projection.nodes,
+        {
+          ref: scriptSceneRef,
+          canonicalKind: 'CANONICAL',
+          canonicalStatus: 'ACTIVE',
+          approvalStatus: 'DRAFT',
+          label: '第一场',
+          groupKey: 'episode:1',
+          detailRoute: '/projects/project-1/story',
+          readOnly: true,
+        },
+      ],
+      edges: [
+        ...projection.edges,
+        {
+          source: scriptSceneRef,
+          target: projection.nodes[1]!.ref,
+          relation: 'REALIZED_AS_SCENE',
+          inferred: false,
+        },
+      ],
+    }
+
+    expect(resolveDirectorReviewTarget(withLineage, scriptSceneRef)).toEqual({
+      targetType: 'SCRIPT_SCENE',
+      targetId: 'script-scene-version-2',
+      scriptSceneId: 'script-scene-version-2',
+    })
+    expect(resolveDirectorReviewTarget(withLineage, projection.nodes[1]!.ref)).toEqual({
+      targetType: 'SCENE',
+      targetId: 'scene-1',
+      scriptSceneId: 'script-scene-version-2',
+    })
+    expect(resolveDirectorReviewTarget(projection, projection.nodes[1]!.ref)).toBeNull()
   })
 })
