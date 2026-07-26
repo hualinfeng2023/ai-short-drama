@@ -1,6 +1,10 @@
 import json
+import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from time import perf_counter
 from typing import Any
+from uuid import uuid4
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -8,7 +12,9 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.db.models import (
+    AuditLog,
     ChangeSet,
+    GenerationRecord,
     Project,
     Scene,
     ScriptLine,
@@ -19,8 +25,11 @@ from app.db.models import (
 )
 from app.domain.director import DirectorProposalRequest
 from app.services.dependency_analysis import analyze_script_scene_dependencies
+from app.services.projects import canonical_json, content_hash
 from app.services.text_provider import TextProviderError, generate_director_scene_review
 from app.services.workspace import project_or_404
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -120,6 +129,97 @@ def _impact(
     )
 
 
+def record_director_generation_failure(
+    session: Session,
+    *,
+    project_id: str,
+    script_scene_id: str,
+    script_version_id: str,
+    actor: str,
+    provider: str,
+    model: str,
+    prompt_source: object,
+    error_code: str,
+    error_message: str,
+    retryable: bool,
+    details: dict[str, Any] | None,
+    latency_ms: int | None,
+    stage: str,
+    command_id: str | None = None,
+) -> GenerationRecord:
+    """Persist a failed Director evaluation without creating a domain ChangeSet."""
+
+    normalized_details = details or {}
+    diagnostics = normalized_details.get("attempts")
+    attempts = diagnostics if isinstance(diagnostics, list) else []
+    provider_request_id = normalized_details.get("last_request_id") or normalized_details.get(
+        "request_id"
+    )
+    record_id = str(uuid4())
+    now = datetime.now(UTC)
+    metadata = {
+        "actor": actor,
+        "target_script_version_id": script_version_id,
+        "target_script_scene_id": script_scene_id,
+        "media_generation": False,
+        "failure_stage": stage,
+        "error": {
+            "code": error_code,
+            "message": error_message,
+            "retryable": retryable,
+            "details": normalized_details,
+        },
+        "attempt_count": len(attempts),
+        "repair_attempts": max(0, len(attempts) - 1),
+    }
+    if command_id:
+        metadata["command_id"] = command_id
+    record = GenerationRecord(
+        id=record_id,
+        project_id=project_id,
+        job_id=None,
+        entity_type="script_scene",
+        entity_id=script_scene_id,
+        capability="DIRECTOR_SCENE_REVIEW",
+        provider=provider,
+        model=model,
+        config_version="director-proposal-v2",
+        prompt_hash=content_hash(prompt_source),
+        seed=None,
+        reference_asset_ids_json="[]",
+        provider_request_id=(
+            str(provider_request_id) if isinstance(provider_request_id, str) else None
+        ),
+        provider_task_id=None,
+        status="FAILED",
+        latency_ms=latency_ms,
+        input_units=None,
+        output_units=None,
+        estimated_cost_usd=None,
+        output_asset_id=None,
+        metadata_json=canonical_json(metadata),
+        created_at=now,
+        completed_at=now,
+    )
+    session.add(record)
+    session.add(
+        AuditLog(
+            id=str(uuid4()),
+            project_id=project_id,
+            actor=actor,
+            action="DIRECTOR_SCENE_REVIEW_FAILED",
+            entity_type="script_scene",
+            entity_id=script_scene_id,
+            before_hash=content_hash(prompt_source),
+            after_hash=content_hash(metadata),
+            trace_id=record_id,
+            created_at=now,
+        )
+    )
+    session.flush()
+    return record
+
+
 async def prepare_director_proposal(
     session: Session,
     settings: Settings,
@@ -137,6 +237,12 @@ async def prepare_director_proposal(
         target_id=request.target_id,
     )
     context = _scene_context(session, script, scene)
+    prompt_source = {
+        "context": context,
+        "issue_types": list(request.issue_types),
+        "instruction": request.instruction,
+    }
+    started_at = perf_counter()
     try:
         generated = await generate_director_scene_review(
             settings,
@@ -145,6 +251,36 @@ async def prepare_director_proposal(
             instruction=request.instruction,
         )
     except TextProviderError as exc:
+        latency_ms = max(0, round((perf_counter() - started_at) * 1000))
+        try:
+            record_director_generation_failure(
+                session,
+                project_id=project.id,
+                script_scene_id=scene.id,
+                script_version_id=script.id,
+                actor=request.actor,
+                provider="volcengine-ark" if settings.ark_api_key else "mock",
+                model=(
+                    settings.ark_prompt_model
+                    if settings.ark_api_key
+                    else "deterministic-director-evaluator-v1"
+                ),
+                prompt_source=prompt_source,
+                error_code=exc.code,
+                error_message=str(exc),
+                retryable=exc.retryable,
+                details=exc.details,
+                latency_ms=latency_ms,
+                stage="PROVIDER_VALIDATION",
+            )
+            session.commit()
+        except Exception:
+            session.rollback()
+            logger.exception(
+                "Director 失败观测记录写入失败：project_id=%s scene_id=%s",
+                project.id,
+                scene.id,
+            )
         raise HTTPException(
             status_code=503 if exc.retryable else 422,
             detail={
@@ -154,6 +290,7 @@ async def prepare_director_proposal(
                 "details": exc.details,
             },
         ) from exc
+    latency_ms = max(0, round((perf_counter() - started_at) * 1000))
     review = generated.payload
     impact = _impact(session, project_id=project.id, script_scene=scene)
     return DirectorProposalDraft(
@@ -174,6 +311,7 @@ async def prepare_director_proposal(
                 "model": generated.model,
                 "request_id": generated.request_id,
                 "repair_attempts": generated.repair_attempts,
+                "latency_ms": latency_ms,
             },
         },
     )

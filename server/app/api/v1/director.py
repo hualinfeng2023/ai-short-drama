@@ -1,4 +1,5 @@
 import json
+import logging
 from uuid import NAMESPACE_URL, uuid5
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
@@ -19,11 +20,13 @@ from app.services.director_proposals import (
     director_proposal_or_404,
     list_director_proposals,
     prepare_director_proposal,
+    record_director_generation_failure,
 )
 from app.services.domain_commands import dispatch_domain_command
 from app.services.projects import content_hash
 
 router = APIRouter(prefix="/api/v1", tags=["director"])
+logger = logging.getLogger(__name__)
 
 
 def _command_id(project_id: str, idempotency_key: str) -> str:
@@ -92,25 +95,68 @@ async def create_director_proposal(
         project_id=project_id,
         request=payload,
     )
-    execution = dispatch_domain_command(
-        session,
-        project_id=project_id,
-        command=DirectorCommand(
-            command_id=_command_id(project_id, idempotency_key),
-            command_type="CREATE_DIRECTOR_PROPOSAL",
-            actor=CommandActor(type="DIRECTOR", id="ai-director"),
-            target_object_id=draft.target_object_id,
+    command_id = _command_id(project_id, idempotency_key)
+    command = DirectorCommand(
+        command_id=command_id,
+        command_type="CREATE_DIRECTOR_PROPOSAL",
+        actor=CommandActor(type="DIRECTOR", id="ai-director"),
+        target_object_id=draft.target_object_id,
+        target_version_id=draft.target_version_id,
+        expected_version=ExpectedVersion(
+            project_lock_version=payload.expected_version,
             target_version_id=draft.target_version_id,
-            expected_version=ExpectedVersion(
-                project_lock_version=payload.expected_version,
-                target_version_id=draft.target_version_id,
-                target_hash=draft.target_hash,
-            ),
-            payload=draft.payload,
-            idempotency_key=idempotency_key,
+            target_hash=draft.target_hash,
         ),
-        request_fingerprint=request_fingerprint,
+        payload=draft.payload,
+        idempotency_key=idempotency_key,
     )
+    try:
+        execution = dispatch_domain_command(
+            session,
+            project_id=project_id,
+            command=command,
+            request_fingerprint=request_fingerprint,
+        )
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        if detail.get("code") == "DIRECTOR_CHANGE_CONTRACT_INVALID":
+            session.rollback()
+            provider = draft.payload.get("provider")
+            provider_payload = provider if isinstance(provider, dict) else {}
+            error_details = detail.get("details")
+            try:
+                record_director_generation_failure(
+                    session,
+                    project_id=project_id,
+                    script_scene_id=draft.target_object_id,
+                    script_version_id=draft.target_version_id,
+                    actor=payload.actor,
+                    provider=str(provider_payload.get("provider") or "unknown"),
+                    model=str(provider_payload.get("model") or "unknown"),
+                    prompt_source={
+                        "context": draft.payload.get("context"),
+                        "instruction": draft.payload.get("instruction"),
+                    },
+                    error_code=str(detail["code"]),
+                    error_message=str(detail.get("message") or exc),
+                    retryable=False,
+                    details=error_details if isinstance(error_details, dict) else {},
+                    latency_ms=(
+                        int(provider_payload["latency_ms"])
+                        if isinstance(provider_payload.get("latency_ms"), (int, float))
+                        else None
+                    ),
+                    stage="COMMAND_VALIDATION",
+                    command_id=command_id,
+                )
+                session.commit()
+            except Exception:
+                session.rollback()
+                logger.exception(
+                    "Director Command 校验失败观测记录写入失败：project_id=%s",
+                    project_id,
+                )
+        raise
     response.headers["Idempotency-Replayed"] = str(execution.idempotency_replayed).lower()
     return success(execution.result)
 

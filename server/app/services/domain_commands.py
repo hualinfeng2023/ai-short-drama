@@ -3939,7 +3939,11 @@ def _execute_create_director_proposal(
             ),
             provider_task_id=None,
             status="SUCCEEDED",
-            latency_ms=None,
+            latency_ms=(
+                int(provider["latency_ms"])
+                if isinstance(provider.get("latency_ms"), (int, float))
+                else None
+            ),
             input_units=None,
             output_units=None,
             estimated_cost_usd=float(proposal["estimated_cost_usd"]),
@@ -3950,6 +3954,7 @@ def _execute_create_director_proposal(
                     "target_script_version_id": script.id,
                     "target_script_scene_id": scene.id,
                     "media_generation": False,
+                    "repair_attempts": int(provider.get("repair_attempts", 0)),
                 }
             ),
             created_at=datetime.now(UTC),

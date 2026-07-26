@@ -24,7 +24,9 @@ from app.db.models import (
     Take,
 )
 from app.db.session import get_engine
+from app.services import director_proposals
 from app.services.director_proposals import DirectorProposalDraft
+from app.services.text_provider import TextGenerationResult, TextProviderError
 from app.seed import PROJECT_ID
 from app.services.projects import canonical_json, content_hash
 
@@ -912,6 +914,196 @@ async def test_director_command_rejects_non_executable_change_contract(
         project = session.get(Project, PROJECT_ID)
         assert project is not None
         assert project.lock_version == 8
+        failure = session.scalar(
+            select(GenerationRecord).where(
+                GenerationRecord.project_id == PROJECT_ID,
+                GenerationRecord.capability == "DIRECTOR_SCENE_REVIEW",
+                GenerationRecord.status == "FAILED",
+            )
+        )
+        assert failure is not None
+        assert failure.entity_type == "script_scene"
+        assert failure.entity_id == SCENE_ID
+        failure_metadata = json.loads(failure.metadata_json)
+        assert failure_metadata["failure_stage"] == "COMMAND_VALIDATION"
+        assert failure_metadata["error"]["code"] == "DIRECTOR_CHANGE_CONTRACT_INVALID"
+        assert failure_metadata["media_generation"] is False
+        audit = session.scalar(
+            select(AuditLog).where(
+                AuditLog.project_id == PROJECT_ID,
+                AuditLog.action == "DIRECTOR_SCENE_REVIEW_FAILED",
+            )
+        )
+        assert audit is not None
+        assert audit.actor == "test-director"
+        assert audit.entity_id == SCENE_ID
+        assert audit.trace_id == failure.id
+
+
+@pytest.mark.anyio
+async def test_director_provider_failure_is_audited_without_changeset(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepare_script()
+    monkeypatch.setenv("ARK_API_KEY", "test-key")
+    monkeypatch.setenv("ARK_PROMPT_MODEL", "test-director-model")
+
+    async def fake_generate(*_args, **_kwargs) -> TextGenerationResult:
+        raise TextProviderError(
+            "ARK_TEXT_SCHEMA_INVALID",
+            "连续三次未返回符合合同的 JSON",
+            retryable=True,
+            details={
+                "validator": "DirectorReviewOutput",
+                "last_request_id": "request-3",
+                "attempts": [
+                    {
+                        "attempt": attempt,
+                        "request_id": f"request-{attempt}",
+                        "error_type": "validation_error",
+                        "validation_error": "estimated_duration_ms: Extra inputs are not permitted",
+                    }
+                    for attempt in range(1, 4)
+                ],
+            },
+        )
+
+    monkeypatch.setattr(
+        director_proposals,
+        "generate_director_scene_review",
+        fake_generate,
+    )
+    response = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json={
+            "expected_version": 8,
+            "target_type": "SCRIPT_SCENE",
+            "target_id": SCENE_ID,
+            "issue_types": ["PACING"],
+            "actor": "test-director",
+        },
+        headers={"Idempotency-Key": "director-provider-failure-v1"},
+    )
+    assert response.status_code == 503, response.text
+    assert response.json()["error"]["code"] == "ARK_TEXT_SCHEMA_INVALID"
+
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        assert session.scalars(select(ChangeSet)).all() == []
+        failure = session.scalar(
+            select(GenerationRecord).where(
+                GenerationRecord.project_id == PROJECT_ID,
+                GenerationRecord.capability == "DIRECTOR_SCENE_REVIEW",
+            )
+        )
+        assert failure is not None
+        assert failure.status == "FAILED"
+        assert failure.provider == "volcengine-ark"
+        assert failure.model == "test-director-model"
+        assert failure.provider_request_id == "request-3"
+        assert failure.latency_ms is not None
+        metadata = json.loads(failure.metadata_json)
+        assert metadata["failure_stage"] == "PROVIDER_VALIDATION"
+        assert metadata["attempt_count"] == 3
+        assert metadata["repair_attempts"] == 2
+        assert metadata["error"]["retryable"] is True
+        assert metadata["error"]["details"]["validator"] == "DirectorReviewOutput"
+        audit = session.scalar(
+            select(AuditLog).where(
+                AuditLog.project_id == PROJECT_ID,
+                AuditLog.action == "DIRECTOR_SCENE_REVIEW_FAILED",
+            )
+        )
+        assert audit is not None
+        assert audit.trace_id == failure.id
+        failure_id = failure.id
+
+    film_ir_response = await client.get(f"/api/v1/projects/{PROJECT_ID}/film-ir")
+    assert film_ir_response.status_code == 200, film_ir_response.text
+    film_ir = film_ir_response.json()["data"]
+    failure_node = next(
+        item
+        for item in film_ir["objects"]
+        if item["type"] == "GenerationRecord" and item["id"] == failure_id
+    )
+    assert failure_node["canonical_status"] == "FAILED"
+    assert failure_node["attributes"]["repair_attempts"] == 2
+    assert failure_node["attributes"]["error_code"] == "ARK_TEXT_SCHEMA_INVALID"
+    assert failure_node["attributes"]["failure_stage"] == "PROVIDER_VALIDATION"
+    assert any(
+        edge["source"]["type"] == "GenerationRecord"
+        and edge["source"]["id"] == failure_id
+        and edge["target"]["type"] == "ScriptScene"
+        and edge["target"]["id"] == f"script-scene:{PROJECT_ID}:1:1"
+        and edge["relation"] == "EVALUATED_SCRIPT_SCENE"
+        for edge in film_ir["edges"]
+    )
+    assert not any(
+        edge["target"]["type"] == "Asset" and edge["target"]["id"] == ""
+        for edge in film_ir["edges"]
+    )
+
+
+@pytest.mark.anyio
+async def test_director_success_records_repair_attempts_and_latency(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepare_script()
+    original_generate = director_proposals.generate_director_scene_review
+
+    async def fake_generate(*args, **kwargs) -> TextGenerationResult:  # noqa: ANN002, ANN003
+        generated = await original_generate(*args, **kwargs)
+        return TextGenerationResult(
+            payload=generated.payload,
+            provider="volcengine-ark",
+            model="test-director-model",
+            request_id="request-after-repair",
+            repair_attempts=2,
+        )
+
+    monkeypatch.setattr(
+        director_proposals,
+        "generate_director_scene_review",
+        fake_generate,
+    )
+    response = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json={
+            "expected_version": 8,
+            "target_type": "SCRIPT_SCENE",
+            "target_id": SCENE_ID,
+            "issue_types": ["PACING"],
+            "actor": "test-director",
+        },
+        headers={"Idempotency-Key": "director-repaired-success-v1"},
+    )
+    assert response.status_code == 201, response.text
+
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        record = session.scalar(
+            select(GenerationRecord).where(
+                GenerationRecord.project_id == PROJECT_ID,
+                GenerationRecord.capability == "DIRECTOR_SCENE_REVIEW",
+            )
+        )
+        assert record is not None
+        assert record.status == "SUCCEEDED"
+        assert record.provider == "volcengine-ark"
+        assert record.model == "test-director-model"
+        assert record.provider_request_id == "request-after-repair"
+        assert record.latency_ms is not None
+        metadata = json.loads(record.metadata_json)
+        assert metadata["repair_attempts"] == 2
+        assert metadata["media_generation"] is False
 
 
 @pytest.mark.anyio

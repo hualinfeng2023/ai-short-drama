@@ -874,6 +874,12 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
         session.scalars(select(GenerationRecord).where(GenerationRecord.project_id == project.id))
     )
     for record in records:
+        generation_metadata = _json(record.metadata_json, {})
+        generation_metadata = (
+            generation_metadata if isinstance(generation_metadata, dict) else {}
+        )
+        generation_error = generation_metadata.get("error")
+        generation_error = generation_error if isinstance(generation_error, dict) else {}
         graph.add_object(
             object_type="GenerationRecord",
             object_id=record.id,
@@ -890,17 +896,37 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
                 "model": record.model,
                 "output_asset_id": record.output_asset_id,
                 "estimated_cost_usd": record.estimated_cost_usd,
+                "provider_request_id": record.provider_request_id,
+                "latency_ms": record.latency_ms,
+                "repair_attempts": generation_metadata.get("repair_attempts"),
+                "failure_stage": generation_metadata.get("failure_stage"),
+                "error_code": generation_error.get("code"),
+                "retryable": generation_error.get("retryable"),
             },
         )
-        graph.add_edge(
-            "GenerationRecord",
-            record.id,
-            "Asset",
-            record.output_asset_id or "",
-            "GENERATED_ASSET",
-            inferred=False,
-            evidence="generation_records.output_asset_id",
-        )
+        if record.output_asset_id:
+            graph.add_edge(
+                "GenerationRecord",
+                record.id,
+                "Asset",
+                record.output_asset_id,
+                "GENERATED_ASSET",
+                inferred=False,
+                evidence="generation_records.output_asset_id",
+            )
+        if record.capability == "DIRECTOR_SCENE_REVIEW":
+            if record.entity_type == "script_scene":
+                target_id = script_scene_logical_ids.get(record.entity_id)
+                if target_id:
+                    graph.add_edge(
+                        "GenerationRecord",
+                        record.id,
+                        "ScriptScene",
+                        target_id,
+                        "EVALUATED_SCRIPT_SCENE",
+                        inferred=False,
+                        evidence="generation_records.entity_type + entity_id",
+                    )
     for take in takes:
         if take.generation_record_id:
             graph.add_edge(
