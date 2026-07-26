@@ -733,6 +733,98 @@ async def test_director_proposal_reject_and_approve_state_paths(
 
 
 @pytest.mark.anyio
+async def test_director_approval_requires_reason_when_timeline_preview_needs_review(
+    client: AsyncClient,
+) -> None:
+    prepare_script()
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        scene = session.get(ScriptScene, SCENE_ID)
+        script = session.get(ScriptVersion, SCRIPT_ID)
+        assert scene is not None
+        assert script is not None
+        scene.duration_ms = 2_000
+        payload = json.loads(script.payload_json)
+        payload["estimated_duration_ms"] = 2_000
+        payload["scenes"][0]["duration_ms"] = 2_000
+        script.payload_json = canonical_json(payload)
+        script.content_hash = content_hash(payload)
+        script.estimated_duration_ms = 2_000
+        session.commit()
+
+    proposal = (
+        await client.post(
+            f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+            json={
+                "expected_version": 8,
+                "target_type": "SCRIPT_SCENE",
+                "target_id": SCENE_ID,
+                "issue_types": ["AI_DIALOGUE"],
+                "actor": "test-director",
+            },
+            headers={"Idempotency-Key": "director-risk-create-v1"},
+        )
+    ).json()["data"]
+    applied = await client.post(
+        f"/api/v1/director-review-proposals/{proposal['proposal_id']}/execute",
+        json={
+            "expected_version": 8,
+            "option_id": proposal["recommended_option"],
+            "actor": "test-director",
+            "confirmed": True,
+        },
+        headers={"Idempotency-Key": "director-risk-apply-v1"},
+    )
+    assert applied.status_code == 200, applied.text
+    timeline_preview = applied.json()["data"]["proposal"]["comparison"]["timeline_preview"]
+    assert timeline_preview["validation_status"] == "REVIEW_REQUIRED"
+    assert timeline_preview["risk"] == "DURATION_BUDGET_EXCEEDED"
+
+    blocked = await client.post(
+        f"/api/v1/director-review-proposals/{proposal['proposal_id']}/decision",
+        json={
+            "expected_version": 9,
+            "decision": "APPROVE",
+            "actor": "test-director",
+            "confirmed": True,
+        },
+        headers={"Idempotency-Key": "director-risk-approve-blocked-v1"},
+    )
+    assert blocked.status_code == 409, blocked.text
+    assert (
+        blocked.json()["error"]["code"]
+        == "DIRECTOR_APPROVAL_OVERRIDE_REASON_REQUIRED"
+    )
+
+    override_reason = "对白超出预算，但已确认下一场可以顺延并会继续复核。"
+    approved = await client.post(
+        f"/api/v1/director-review-proposals/{proposal['proposal_id']}/decision",
+        json={
+            "expected_version": 9,
+            "decision": "APPROVE",
+            "actor": "test-director",
+            "confirmed": True,
+            "override_reason": override_reason,
+        },
+        headers={"Idempotency-Key": "director-risk-approve-override-v1"},
+    )
+    assert approved.status_code == 200, approved.text
+    approved_data = approved.json()["data"]
+    assert approved_data["status"] == "APPROVED"
+    assert approved_data["approval_result"] == {
+        "decision": "APPROVE",
+        "actor": "test-director",
+        "at": approved_data["approval_result"]["at"],
+        "validation_status": "REVIEW_REQUIRED",
+        "risk": "DURATION_BUDGET_EXCEEDED",
+        "override_reason": override_reason,
+    }
+
+
+@pytest.mark.anyio
 async def test_script_patch_adapter_replays_by_idempotency_key(client: AsyncClient) -> None:
     prepare_script()
     request = {

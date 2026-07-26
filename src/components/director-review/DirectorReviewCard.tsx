@@ -19,6 +19,14 @@ export type DirectorReviewAction =
       decision: 'APPROVE' | 'REJECT' | 'ROLLBACK'
     }
 
+export function directorApprovalRequiresOverride(
+  action: DirectorReviewAction | null,
+): boolean {
+  return action?.type === 'DECIDE'
+    && action.decision === 'APPROVE'
+    && action.proposal.comparison?.timelinePreview?.validationStatus === 'REVIEW_REQUIRED'
+}
+
 interface DirectorReviewCardProps {
   proposal: DirectorReviewProposal | null
   busy: boolean

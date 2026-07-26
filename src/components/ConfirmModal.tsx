@@ -61,7 +61,9 @@ export interface ImpactConfirmItem {
 /** 阶段门禁 / 影响预览确认弹窗 */
 export function ImpactConfirmModal({
   cancelLabel = '取消',
+  children,
   confirmLabel,
+  confirmDisabled = false,
   confirmVariant = 'primary',
   description,
   items,
@@ -73,7 +75,9 @@ export function ImpactConfirmModal({
   title,
 }: {
   cancelLabel?: string
+  children?: ReactNode
   confirmLabel: string
+  confirmDisabled?: boolean
   confirmVariant?: 'primary' | 'danger' | 'secondary'
   description?: string
   items: ImpactConfirmItem[]
@@ -90,7 +94,7 @@ export function ImpactConfirmModal({
       description={description}
       footer={<>
         <Button disabled={loading} onClick={onClose} variant="secondary">{cancelLabel}</Button>
-        <Button disabled={loading} onClick={onConfirm} variant={confirmVariant}>
+        <Button disabled={loading || confirmDisabled} onClick={onConfirm} variant={confirmVariant}>
           {loading ? <LoaderCircle className="spin" size={16} /> : null}
           {confirmLabel}
         </Button>
@@ -108,6 +112,7 @@ export function ImpactConfirmModal({
           </span>
         ))}
       </div>
+      {children ?? null}
     </Modal>
   )
 }

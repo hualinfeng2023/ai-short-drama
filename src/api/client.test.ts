@@ -5,6 +5,7 @@ import {
   createDirectorReviewProposal,
   createRelationshipGraphRevision,
   createProjectDraft,
+  decideDirectorReviewProposal,
   deleteCharacterVisualCandidate,
   deleteProjectRecord,
   enhanceShotPrompt,
@@ -516,7 +517,7 @@ describe('director review proposal client', () => {
         script_scene_id: '55555555-5555-4555-8555-555555555555',
         scene_ordinal: 1,
         provider: { provider: 'mock', model: 'director-v1', request_id: null },
-        status: 'APPLIED_PENDING_APPROVAL',
+        status: 'APPROVED',
         result_script_version_id: '88888888-8888-4888-8888-888888888888',
         rollback_script_version_id: null,
         comparison: {
@@ -558,7 +559,14 @@ describe('director review proposal client', () => {
           },
         },
         invalidated: [{ type: 'Shot', id: 'shot-id', next_status: 'SUSPECT' }],
-        approval_result: null,
+        approval_result: {
+          decision: 'APPROVE',
+          actor: '创作者',
+          at: '2026-07-25T00:05:00Z',
+          validation_status: 'REVIEW_REQUIRED',
+          risk: 'DURATION_BUDGET_EXCEEDED',
+          override_reason: '对白略超预算，但已确认下一场可以顺延。',
+        },
         created_at: '2026-07-25T00:00:00Z',
       }],
       trace_id: 'trace-director-review',
@@ -570,7 +578,7 @@ describe('director review proposal client', () => {
       issueType: 'AI_DIALOGUE',
       recommendedOption: 'dialogue-concise',
       sceneOrdinal: 1,
-      status: 'APPLIED_PENDING_APPROVAL',
+      status: 'APPROVED',
       estimatedCostUsd: 0,
     })
     expect(proposal.alternatives[0].proposedChange.changes).toEqual({
@@ -602,6 +610,38 @@ describe('director review proposal client', () => {
       },
     })
     expect(proposal.preservedObjects[0].approval).toBe('APPROVED')
+    expect(proposal.approvalResult).toMatchObject({
+      decision: 'APPROVE',
+      validationStatus: 'REVIEW_REQUIRED',
+      risk: 'DURATION_BUDGET_EXCEEDED',
+      overrideReason: '对白略超预算，但已确认下一场可以顺延。',
+    })
+  })
+
+  it('sends a trimmed override reason for risk-aware approval', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: { code: 'TEST_STOP', message: '只验证请求合同' },
+      trace_id: 'trace-director-decision',
+    }), { status: 409, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(decideDirectorReviewProposal(
+      '44444444-4444-4444-8444-444444444444',
+      {
+        expectedVersion: 9,
+        decision: 'APPROVE',
+        overrideReason: '  对白略超预算，但下一场可以顺延。  ',
+      },
+    )).rejects.toBeInstanceOf(ApiError)
+
+    const request = fetchMock.mock.calls[0]![1] as RequestInit
+    expect(JSON.parse(String(request.body))).toMatchObject({
+      expected_version: 9,
+      decision: 'APPROVE',
+      actor: '创作者',
+      confirmed: true,
+      override_reason: '对白略超预算，但下一场可以顺延。',
+    })
   })
 })
 

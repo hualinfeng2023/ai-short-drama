@@ -735,6 +735,12 @@ p {
 .confirm-delete-candidate img { max-height: 160px; border: 1px solid var(--color-border); border-radius: var(--radius-control-sm); object-fit: cover; }
 .confirm-delete-candidate p { margin: 0; color: var(--color-text-secondary); font-size: var(--font-size-caption); }
 .impact-confirm__subtitle { margin: 0 0 var(--space-3); color: var(--color-text-secondary); font-size: var(--font-size-body-sm); }
+.director-approval-override { display: grid; gap: var(--space-2); margin-top: var(--space-4); padding: var(--space-3); background: var(--color-state-warning-soft); border: 1px solid color-mix(in srgb, var(--color-state-warning) 48%, var(--color-border)); border-radius: var(--radius-control); }
+.director-approval-override > strong { color: var(--color-text-primary); font-size: var(--font-size-control); }
+.director-approval-override > span,
+.director-approval-override > small { color: var(--color-text-secondary); font-size: var(--font-size-caption); line-height: 1.5; }
+.director-approval-override > textarea { width: 100%; min-height: calc(var(--space-8) * 2); padding: var(--space-2) var(--space-3); resize: vertical; color: var(--color-text-primary); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-control-sm); font: inherit; font-size: var(--font-size-control); line-height: 1.55; }
+.director-approval-override > textarea:focus { border-color: var(--color-action-primary); outline: 0; box-shadow: var(--shadow-focus); }
 :root[data-visual-mode="cinema"] .toast { box-shadow: var(--shadow-floating); }
 :root[data-visual-mode="cinema"] .toast--success .toast__icon { color: var(--color-state-success); background: var(--color-state-success-soft); }
 :root[data-visual-mode="cinema"] .toast--error .toast__icon { color: var(--color-state-danger); background: var(--color-state-danger-soft); }

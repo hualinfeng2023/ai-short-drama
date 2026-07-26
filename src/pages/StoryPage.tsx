@@ -62,6 +62,7 @@ import { RelationshipGraphSection, type RelationshipCharacter } from '../compone
 import { ImpactConfirmModal } from '../components/ConfirmModal'
 import {
   DirectorReviewCard,
+  directorApprovalRequiresOverride,
   type DirectorReviewAction,
 } from '../components/director-review/DirectorReviewCard'
 import { Button, Modal, PageHeader, SelectControl, StatusBadge, getStatusLabel } from '../components/ui'
@@ -488,6 +489,7 @@ export function StoryPage() {
   const [directorReviewError, setDirectorReviewError] = useState<string | null>(null)
   const [directorOptionSelections, setDirectorOptionSelections] = useState<Record<string, string>>({})
   const [directorReviewAction, setDirectorReviewAction] = useState<DirectorReviewAction | null>(null)
+  const [directorApprovalOverrideReason, setDirectorApprovalOverrideReason] = useState('')
   const [relationshipFocus, setRelationshipFocus] = useState<{
     graphId: string
     relationshipKey: string
@@ -663,9 +665,13 @@ export function StoryPage() {
         : await decideDirectorReviewProposal(action.proposal.proposalId, {
             expectedVersion: project.lockVersion,
             decision: action.decision,
+            overrideReason: directorApprovalRequiresOverride(action)
+              ? directorApprovalOverrideReason
+              : undefined,
           })
       upsertDirectorProposal(next)
       setDirectorReviewAction(null)
+      setDirectorApprovalOverrideReason('')
       await load()
       await refreshProjects()
       setNotice(
@@ -681,6 +687,9 @@ export function StoryPage() {
       setDirectorReviewError(
         reason instanceof ApiError && reason.code === 'VERSION_CONFLICT'
           ? '项目版本已经变化，请刷新后重新确认。'
+          : reason instanceof ApiError
+            && reason.code === 'DIRECTOR_APPROVAL_OVERRIDE_REASON_REQUIRED'
+            ? '低成本时间线预览仍需调整；请填写至少 8 个字的覆盖理由。'
           : reason instanceof Error
             ? reason.message
             : 'Director 操作失败',
@@ -688,6 +697,11 @@ export function StoryPage() {
     } finally {
       setDirectorReviewBusyScene(null)
     }
+  }
+
+  function openDirectorReviewAction(action: DirectorReviewAction) {
+    setDirectorApprovalOverrideReason('')
+    setDirectorReviewAction(action)
   }
 
   async function confirmApproveScript() {
@@ -1022,7 +1036,7 @@ export function StoryPage() {
     return (
       <DirectorReviewCard
         busy={directorReviewBusyScene === scene.ordinal}
-        onAction={setDirectorReviewAction}
+        onAction={openDirectorReviewAction}
         onReview={() => void reviewScriptScene(scene)}
         onSelectOption={(proposalId, optionId) => {
           setDirectorOptionSelections((current) => ({ ...current, [proposalId]: optionId }))
@@ -1503,6 +1517,10 @@ export function StoryPage() {
             ? 'danger'
             : 'primary'
         }
+        confirmDisabled={
+          directorApprovalRequiresOverride(directorReviewAction)
+          && directorApprovalOverrideReason.trim().length < 8
+        }
         items={directorReviewAction ? [
           {
             icon: <GitMerge size={16} />,
@@ -1523,10 +1541,20 @@ export function StoryPage() {
             title: `保护 ${directorReviewAction.proposal.preservedObjects.length} 项范围外资产`,
             detail: '范围外 Approved Take 将通过状态哈希校验保持不变。',
           },
+          ...(directorApprovalRequiresOverride(directorReviewAction)
+            ? [{
+                icon: <AlertTriangle size={16} />,
+                title: '时长门禁需要人工覆盖',
+                detail: '批准不会触发昂贵生成，但必须记录接受当前时长风险的原因。',
+              }]
+            : []),
         ] : []}
         loading={directorReviewBusyScene !== null}
         onClose={() => {
-          if (directorReviewBusyScene === null) setDirectorReviewAction(null)
+          if (directorReviewBusyScene === null) {
+            setDirectorReviewAction(null)
+            setDirectorApprovalOverrideReason('')
+          }
         }}
         onConfirm={() => void confirmDirectorReviewAction()}
         open={directorReviewAction !== null}
@@ -1540,7 +1568,25 @@ export function StoryPage() {
                 ? '回退到修改前内容？'
                 : '拒绝这条 Director 建议？'
         }
-      />
+      >
+        {directorApprovalRequiresOverride(directorReviewAction) ? (
+          <label className="director-approval-override">
+            <strong>覆盖理由</strong>
+            <span>说明为什么当前时长风险仍可接受，以及后续如何复核。</span>
+            <textarea
+              autoFocus
+              maxLength={1000}
+              onChange={(event) => setDirectorApprovalOverrideReason(event.target.value)}
+              placeholder="例如：对白略超预算，但下一场留有节奏余量；批准后仍会在配音前复核。"
+              rows={3}
+              value={directorApprovalOverrideReason}
+            />
+            <small>
+              至少 8 个字 · 当前 {directorApprovalOverrideReason.trim().length} 字
+            </small>
+          </label>
+        ) : null}
+      </ImpactConfirmModal>
 
       {scriptRewriteMenuOpen && scriptSelection ? createPortal((
         <div

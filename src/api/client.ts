@@ -2215,7 +2215,14 @@ export interface DirectorReviewProposal {
     timelinePreview?: DirectorTimelinePreview
   } | null
   invalidated: Array<{ type: string; id: string; nextStatus?: string }>
-  approvalResult: { decision: string; actor: string; at: string } | null
+  approvalResult: {
+    decision: string
+    actor: string
+    at: string
+    validationStatus?: 'REVIEW_REQUIRED' | 'PASS' | null
+    risk?: DirectorTimelinePreview['risk'] | null
+    overrideReason?: string | null
+  } | null
   createdAt: string
 }
 
@@ -2302,7 +2309,14 @@ interface ApiDirectorReviewProposal {
     }
   } | null
   invalidated: Array<{ type: string; id: string; next_status?: string }>
-  approval_result: { decision: string; actor: string; at: string } | null
+  approval_result: {
+    decision: string
+    actor: string
+    at: string
+    validation_status?: 'REVIEW_REQUIRED' | 'PASS' | null
+    risk?: DirectorTimelinePreview['risk'] | null
+    override_reason?: string | null
+  } | null
   created_at: string
 }
 
@@ -2424,7 +2438,16 @@ function mapDirectorReviewProposal(
       id: item.id,
       nextStatus: item.next_status,
     })),
-    approvalResult: proposal.approval_result,
+    approvalResult: proposal.approval_result
+      ? {
+          decision: proposal.approval_result.decision,
+          actor: proposal.approval_result.actor,
+          at: proposal.approval_result.at,
+          validationStatus: proposal.approval_result.validation_status,
+          risk: proposal.approval_result.risk,
+          overrideReason: proposal.approval_result.override_reason,
+        }
+      : null,
     createdAt: proposal.created_at,
   }
 }
@@ -2499,6 +2522,7 @@ export async function decideDirectorReviewProposal(
   input: {
     expectedVersion: number
     decision: 'APPROVE' | 'REJECT' | 'ROLLBACK'
+    overrideReason?: string
   },
 ): Promise<DirectorReviewProposal> {
   const result = await requestJson<ApiDirectorReviewProposal>(
@@ -2514,6 +2538,9 @@ export async function decideDirectorReviewProposal(
         decision: input.decision,
         actor: '创作者',
         confirmed: true,
+        ...(input.overrideReason?.trim()
+          ? { override_reason: input.overrideReason.trim() }
+          : {}),
       }),
     },
   )

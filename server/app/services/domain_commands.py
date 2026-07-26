@@ -4326,11 +4326,39 @@ def _execute_decide_director_proposal(
                 detail={"code": "DIRECTOR_APPROVAL_NOT_READY", "message": "Proposal 尚未执行"},
             )
         _validate_target(command, object_id=change_set.id, version_id=result_script_id)
+        timeline_preview = (
+            impact.get("comparison", {}).get("timeline_preview", {})
+            if isinstance(impact.get("comparison"), dict)
+            else {}
+        )
+        validation_status = (
+            str(timeline_preview.get("validation_status"))
+            if isinstance(timeline_preview, dict)
+            and timeline_preview.get("validation_status")
+            else None
+        )
+        validation_risk = (
+            str(timeline_preview.get("risk"))
+            if isinstance(timeline_preview, dict) and timeline_preview.get("risk")
+            else None
+        )
+        override_reason = str(command.payload.get("override_reason") or "").strip()
+        if validation_status == "REVIEW_REQUIRED" and len(override_reason) < 8:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "DIRECTOR_APPROVAL_OVERRIDE_REASON_REQUIRED",
+                    "message": "低成本时间线预览需要调整；批准前请填写至少 8 个字的覆盖理由",
+                },
+            )
         change_set.status = "APPROVED"
         impact["approval_result"] = {
             "decision": "APPROVE",
             "actor": command.actor.id,
             "at": datetime.now(UTC).isoformat(),
+            "validation_status": validation_status,
+            "risk": validation_risk,
+            "override_reason": override_reason or None,
         }
     elif decision == "ROLLBACK":
         result_script_id = str(impact.get("result_script_version_id") or "")
