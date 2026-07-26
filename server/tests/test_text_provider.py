@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.config import get_settings
+from app.domain.director import DirectorReviewOutput
 from app.domain.narrative_targeting import TOPIC_SLATE_MIX, reject_unrequested_stereotypes
 from app.services.text_provider import (
     EpisodeScriptDraft,
@@ -949,6 +950,73 @@ async def test_ark_json_reports_each_validation_failure_before_terminal_error() 
 
     assert [attempt for attempt, _ in attempts] == [1, 2, 3]
     assert all(item["error_type"] == "validation_error" for _, item in attempts)
+
+
+async def test_ark_json_rejects_non_executable_director_change_fields() -> None:
+    invalid = {
+        "issue_type": "PACING",
+        "observation": "台词超过场景预算。",
+        "rationale": "需要收紧节奏。",
+        "options": [
+            {
+                "option_id": "invalid-duration",
+                "title": "直接改估算时长",
+                "rationale": "模型试图写入派生字段。",
+                "proposed_change": {
+                    "scope": "LINE",
+                    "entity_id": "10000000-0000-4000-8000-000000000002",
+                    "changes": {"estimated_duration_ms": 1600},
+                    "before": {"estimated_duration_ms": 3000},
+                },
+                "estimated_time_seconds": 1,
+                "estimated_cost_usd": 0,
+            },
+            {
+                "option_id": "valid-pause",
+                "title": "缩短停顿",
+                "rationale": "只修改允许字段。",
+                "proposed_change": {
+                    "scope": "LINE",
+                    "entity_id": "10000000-0000-4000-8000-000000000002",
+                    "changes": {"pause_after_ms": 100},
+                    "before": {"pause_after_ms": 300},
+                },
+                "estimated_time_seconds": 1,
+                "estimated_cost_usd": 0,
+            },
+        ],
+        "recommended_option_id": "invalid-duration",
+        "confidence": 0.8,
+        "validation_plan": ["比较时长"],
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        payload = json.dumps(invalid, ensure_ascii=False)
+        return httpx.Response(
+            200,
+            content=(
+                _sse_event("response.output_text.delta", {"delta": payload})
+                + _sse_event("response.completed", {"response": {}})
+                + b"data: [DONE]\n\n"
+            ),
+        )
+
+    with pytest.raises(TextProviderError) as caught:
+        await _ark_json(
+            replace(get_settings(), ark_api_key="test-key"),
+            prompt="return a director review",
+            validator=DirectorReviewOutput,
+            transport=httpx.MockTransport(handler),
+            exclude_none=True,
+        )
+
+    assert caught.value.code == "ARK_TEXT_SCHEMA_INVALID"
+    assert caught.value.retryable is True
+    assert len(caught.value.details["attempts"]) == 3
+    assert all(
+        "estimated_duration_ms" in item["validation_error"]
+        for item in caught.value.details["attempts"]
+    )
 
 
 async def test_ark_stream_distinguishes_first_byte_timeout() -> None:

@@ -48,7 +48,7 @@ from app.db.models import (
     TimelineVersion,
 )
 from app.domain.commands import DirectorCommand
-from app.domain.director import DirectorReviewOutput
+from app.domain.director import DirectorReviewOutput, director_change_target_issues
 from app.schemas import (
     CharacterCandidateDeleteRequest,
     CharacterCandidateGenerateRequest,
@@ -3825,16 +3825,48 @@ def _execute_create_director_proposal(
             status_code=422,
             detail={"code": "COMMAND_PAYLOAD_INVALID", "message": "Director Proposal 内容无效"},
         )
-    review = DirectorReviewOutput.model_validate(review_payload)
+    try:
+        review = DirectorReviewOutput.model_validate(review_payload)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "DIRECTOR_CHANGE_CONTRACT_INVALID",
+                "message": "Director 返回了不可执行的修改字段",
+                "details": {"issues": exc.errors(include_url=False)},
+            },
+        ) from exc
+    line_ids = set(
+        session.scalars(
+            select(ScriptLine.id).where(ScriptLine.script_scene_id == scene.id)
+        ).all()
+    )
+    target_issues = director_change_target_issues(
+        review,
+        scene_id=scene.id,
+        line_ids=line_ids,
+    )
+    if target_issues:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "DIRECTOR_CHANGE_CONTRACT_INVALID",
+                "message": "Director 返回了场景范围外或类型不匹配的修改目标",
+                "details": {"issues": target_issues},
+            },
+        )
     proposal = {
         "issue_type": review.issue_type,
         "observation": review.observation,
         "rationale": review.rationale,
         "target_objects": [{"type": "ScriptScene", "id": scene.id, "version_id": script.id}],
         "proposed_changes": [
-            item.proposed_change.model_dump(mode="json") for item in review.options
+            item.proposed_change.model_dump(mode="json", exclude_none=True)
+            for item in review.options
         ],
-        "alternatives": [item.model_dump(mode="json") for item in review.options],
+        "alternatives": [
+            item.model_dump(mode="json", exclude_none=True) for item in review.options
+        ],
         "recommended_option": review.recommended_option_id,
         "confidence": review.confidence,
         "affected_objects": impact_payload.get("affected_objects", []),

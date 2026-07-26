@@ -8,7 +8,7 @@ import httpx
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from app.config import Settings
-from app.domain.director import DirectorReviewOutput
+from app.domain.director import DirectorReviewOutput, director_change_target_issues
 from app.domain.narrative_targeting import (
     EmotionalReward,
     NarrativeProtagonist,
@@ -917,7 +917,7 @@ async def generate_director_scene_review(
             issue_types=issue_types,
         )
         return TextGenerationResult(
-            payload=output.model_dump(mode="json"),
+            payload=output.model_dump(mode="json", exclude_none=True),
             provider="mock",
             model="deterministic-director-evaluator-v1",
             request_id=None,
@@ -938,31 +938,44 @@ async def generate_director_scene_review(
         f"{json.dumps(DirectorReviewOutput.model_json_schema(), ensure_ascii=False)}"
     )
 
-    allowed_targets = {
-        str(scene_context["id"]),
-        *{str(item["id"]) for item in scene_context.get("lines", [])},
-    }
-
     def validate_targets(candidate: BaseModel) -> None:
-        review = DirectorReviewOutput.model_validate(candidate.model_dump(mode="json"))
-        invalid = [
-            option.proposed_change.entity_id
-            for option in review.options
-            if option.proposed_change.entity_id not in allowed_targets
-        ]
-        if invalid:
+        review = (
+            candidate
+            if isinstance(candidate, DirectorReviewOutput)
+            else DirectorReviewOutput.model_validate(
+                candidate.model_dump(mode="json", exclude_none=True)
+            )
+        )
+        issues = director_change_target_issues(
+            review,
+            scene_id=str(scene_context["id"]),
+            line_ids={str(item["id"]) for item in scene_context.get("lines", [])},
+        )
+        if issues:
             raise ModelOutputSemanticError(
-                "DIRECTOR_TARGET_INVALID",
-                "Director 返回了场景范围外的修改目标",
-                repair_message="所有 proposed_change.entity_id 必须来自给定场景上下文。",
-                details={"invalid_target_ids": invalid},
+                "DIRECTOR_CHANGE_CONTRACT_INVALID",
+                "Director 返回了场景范围外或类型不匹配的修改目标",
+                repair_message=(
+                    "SCENE 修改必须指向当前场景 ID；LINE 修改必须指向当前场景的台词 ID。"
+                    "不得通过名称、数组位置或其他对象 ID 猜测目标。"
+                ),
+                details={"issues": issues},
             )
 
-    return await _ark_json(
+    generated = await _ark_json(
         settings,
         prompt=prompt,
         validator=DirectorReviewOutput,
         semantic_validator=validate_targets,
+        exclude_none=True,
+    )
+    validated = DirectorReviewOutput.model_validate(generated.payload)
+    return TextGenerationResult(
+        payload=validated.model_dump(mode="json", exclude_none=True),
+        provider=generated.provider,
+        model=generated.model,
+        request_id=generated.request_id,
+        repair_attempts=generated.repair_attempts,
     )
 
 
@@ -2107,6 +2120,7 @@ async def _ark_json(
     transport: httpx.AsyncBaseTransport | None = None,
     payload_normalizer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     semantic_validator: Callable[[BaseModel], None] | None = None,
+    exclude_none: bool = False,
     on_validated_output: Callable[[int], Awaitable[None]] | None = None,
     on_validation_failure: Callable[[int, dict[str, Any]], Awaitable[None]] | None = None,
     thinking_type: Literal["enabled", "disabled"] = "disabled",
@@ -2197,7 +2211,7 @@ async def _ark_json(
                 if semantic_validator is not None:
                     semantic_validator(validated)
                 return TextGenerationResult(
-                    payload=validated.model_dump(mode="json"),
+                    payload=validated.model_dump(mode="json", exclude_none=exclude_none),
                     provider="volcengine-ark",
                     model=settings.ark_prompt_model,
                     request_id=request_id,

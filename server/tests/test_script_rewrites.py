@@ -10,6 +10,7 @@ from app.config import get_settings
 from app.db.models import (
     Asset,
     AuditLog,
+    ChangeSet,
     EpisodeOutlineVersion,
     EventLog,
     GenerationRecord,
@@ -23,6 +24,7 @@ from app.db.models import (
     Take,
 )
 from app.db.session import get_engine
+from app.services.director_proposals import DirectorProposalDraft
 from app.seed import PROJECT_ID
 from app.services.projects import canonical_json, content_hash
 
@@ -822,6 +824,94 @@ async def test_director_approval_requires_reason_when_timeline_preview_needs_rev
         "risk": "DURATION_BUDGET_EXCEEDED",
         "override_reason": override_reason,
     }
+
+
+@pytest.mark.anyio
+async def test_director_command_rejects_non_executable_change_contract(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepare_script()
+
+    async def fake_prepare(session, _settings, *, project_id, request):  # noqa: ANN001
+        del project_id, request
+        script = session.get(ScriptVersion, SCRIPT_ID)
+        assert script is not None
+        return DirectorProposalDraft(
+            target_object_id=SCENE_ID,
+            target_version_id=SCRIPT_ID,
+            target_hash=script.content_hash,
+            payload={
+                "requested_by": "test-director",
+                "review": {
+                    "issue_type": "PACING",
+                    "observation": "台词超过场景预算。",
+                    "rationale": "模型试图直接写入派生时长。",
+                    "options": [
+                        {
+                            "option_id": "invalid-duration",
+                            "title": "直接修改估算时长",
+                            "rationale": "该字段不属于可执行写入合同。",
+                            "proposed_change": {
+                                "scope": "LINE",
+                                "entity_id": LINE_ID,
+                                "changes": {"estimated_duration_ms": 1600},
+                                "before": {"estimated_duration_ms": 3000},
+                            },
+                            "estimated_time_seconds": 1,
+                            "estimated_cost_usd": 0,
+                        },
+                        {
+                            "option_id": "valid-pause",
+                            "title": "缩短停顿",
+                            "rationale": "只修改允许字段。",
+                            "proposed_change": {
+                                "scope": "LINE",
+                                "entity_id": LINE_ID,
+                                "changes": {"pause_after_ms": 100},
+                                "before": {"pause_after_ms": 300},
+                            },
+                            "estimated_time_seconds": 1,
+                            "estimated_cost_usd": 0,
+                        },
+                    ],
+                    "recommended_option_id": "invalid-duration",
+                    "confidence": 0.8,
+                    "validation_plan": ["比较时长"],
+                },
+                "context": {},
+                "impact": {},
+                "provider": {"provider": "test", "model": "invalid-director"},
+            },
+        )
+
+    monkeypatch.setattr(
+        "app.api.v1.director.prepare_director_proposal",
+        fake_prepare,
+    )
+    response = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json={
+            "expected_version": 8,
+            "target_type": "SCRIPT_SCENE",
+            "target_id": SCENE_ID,
+            "issue_types": ["PACING"],
+            "actor": "test-director",
+        },
+        headers={"Idempotency-Key": "director-invalid-contract-v1"},
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "DIRECTOR_CHANGE_CONTRACT_INVALID"
+
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        assert session.scalars(select(ChangeSet)).all() == []
+        project = session.get(Project, PROJECT_ID)
+        assert project is not None
+        assert project.lock_version == 8
 
 
 @pytest.mark.anyio
