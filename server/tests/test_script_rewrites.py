@@ -1,11 +1,13 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
+from fastapi import HTTPException
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
+from app.api.v1 import director as director_api
 from app.config import get_settings
 from app.db.models import (
     Asset,
@@ -14,6 +16,7 @@ from app.db.models import (
     EpisodeOutlineVersion,
     EventLog,
     GenerationRecord,
+    IdempotencyKey,
     Project,
     ScriptLine,
     ScriptScene,
@@ -24,6 +27,7 @@ from app.db.models import (
     Take,
 )
 from app.db.session import get_engine
+from app.domain.director import DirectorProposalRequest
 from app.services import director_proposals
 from app.services.director_proposals import DirectorProposalDraft
 from app.services.text_provider import TextGenerationResult, TextProviderError
@@ -651,6 +655,17 @@ async def test_director_proposal_review_execute_compare_and_rollback(
         )
         assert len(generation_records) == 1
         assert generation_records[0].output_asset_id is None
+        reservation = session.scalar(
+            select(IdempotencyKey).where(
+                IdempotencyKey.scope == director_api._request_reservation_scope(PROJECT_ID),
+                IdempotencyKey.key == "director-proposal-create-v1",
+            )
+        )
+        assert reservation is not None
+        assert reservation.status_code == 201
+        reservation_payload = json.loads(reservation.response_json)
+        assert reservation_payload["state"] == "SUCCEEDED"
+        assert reservation_payload["result"]["proposal_id"] == proposal["proposal_id"]
         command_audits = list(
             session.scalars(
                 select(AuditLog).where(
@@ -948,8 +963,11 @@ async def test_director_provider_failure_is_audited_without_changeset(
     prepare_script()
     monkeypatch.setenv("ARK_API_KEY", "test-key")
     monkeypatch.setenv("ARK_PROMPT_MODEL", "test-director-model")
+    provider_calls = 0
 
     async def fake_generate(*_args, **_kwargs) -> TextGenerationResult:
+        nonlocal provider_calls
+        provider_calls += 1
         raise TextProviderError(
             "ARK_TEXT_SCHEMA_INVALID",
             "连续三次未返回符合合同的 JSON",
@@ -987,6 +1005,21 @@ async def test_director_provider_failure_is_audited_without_changeset(
     )
     assert response.status_code == 503, response.text
     assert response.json()["error"]["code"] == "ARK_TEXT_SCHEMA_INVALID"
+    replayed = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json={
+            "expected_version": 8,
+            "target_type": "SCRIPT_SCENE",
+            "target_id": SCENE_ID,
+            "issue_types": ["PACING"],
+            "actor": "test-director",
+        },
+        headers={"Idempotency-Key": "director-provider-failure-v1"},
+    )
+    assert replayed.status_code == 503, replayed.text
+    assert replayed.headers["Idempotency-Replayed"] == "true"
+    assert replayed.json()["error"]["code"] == "ARK_TEXT_SCHEMA_INVALID"
+    assert provider_calls == 1
 
     factory = sessionmaker(
         bind=get_engine(get_settings().database_url),
@@ -1021,6 +1054,17 @@ async def test_director_provider_failure_is_audited_without_changeset(
         assert audit is not None
         assert audit.trace_id == failure.id
         failure_id = failure.id
+        reservation = session.scalar(
+            select(IdempotencyKey).where(
+                IdempotencyKey.scope == director_api._request_reservation_scope(PROJECT_ID),
+                IdempotencyKey.key == "director-provider-failure-v1",
+            )
+        )
+        assert reservation is not None
+        assert reservation.status_code == 503
+        reservation_payload = json.loads(reservation.response_json)
+        assert reservation_payload["state"] == "FAILED"
+        assert reservation_payload["error"]["code"] == "ARK_TEXT_SCHEMA_INVALID"
 
     film_ir_response = await client.get(f"/api/v1/projects/{PROJECT_ID}/film-ir")
     assert film_ir_response.status_code == 200, film_ir_response.text
@@ -1046,6 +1090,121 @@ async def test_director_provider_failure_is_audited_without_changeset(
         edge["target"]["type"] == "Asset" and edge["target"]["id"] == ""
         for edge in film_ir["edges"]
     )
+
+
+@pytest.mark.anyio
+async def test_director_in_progress_reservation_blocks_duplicate_provider_call(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepare_script()
+    request_payload = {
+        "expected_version": 8,
+        "target_type": "SCRIPT_SCENE",
+        "target_id": SCENE_ID,
+        "issue_types": ["PACING"],
+        "actor": "test-director",
+    }
+    request_fingerprint = content_hash(
+        DirectorProposalRequest.model_validate(request_payload).model_dump(mode="json")
+    )
+    idempotency_key = "director-in-progress-v1"
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        reservation, replay = director_api._reserve_director_request(
+            session,
+            project_id=PROJECT_ID,
+            idempotency_key=idempotency_key,
+            request_fingerprint=request_fingerprint,
+        )
+        assert reservation is not None
+        assert replay is None
+    with factory() as session:
+        with pytest.raises(HTTPException) as caught:
+            director_api._reserve_director_request(
+                session,
+                project_id=PROJECT_ID,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
+            )
+        assert caught.value.status_code == 409
+        assert caught.value.detail["code"] == "DIRECTOR_REQUEST_IN_PROGRESS"
+
+    async def fail_if_called(*_args, **_kwargs) -> TextGenerationResult:
+        raise AssertionError("已有幂等占位时不得再次调用 Provider")
+
+    monkeypatch.setattr(
+        director_proposals,
+        "generate_director_scene_review",
+        fail_if_called,
+    )
+    response = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json=request_payload,
+        headers={"Idempotency-Key": idempotency_key},
+    )
+    assert response.status_code == 409, response.text
+    assert response.headers["Idempotency-Replayed"] == "true"
+    assert response.json()["error"]["code"] == "DIRECTOR_REQUEST_IN_PROGRESS"
+    assert response.json()["error"]["retryable"] is True
+
+
+@pytest.mark.anyio
+async def test_director_expired_reservation_can_safely_start_again(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepare_script()
+    request_payload = {
+        "expected_version": 8,
+        "target_type": "SCRIPT_SCENE",
+        "target_id": SCENE_ID,
+        "issue_types": ["PACING"],
+        "actor": "test-director",
+    }
+    request_fingerprint = content_hash(
+        DirectorProposalRequest.model_validate(request_payload).model_dump(mode="json")
+    )
+    idempotency_key = "director-expired-reservation-v1"
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        reservation, _ = director_api._reserve_director_request(
+            session,
+            project_id=PROJECT_ID,
+            idempotency_key=idempotency_key,
+            request_fingerprint=request_fingerprint,
+        )
+        assert reservation is not None
+        reservation.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        session.commit()
+
+    original_generate = director_proposals.generate_director_scene_review
+    provider_calls = 0
+
+    async def counted_generate(*args, **kwargs) -> TextGenerationResult:  # noqa: ANN002, ANN003
+        nonlocal provider_calls
+        provider_calls += 1
+        return await original_generate(*args, **kwargs)
+
+    monkeypatch.setattr(
+        director_proposals,
+        "generate_director_scene_review",
+        counted_generate,
+    )
+    response = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json=request_payload,
+        headers={"Idempotency-Key": idempotency_key},
+    )
+    assert response.status_code == 201, response.text
+    assert response.headers["Idempotency-Replayed"] == "false"
+    assert provider_calls == 1
 
 
 @pytest.mark.anyio
