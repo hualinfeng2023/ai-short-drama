@@ -129,6 +129,54 @@ def _impact(
     )
 
 
+def director_retry_source(
+    session: Session,
+    *,
+    project_id: str,
+    script_scene_id: str,
+    generation_record_id: str | None,
+) -> GenerationRecord | None:
+    if generation_record_id is None:
+        return None
+    record = session.get(GenerationRecord, generation_record_id)
+    if record is None or record.project_id != project_id:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "DIRECTOR_RETRY_SOURCE_NOT_FOUND",
+                "message": "指定的 Director 失败记录不存在",
+            },
+        )
+    if record.capability != "DIRECTOR_SCENE_REVIEW" or record.status != "FAILED":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DIRECTOR_RETRY_SOURCE_INVALID",
+                "message": "Director 重试只能引用失败的场景审查记录",
+                "details": {
+                    "generation_record_id": record.id,
+                    "capability": record.capability,
+                    "status": record.status,
+                },
+            },
+        )
+    if record.entity_type != "script_scene" or record.entity_id != script_scene_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DIRECTOR_RETRY_TARGET_MISMATCH",
+                "message": "Director 重试来源与当前 ScriptScene 不一致",
+                "details": {
+                    "generation_record_id": record.id,
+                    "source_entity_type": record.entity_type,
+                    "source_entity_id": record.entity_id,
+                    "target_script_scene_id": script_scene_id,
+                },
+            },
+        )
+    return record
+
+
 def record_director_generation_failure(
     session: Session,
     *,
@@ -146,6 +194,7 @@ def record_director_generation_failure(
     latency_ms: int | None,
     stage: str,
     command_id: str | None = None,
+    retry_of_generation_record_id: str | None = None,
 ) -> GenerationRecord:
     """Persist a failed Director evaluation without creating a domain ChangeSet."""
 
@@ -174,6 +223,8 @@ def record_director_generation_failure(
     }
     if command_id:
         metadata["command_id"] = command_id
+    if retry_of_generation_record_id:
+        metadata["retry_of_generation_record_id"] = retry_of_generation_record_id
     record = GenerationRecord(
         id=record_id,
         project_id=project_id,
@@ -236,11 +287,18 @@ async def prepare_director_proposal(
         target_type=request.target_type,
         target_id=request.target_id,
     )
+    retry_source = director_retry_source(
+        session,
+        project_id=project.id,
+        script_scene_id=scene.id,
+        generation_record_id=request.retry_of_generation_record_id,
+    )
     context = _scene_context(session, script, scene)
     prompt_source = {
         "context": context,
         "issue_types": list(request.issue_types),
         "instruction": request.instruction,
+        "retry_of_generation_record_id": retry_source.id if retry_source else None,
     }
     started_at = perf_counter()
     try:
@@ -272,6 +330,7 @@ async def prepare_director_proposal(
                 details=exc.details,
                 latency_ms=latency_ms,
                 stage="PROVIDER_VALIDATION",
+                retry_of_generation_record_id=retry_source.id if retry_source else None,
             )
             session.commit()
         except Exception:
@@ -302,6 +361,7 @@ async def prepare_director_proposal(
             "target_type": request.target_type,
             "requested_target_id": request.target_id,
             "script_scene_id": scene.id,
+            "retry_of_generation_record_id": retry_source.id if retry_source else None,
             "instruction": request.instruction or "审查并修复选中场景",
             "review": review,
             "context": context,

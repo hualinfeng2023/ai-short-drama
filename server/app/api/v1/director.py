@@ -338,6 +338,14 @@ async def create_director_proposal(
                         ),
                         stage="COMMAND_VALIDATION",
                         command_id=command_id,
+                        retry_of_generation_record_id=(
+                            str(draft.payload["retry_of_generation_record_id"])
+                            if isinstance(
+                                draft.payload.get("retry_of_generation_record_id"),
+                                str,
+                            )
+                            else None
+                        ),
                     )
                     session.commit()
                 except Exception:

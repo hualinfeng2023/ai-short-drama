@@ -873,11 +873,13 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
     records = list(
         session.scalars(select(GenerationRecord).where(GenerationRecord.project_id == project.id))
     )
+    generation_metadata_by_id: dict[str, dict[str, Any]] = {}
     for record in records:
         generation_metadata = _json(record.metadata_json, {})
         generation_metadata = (
             generation_metadata if isinstance(generation_metadata, dict) else {}
         )
+        generation_metadata_by_id[record.id] = generation_metadata
         generation_error = generation_metadata.get("error")
         generation_error = generation_error if isinstance(generation_error, dict) else {}
         graph.add_object(
@@ -902,6 +904,9 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
                 "failure_stage": generation_metadata.get("failure_stage"),
                 "error_code": generation_error.get("code"),
                 "retryable": generation_error.get("retryable"),
+                "retry_of_generation_record_id": generation_metadata.get(
+                    "retry_of_generation_record_id"
+                ),
             },
         )
         if record.output_asset_id:
@@ -927,6 +932,20 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
                         inferred=False,
                         evidence="generation_records.entity_type + entity_id",
                     )
+    for record in records:
+        retry_source_id = generation_metadata_by_id.get(record.id, {}).get(
+            "retry_of_generation_record_id"
+        )
+        if isinstance(retry_source_id, str):
+            graph.add_edge(
+                "GenerationRecord",
+                record.id,
+                "GenerationRecord",
+                retry_source_id,
+                "RETRY_OF",
+                inferred=False,
+                evidence="generation_records.metadata_json.retry_of_generation_record_id",
+            )
     for take in takes:
         if take.generation_record_id:
             graph.add_edge(

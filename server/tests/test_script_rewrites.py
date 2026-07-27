@@ -956,6 +956,62 @@ async def test_director_command_rejects_non_executable_change_contract(
 
 
 @pytest.mark.anyio
+async def test_director_command_revalidates_retry_source_lineage(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepare_script()
+    original_prepare = director_proposals.prepare_director_proposal
+
+    async def fake_prepare(*args, **kwargs) -> DirectorProposalDraft:  # noqa: ANN002, ANN003
+        draft = await original_prepare(*args, **kwargs)
+        return DirectorProposalDraft(
+            target_object_id=draft.target_object_id,
+            target_version_id=draft.target_version_id,
+            target_hash=draft.target_hash,
+            payload={
+                **draft.payload,
+                "retry_of_generation_record_id": SCRIPT_ID,
+            },
+        )
+
+    monkeypatch.setattr(
+        "app.api.v1.director.prepare_director_proposal",
+        fake_prepare,
+    )
+    response = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json={
+            "expected_version": 8,
+            "target_type": "SCRIPT_SCENE",
+            "target_id": SCENE_ID,
+            "issue_types": ["PACING"],
+            "actor": "test-director",
+        },
+        headers={"Idempotency-Key": "director-forged-retry-lineage-v1"},
+    )
+    assert response.status_code == 404, response.text
+    assert response.json()["error"]["code"] == "DIRECTOR_RETRY_SOURCE_NOT_FOUND"
+
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        assert session.scalars(select(ChangeSet)).all() == []
+        assert (
+            session.scalar(
+                select(GenerationRecord).where(
+                    GenerationRecord.project_id == PROJECT_ID,
+                    GenerationRecord.status == "SUCCEEDED",
+                    GenerationRecord.capability == "DIRECTOR_SCENE_REVIEW",
+                )
+            )
+            is None
+        )
+
+
+@pytest.mark.anyio
 async def test_director_provider_failure_is_audited_without_changeset(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -1066,6 +1122,37 @@ async def test_director_provider_failure_is_audited_without_changeset(
         assert reservation_payload["state"] == "FAILED"
         assert reservation_payload["error"]["code"] == "ARK_TEXT_SCHEMA_INVALID"
 
+    failed_retry = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json={
+            "expected_version": 8,
+            "target_type": "SCRIPT_SCENE",
+            "target_id": SCENE_ID,
+            "issue_types": ["PACING"],
+            "retry_of_generation_record_id": failure_id,
+            "actor": "test-director",
+        },
+        headers={"Idempotency-Key": "director-provider-failure-retry-v1"},
+    )
+    assert failed_retry.status_code == 503, failed_retry.text
+    assert provider_calls == 2
+    with factory() as session:
+        retry_failure = session.scalar(
+            select(GenerationRecord).where(
+                GenerationRecord.project_id == PROJECT_ID,
+                GenerationRecord.capability == "DIRECTOR_SCENE_REVIEW",
+                GenerationRecord.status == "FAILED",
+                GenerationRecord.id != failure_id,
+            )
+        )
+        assert retry_failure is not None
+        retry_failure_metadata = json.loads(retry_failure.metadata_json)
+        assert (
+            retry_failure_metadata["retry_of_generation_record_id"]
+            == failure_id
+        )
+        retry_failure_id = retry_failure.id
+
     film_ir_response = await client.get(f"/api/v1/projects/{PROJECT_ID}/film-ir")
     assert film_ir_response.status_code == 200, film_ir_response.text
     film_ir = film_ir_response.json()["data"]
@@ -1088,6 +1175,14 @@ async def test_director_provider_failure_is_audited_without_changeset(
     )
     assert not any(
         edge["target"]["type"] == "Asset" and edge["target"]["id"] == ""
+        for edge in film_ir["edges"]
+    )
+    assert any(
+        edge["source"]["type"] == "GenerationRecord"
+        and edge["source"]["id"] == retry_failure_id
+        and edge["target"]["type"] == "GenerationRecord"
+        and edge["target"]["id"] == failure_id
+        and edge["relation"] == "RETRY_OF"
         for edge in film_ir["edges"]
     )
 
@@ -1263,6 +1358,146 @@ async def test_director_success_records_repair_attempts_and_latency(
         metadata = json.loads(record.metadata_json)
         assert metadata["repair_attempts"] == 2
         assert metadata["media_generation"] is False
+
+
+@pytest.mark.anyio
+async def test_director_explicit_retry_requires_new_key_and_records_lineage(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepare_script()
+    original_generate = director_proposals.generate_director_scene_review
+    provider_calls = 0
+
+    async def fail_once_then_succeed(
+        *args,
+        **kwargs,
+    ) -> TextGenerationResult:  # noqa: ANN002, ANN003
+        nonlocal provider_calls
+        provider_calls += 1
+        if provider_calls == 1:
+            raise TextProviderError(
+                "ARK_TEXT_SCHEMA_INVALID",
+                "首次 Director 审查结构无效",
+                retryable=True,
+                details={
+                    "last_request_id": "retry-source-request",
+                    "attempts": [
+                        {
+                            "attempt": 1,
+                            "request_id": "retry-source-request",
+                            "error_type": "validation_error",
+                            "validation_error": "invalid output",
+                        }
+                    ],
+                },
+            )
+        return await original_generate(*args, **kwargs)
+
+    monkeypatch.setattr(
+        director_proposals,
+        "generate_director_scene_review",
+        fail_once_then_succeed,
+    )
+    request_payload = {
+        "expected_version": 8,
+        "target_type": "SCRIPT_SCENE",
+        "target_id": SCENE_ID,
+        "issue_types": ["PACING"],
+        "actor": "test-director",
+    }
+    initial_key = "director-retry-source-v1"
+    failed_response = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json=request_payload,
+        headers={"Idempotency-Key": initial_key},
+    )
+    assert failed_response.status_code == 503, failed_response.text
+    assert provider_calls == 1
+
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        failed_record = session.scalar(
+            select(GenerationRecord).where(
+                GenerationRecord.project_id == PROJECT_ID,
+                GenerationRecord.capability == "DIRECTOR_SCENE_REVIEW",
+                GenerationRecord.status == "FAILED",
+            )
+        )
+        assert failed_record is not None
+        failed_record_id = failed_record.id
+
+    retry_payload = {
+        **request_payload,
+        "retry_of_generation_record_id": failed_record_id,
+    }
+    reused_key = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json=retry_payload,
+        headers={"Idempotency-Key": initial_key},
+    )
+    assert reused_key.status_code == 409, reused_key.text
+    assert reused_key.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+    assert provider_calls == 1
+
+    retried = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json=retry_payload,
+        headers={"Idempotency-Key": "director-explicit-retry-v1"},
+    )
+    assert retried.status_code == 201, retried.text
+    proposal = retried.json()["data"]
+    assert proposal["retry_of_generation_record_id"] == failed_record_id
+    assert provider_calls == 2
+
+    with factory() as session:
+        succeeded_record = session.scalar(
+            select(GenerationRecord).where(
+                GenerationRecord.project_id == PROJECT_ID,
+                GenerationRecord.capability == "DIRECTOR_SCENE_REVIEW",
+                GenerationRecord.status == "SUCCEEDED",
+            )
+        )
+        assert succeeded_record is not None
+        succeeded_metadata = json.loads(succeeded_record.metadata_json)
+        assert succeeded_metadata["retry_of_generation_record_id"] == failed_record_id
+        succeeded_record_id = succeeded_record.id
+
+    invalid_source = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json={
+            **request_payload,
+            "retry_of_generation_record_id": succeeded_record_id,
+        },
+        headers={"Idempotency-Key": "director-invalid-retry-source-v1"},
+    )
+    assert invalid_source.status_code == 409, invalid_source.text
+    assert invalid_source.json()["error"]["code"] == "DIRECTOR_RETRY_SOURCE_INVALID"
+    assert provider_calls == 2
+
+    film_ir_response = await client.get(f"/api/v1/projects/{PROJECT_ID}/film-ir")
+    assert film_ir_response.status_code == 200, film_ir_response.text
+    film_ir = film_ir_response.json()["data"]
+    succeeded_node = next(
+        item
+        for item in film_ir["objects"]
+        if item["type"] == "GenerationRecord" and item["id"] == succeeded_record_id
+    )
+    assert (
+        succeeded_node["attributes"]["retry_of_generation_record_id"]
+        == failed_record_id
+    )
+    assert any(
+        edge["source"]["type"] == "GenerationRecord"
+        and edge["source"]["id"] == succeeded_record_id
+        and edge["target"]["type"] == "GenerationRecord"
+        and edge["target"]["id"] == failed_record_id
+        and edge["relation"] == "RETRY_OF"
+        for edge in film_ir["edges"]
+    )
 
 
 @pytest.mark.anyio

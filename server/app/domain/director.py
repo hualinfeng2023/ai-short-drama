@@ -18,6 +18,11 @@ class DirectorProposalRequest(BaseModel):
     target_id: str = Field(min_length=36, max_length=36)
     issue_types: list[DirectorIssueType] = Field(min_length=1, max_length=4)
     instruction: str | None = Field(default=None, max_length=1000)
+    retry_of_generation_record_id: str | None = Field(
+        default=None,
+        min_length=36,
+        max_length=36,
+    )
     actor: str = Field(default="demo-user", min_length=1, max_length=80)
 
 

@@ -122,7 +122,7 @@ from app.services.dependency_analysis import (
     apply_dependency_invalidation,
     persist_dependency_edges,
 )
-from app.services.director_proposals import director_proposal_to_read
+from app.services.director_proposals import director_proposal_to_read, director_retry_source
 from app.services.events import append_event
 from app.services.exports import create_export
 from app.services.jobs import (
@@ -3814,6 +3814,21 @@ def _execute_create_director_proposal(
             },
         )
     payload = command.payload
+    retry_source_id = payload.get("retry_of_generation_record_id")
+    if retry_source_id is not None and not isinstance(retry_source_id, str):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "DIRECTOR_RETRY_SOURCE_INVALID",
+                "message": "Director 重试来源 ID 格式无效",
+            },
+        )
+    director_retry_source(
+        session,
+        project_id=project.id,
+        script_scene_id=scene.id,
+        generation_record_id=retry_source_id,
+    )
     review_payload = payload.get("review")
     context = payload.get("context")
     impact_payload = payload.get("impact")
@@ -3879,6 +3894,7 @@ def _execute_create_director_proposal(
         "script_scene_id": scene.id,
         "scene_ordinal": scene.ordinal,
         "requested_by": payload.get("requested_by"),
+        "retry_of_generation_record_id": payload.get("retry_of_generation_record_id"),
         "provider": provider,
     }
     stored_impact: dict[str, object] = {
@@ -3955,6 +3971,9 @@ def _execute_create_director_proposal(
                     "target_script_scene_id": scene.id,
                     "media_generation": False,
                     "repair_attempts": int(provider.get("repair_attempts", 0)),
+                    "retry_of_generation_record_id": payload.get(
+                        "retry_of_generation_record_id"
+                    ),
                 }
             ),
             created_at=datetime.now(UTC),
