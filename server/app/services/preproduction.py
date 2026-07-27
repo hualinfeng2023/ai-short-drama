@@ -100,11 +100,26 @@ def prepare_preproduction(session: Session, job: Job) -> list[str]:
             select(VoiceProfile).where(VoiceProfile.character_id == character.id)
         )
         if voice is None:
+            personality = [
+                str(item).strip()
+                for item in character_payload.get("personality", [])
+                if str(item).strip()
+            ]
+            age = str(character_payload.get("age", "")).strip()
+            dramatic_function = str(character_payload.get("dramatic_function", "")).strip()
+            voice_description_parts = [
+                f"{age}感声线" if age else "",
+                f"整体呈现{'、'.join(personality[:3])}" if personality else "",
+                f"表演重点：{dramatic_function}" if dramatic_function else "",
+            ]
             voice_payload = {
                 "gender_expression": "neutral",
                 "age_impression": "adult",
                 "tone": "natural-cinematic",
                 "language": script.canonical_language,
+                "voice_description": "；".join(
+                    item for item in voice_description_parts if item
+                ),
             }
             session.add(
                 VoiceProfile(

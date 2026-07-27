@@ -35,6 +35,38 @@ function formatLookLabel(label: string) {
   return localizeDisplayText(label).replace(/^造型\s*\d+\s*·\s*/, '')
 }
 
+function formatVoiceSetting(payload: Record<string, unknown>) {
+  const text = (key: string) => typeof payload[key] === 'string' ? payload[key].trim() : ''
+  const description = text('voice_description')
+  const ageLabels: Record<string, string> = {
+    adult: '成年声线',
+    young_adult: '青年声线',
+    child: '儿童声线',
+    senior: '年长声线',
+  }
+  const expressionLabels: Record<string, string> = {
+    neutral: '中性表达',
+    feminine: '偏女性表达',
+    masculine: '偏男性表达',
+  }
+  const toneLabels: Record<string, string> = {
+    'natural-cinematic': '自然、克制的电影感',
+  }
+  const languageLabels: Record<string, string> = {
+    'zh-CN': '普通话',
+    'en-US': '美式英语',
+  }
+  const summary = description || [
+    ageLabels[text('age_impression')] ?? text('age_impression'),
+    expressionLabels[text('gender_expression')] ?? text('gender_expression'),
+  ].filter(Boolean).join(' · ') || '尚未填写声线描述'
+  const detail = [
+    toneLabels[text('tone')] ?? text('tone'),
+    languageLabels[text('language')] ?? text('language'),
+  ].filter(Boolean).join(' · ')
+  return { summary, detail }
+}
+
 export function PreproductionPage() {
   const { projectId } = useParams()
   const { project: activeProject } = useStudio()
@@ -268,6 +300,7 @@ export function PreproductionPage() {
         const voice = voices.reduce((latest, item) => (
           !latest || item.version > latest.version ? item : latest
         ), voices[0])
+        const voiceSetting = voice ? formatVoiceSetting(voice.payload) : null
         return <article key={character.id}>
         <header><div><p className="eyebrow">{localizeCharacterRole(character.role)}</p><h3>{character.name}</h3><p>{character.visualBrief}</p></div></header>
         <div className="character-readiness__grid">
@@ -285,9 +318,10 @@ export function PreproductionPage() {
             <small>{look ? `第 ${look.version} 版 · ${localizeDisplayText(look.usageScope)} · ${getStatusLabel(look.status)}` : '需要生成并批准角色造型'}</small>
           </div>
           <div className="character-assets__summary">
-            <span><Mic2 size={14} />声音权限</span>
-            <strong>{voice ? getStatusLabel(voice.consentStatus) : '尚未准备'}</strong>
-            <small>{voice ? (voice.cloningEnabled ? '真人声音克隆已开启' : '真人声音克隆关闭') : '需要配置声音档案'}</small>
+            <span><Mic2 size={14} />声音设定</span>
+            <strong>{voiceSetting?.summary ?? '尚未准备'}</strong>
+            {voiceSetting?.detail ? <small>{voiceSetting.detail}</small> : null}
+            <small>{voice ? `${getStatusLabel(voice.consentStatus)} · ${voice.cloningEnabled ? '真人声音克隆已开启' : '真人声音克隆关闭'}` : '需要配置声音档案'}</small>
           </div>
         </div>
         {character.lockedCandidateId ? null : (
