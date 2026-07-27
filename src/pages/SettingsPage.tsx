@@ -43,10 +43,10 @@ const modes: Array<{ id: VisualMode; title: string; description: string; tone: s
   { id: 'cinema', title: '媒体审阅模式', description: '收紧审阅场景的留白与流程间距，突出小样和版本比较。', tone: '适合媒体审阅', previewHint: '紧凑画布 + 突出预览区' },
 ]
 
-const themes: Array<{ id: ThemeMode; title: string; description: string }> = [
-  { id: 'light', title: '亮色模式', description: '在明亮环境下保持清晰的层级与对比。' },
-  { id: 'dark', title: '暗黑模式', description: '降低环境光干扰，适合长时间审阅画面。' },
-  { id: 'system', title: '跟随系统', description: '自动匹配设备当前的明暗外观设置。' },
+const themes: Array<{ id: ThemeMode; title: string }> = [
+  { id: 'light', title: '亮色模式' },
+  { id: 'dark', title: '暗黑模式' },
+  { id: 'system', title: '跟随系统' },
 ]
 
 const PROMPT_MODEL_OPTIONS = [
@@ -335,11 +335,11 @@ export function SettingsPage() {
     <div className="settings-shell">
       <nav aria-label="设置分类" className="settings-nav">
         {([
-          { id: 'appearance', label: '外观与模式', description: '主题密度与画面层级', icon: Eye },
-          { id: 'runtime', label: '运行环境', description: apiConnected ? '服务端已连接' : '浏览器演示模式', icon: MonitorCog },
-          { id: 'providers', label: '服务与凭证', description: apiConnected ? (arkConfigured ? '方舟已配置' : '待配置') : '连接服务端后可用', icon: PlugZap },
-          { id: 'data', label: '数据与恢复', description: apiConnected ? '缓存与重新同步' : '演示数据管理', icon: Database },
-        ] as const).map(({ id, label, description, icon: Icon }) => (
+          { id: 'appearance', label: '外观与模式', icon: Eye },
+          { id: 'runtime', label: '运行环境', icon: MonitorCog },
+          { id: 'providers', label: '服务与凭证', icon: PlugZap },
+          { id: 'data', label: '数据与恢复', icon: Database },
+        ] as const).map(({ id, label, icon: Icon }) => (
           <button
             aria-current={settingsSection === id ? 'page' : undefined}
             className={settingsSection === id ? 'active' : ''}
@@ -350,7 +350,6 @@ export function SettingsPage() {
             <span className="settings-nav__icon"><Icon size={16} /></span>
             <span className="settings-nav__text">
               <strong>{label}</strong>
-              <small>{description}</small>
             </span>
             <ChevronRight className="settings-nav__chevron" size={14} />
           </button>
@@ -361,8 +360,7 @@ export function SettingsPage() {
         {settingsSection === 'appearance' ? (
           <section>
             <div className="section-heading"><div><h2>颜色模式</h2></div></div>
-            <p className="settings-copy">颜色模式独立于工作台布局；选择“跟随系统”后会在设备外观变化时自动更新。</p>
-            <div className="theme-grid">{themes.map((theme) => <button aria-pressed={themeMode === theme.id} className={themeMode === theme.id ? 'active' : ''} key={theme.id} onClick={() => { if (themeMode !== theme.id) { setThemeMode(theme.id); notify(`已切换到「${theme.title}」。`, 'info') } }} type="button"><span aria-hidden="true" className={`theme-option-icon theme-option-icon--${theme.id}`}>{theme.id === 'light' ? <Sun size={18} /> : theme.id === 'dark' ? <Moon size={18} /> : <Monitor size={18} />}</span><span><strong>{theme.title}</strong><small>{theme.description}</small></span>{themeMode === theme.id ? <Check aria-label="当前选择" size={16} /> : null}</button>)}</div>
+            <div className="theme-grid">{themes.map((theme) => <button aria-pressed={themeMode === theme.id} className={themeMode === theme.id ? 'active' : ''} key={theme.id} onClick={() => { if (themeMode !== theme.id) { setThemeMode(theme.id); notify(`已切换到「${theme.title}」。`, 'info') } }} type="button"><span aria-hidden="true" className={`theme-option-icon theme-option-icon--${theme.id}`}>{theme.id === 'light' ? <Sun size={18} /> : theme.id === 'dark' ? <Moon size={18} /> : <Monitor size={18} />}</span><strong>{theme.title}</strong>{themeMode === theme.id ? <Check aria-label="当前选择" size={16} /> : null}</button>)}</div>
 
             <div className="section-heading settings-section-heading"><div><h2>工作台布局</h2></div></div>
             <p className="settings-copy">三种布局共享同一信息架构与交互规则，切换只影响信息密度和画面层级，不会改变颜色模式。</p>

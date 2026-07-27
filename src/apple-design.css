@@ -3676,15 +3676,6 @@ a.project-workflow__stage:focus-visible {
 .settings-nav > button.active .settings-nav__icon { color: var(--color-action-primary); background: color-mix(in srgb, var(--color-action-primary) 14%, var(--color-surface)); }
 .settings-nav__text { flex: 1 1 auto; min-width: 0; }
 .settings-nav__text strong { display: block; font-size: var(--font-size-caption); font-weight: 680; }
-.settings-nav__text small {
-  display: block;
-  overflow: hidden;
-  margin-top: var(--space-1);
-  color: var(--color-text-tertiary);
-  font-size: var(--font-size-caption);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .settings-nav__chevron { flex: 0 0 auto; color: var(--color-text-tertiary); opacity: 0; transform: translateX(-3px); transition: opacity var(--motion-duration-fast) var(--motion-ease-standard), transform var(--motion-duration-fast) var(--motion-ease-standard); }
 .settings-nav > button.active .settings-nav__chevron { color: var(--color-action-primary); opacity: 1; transform: translateX(0); }
 
@@ -3703,7 +3694,6 @@ a.project-workflow__stage:focus-visible {
     -webkit-overflow-scrolling: touch;
   }
   .settings-nav > button { flex: 0 0 auto; }
-  .settings-nav__text small { display: none; }
   .settings-nav__chevron { display: none; }
 }
 

@@ -2571,9 +2571,8 @@ p {
 .theme-grid > button { display: flex; min-height: var(--control-height-md); align-items: center; gap: var(--space-3); padding: var(--space-3); color: var(--color-text-primary); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-control-sm); cursor: pointer; text-align: left; }
 .theme-grid > button:hover,
 .theme-grid > button.active { border-color: var(--color-action-primary); box-shadow: var(--shadow-focus); }
-.theme-grid > button > span:nth-child(2) { display: grid; min-width: 0; gap: var(--space-1); }
 .theme-grid strong { font-size: var(--font-size-caption); }
-.theme-grid small { color: var(--color-text-secondary); font-size: var(--font-size-caption); line-height: var(--line-height-copy); }
+.theme-grid > button > strong { min-width: 0; }
 .theme-grid > svg { flex: 0 0 auto; margin-left: auto; color: var(--color-action-primary); }
 .theme-option-icon { display: grid; width: var(--control-height-sm); height: var(--control-height-sm); flex: 0 0 auto; place-items: center; color: var(--color-action-primary); background: var(--color-action-primary-soft); border-radius: var(--radius-control-sm); }
 .theme-option-icon--dark { color: var(--color-text-primary); background: var(--color-surface-muted); }
