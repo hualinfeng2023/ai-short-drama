@@ -25,7 +25,10 @@ class DirectorIntentEntityRef(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     type: Literal[
+        "Beat",
         "StoryBeat",
+        "StoryBible",
+        "Character",
         "CharacterGoal",
         "ScriptScene",
         "Scene",
@@ -126,6 +129,24 @@ class DirectorIntentConflictCheck(BaseModel):
     status: Literal["PASS", "FAIL", "UNKNOWN"]
     message: str = Field(min_length=1, max_length=1000)
     evidence_refs: list[str] = Field(default_factory=list, max_length=20)
+
+
+class DirectorIntentCompilationOutput(BaseModel):
+    """Provider-owned semantic layer; server owns scope, identity, versions and state."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    directives: list[DirectorIntentDirective] = Field(min_length=5, max_length=5)
+    rationale: str = Field(min_length=1, max_length=2000)
+    overall_confidence: float = Field(ge=0, le=1)
+    conflict_checks: list[DirectorIntentConflictCheck] = Field(min_length=1, max_length=40)
+
+    @model_validator(mode="after")
+    def validate_channels(self) -> "DirectorIntentCompilationOutput":
+        channels = [item.channel for item in self.directives]
+        if len(channels) != len(set(channels)) or set(channels) != _REQUIRED_CHANNELS:
+            raise ValueError("导演意图编译结果必须且只能包含五个专业通道")
+        return self
 
 
 class DirectorIntentInheritanceTarget(BaseModel):

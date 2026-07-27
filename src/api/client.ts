@@ -427,6 +427,7 @@ interface ApiCharacter {
   visual_brief: string
   status: string
   locked_candidate_id: string | null
+  locked_identity_version_id?: string | null
   lock_version: number
   candidates: Array<{
     id: string
@@ -520,6 +521,18 @@ export interface PreproductionWorkspace {
     version: number
     name: string
     payload: Record<string, unknown>
+    referenceAssetIds: string[]
+    imageCandidates: Array<{
+      id: string
+      assetUrl: string
+      status: string
+      createdAt: string
+      batchId?: string
+      styleId?: string
+      styleLabel?: string
+      sourceAssetId?: string
+      adjustmentPrompt?: string
+    }>
     status: string
     contentHash: string
   }>
@@ -529,6 +542,18 @@ export interface PreproductionWorkspace {
     version: number
     name: string
     payload: Record<string, unknown>
+    referenceAssetIds: string[]
+    imageCandidates: Array<{
+      id: string
+      assetUrl: string
+      status: string
+      createdAt: string
+      batchId?: string
+      styleId?: string
+      styleLabel?: string
+      sourceAssetId?: string
+      adjustmentPrompt?: string
+    }>
     status: string
     contentHash: string
   }>
@@ -538,6 +563,7 @@ export interface PreproductionWorkspace {
     version: number
     provider: string
     voiceKey: string
+    payload: Record<string, unknown>
     consentStatus: string
     cloningEnabled: boolean
     status: string
@@ -2234,6 +2260,70 @@ export interface DirectorTimelinePreview {
   validationStatus: 'REVIEW_REQUIRED' | 'PASS'
 }
 
+export type DirectorIntentChannel =
+  | 'NARRATIVE'
+  | 'CAMERA'
+  | 'PERFORMANCE'
+  | 'SOUND'
+  | 'PACING'
+
+export interface DirectorIntentChangePreview {
+  schemaVersion: 'director-intent-change-preview-v1'
+  projectionMode: 'READ_ONLY'
+  canonicalSource: 'FILM_IR'
+  intent: {
+    intentId: string
+    intentVersion: number
+    sourceRequest: string
+    scope: {
+      resolutionStatus: 'RESOLVED' | 'AMBIGUOUS' | 'UNRESOLVED'
+      scene: { type: string; id: string; versionId?: string | null }
+      plotBeat?: { type: string; id: string; versionId?: string | null } | null
+      characterGoals: Array<{ type: string; id: string; versionId?: string | null }>
+      timeRange?: { startMs: number; endMs: number } | null
+      resolutionReason: string
+      contextFingerprint: string
+    }
+    evidence: Array<{
+      evidenceId: string
+      claim: string
+      confidence: number
+    }>
+    rationale: string
+    overallConfidence: number
+    conflictChecks: Array<{
+      code: string
+      category: string
+      severity: 'BLOCKING' | 'WARNING' | 'INFO'
+      status: 'PASS' | 'FAIL' | 'UNKNOWN'
+      message: string
+    }>
+    state: 'DRAFT' | 'PREVIEW_READY' | 'BLOCKED' | 'CONFIRMED' | 'STALE'
+    canConfirm: boolean
+    blockedReasons: string[]
+  }
+  sections: Array<{
+    channel: DirectorIntentChannel
+    before: string
+    after: string
+    why: string
+    confidence: number
+    evidenceRefs: string[]
+  }>
+  preservedInvariants: string[]
+  downstreamSummary: string[]
+}
+
+export interface DirectorIntentInheritanceEvidence {
+  consumer: 'STORYBOARD' | 'PROMPT' | 'AUDIO' | 'TIMELINE'
+  status: 'INHERITED' | 'NOT_INTEGRATED' | 'PENDING' | 'STALE' | 'BLOCKED'
+  intentVersion: number
+  sourceFingerprint?: string
+  appliedRange?: { startMs: number; endMs: number } | null
+  outputVersion?: string | null
+  evidence?: Record<string, unknown>
+}
+
 export interface DirectorReviewProposal {
   proposalId: string
   projectId: string
@@ -2283,6 +2373,9 @@ export interface DirectorReviewProposal {
     risk?: DirectorTimelinePreview['risk'] | null
     overrideReason?: string | null
   } | null
+  directorIntentPreview?: DirectorIntentChangePreview
+  directorIntentConfirmationToken?: string
+  directorIntentInheritance?: DirectorIntentInheritanceEvidence[]
   createdAt: string
 }
 
@@ -2377,7 +2470,133 @@ interface ApiDirectorReviewProposal {
     risk?: DirectorTimelinePreview['risk'] | null
     override_reason?: string | null
   } | null
+  director_intent_preview?: {
+    schema_version: 'director-intent-change-preview-v1'
+    projection_mode: 'READ_ONLY'
+    canonical_source: 'FILM_IR'
+    intent: {
+      intent_id: string
+      intent_version: number
+      source_request: string
+      scope: {
+        resolution_status: 'RESOLVED' | 'AMBIGUOUS' | 'UNRESOLVED'
+        scene: { type: string; id: string; version_id?: string | null }
+        plot_beat?: { type: string; id: string; version_id?: string | null } | null
+        character_goals: Array<{ type: string; id: string; version_id?: string | null }>
+        time_range?: { start_ms: number; end_ms: number } | null
+        resolution_reason: string
+        context_fingerprint: string
+      }
+      evidence: Array<{
+        evidence_id: string
+        claim: string
+        confidence: number
+      }>
+      rationale: string
+      overall_confidence: number
+      conflict_checks: Array<{
+        code: string
+        category: string
+        severity: 'BLOCKING' | 'WARNING' | 'INFO'
+        status: 'PASS' | 'FAIL' | 'UNKNOWN'
+        message: string
+      }>
+      state: 'DRAFT' | 'PREVIEW_READY' | 'BLOCKED' | 'CONFIRMED' | 'STALE'
+      can_confirm: boolean
+      blocked_reasons: string[]
+    }
+    sections: Array<{
+      channel: DirectorIntentChannel
+      before: string
+      after: string
+      why: string
+      confidence: number
+      evidence_refs: string[]
+    }>
+    preserved_invariants: string[]
+    downstream_summary: string[]
+  }
+  director_intent_confirmation_token?: string
+  director_intent_inheritance?: Array<{
+    consumer: 'STORYBOARD' | 'PROMPT' | 'AUDIO' | 'TIMELINE'
+    status: 'INHERITED' | 'NOT_INTEGRATED' | 'PENDING' | 'STALE' | 'BLOCKED'
+    intent_version: number
+    source_fingerprint?: string
+    applied_range?: { start_ms: number; end_ms: number } | null
+    output_version?: string | null
+    evidence?: Record<string, unknown>
+  }>
   created_at: string
+}
+
+function mapDirectorIntentPreview(
+  preview: NonNullable<ApiDirectorReviewProposal['director_intent_preview']>,
+): DirectorIntentChangePreview {
+  return {
+    schemaVersion: preview.schema_version,
+    projectionMode: preview.projection_mode,
+    canonicalSource: preview.canonical_source,
+    intent: {
+      intentId: preview.intent.intent_id,
+      intentVersion: preview.intent.intent_version,
+      sourceRequest: preview.intent.source_request,
+      scope: {
+        resolutionStatus: preview.intent.scope.resolution_status,
+        scene: {
+          type: preview.intent.scope.scene.type,
+          id: preview.intent.scope.scene.id,
+          versionId: preview.intent.scope.scene.version_id,
+        },
+        plotBeat: preview.intent.scope.plot_beat
+          ? {
+              type: preview.intent.scope.plot_beat.type,
+              id: preview.intent.scope.plot_beat.id,
+              versionId: preview.intent.scope.plot_beat.version_id,
+            }
+          : null,
+        characterGoals: preview.intent.scope.character_goals.map((item) => ({
+          type: item.type,
+          id: item.id,
+          versionId: item.version_id,
+        })),
+        timeRange: preview.intent.scope.time_range
+          ? {
+              startMs: preview.intent.scope.time_range.start_ms,
+              endMs: preview.intent.scope.time_range.end_ms,
+            }
+          : null,
+        resolutionReason: preview.intent.scope.resolution_reason,
+        contextFingerprint: preview.intent.scope.context_fingerprint,
+      },
+      evidence: preview.intent.evidence.map((item) => ({
+        evidenceId: item.evidence_id,
+        claim: item.claim,
+        confidence: item.confidence,
+      })),
+      rationale: preview.intent.rationale,
+      overallConfidence: preview.intent.overall_confidence,
+      conflictChecks: preview.intent.conflict_checks.map((item) => ({
+        code: item.code,
+        category: item.category,
+        severity: item.severity,
+        status: item.status,
+        message: item.message,
+      })),
+      state: preview.intent.state,
+      canConfirm: preview.intent.can_confirm,
+      blockedReasons: preview.intent.blocked_reasons,
+    },
+    sections: preview.sections.map((item) => ({
+      channel: item.channel,
+      before: item.before,
+      after: item.after,
+      why: item.why,
+      confidence: item.confidence,
+      evidenceRefs: item.evidence_refs,
+    })),
+    preservedInvariants: preview.preserved_invariants,
+    downstreamSummary: preview.downstream_summary,
+  }
 }
 
 function mapDirectorReviewProposal(
@@ -2508,6 +2727,24 @@ function mapDirectorReviewProposal(
           overrideReason: proposal.approval_result.override_reason,
         }
       : null,
+    directorIntentPreview: proposal.director_intent_preview
+      ? mapDirectorIntentPreview(proposal.director_intent_preview)
+      : undefined,
+    directorIntentConfirmationToken: proposal.director_intent_confirmation_token,
+    directorIntentInheritance: (proposal.director_intent_inheritance ?? []).map((item) => ({
+      consumer: item.consumer,
+      status: item.status,
+      intentVersion: item.intent_version,
+      sourceFingerprint: item.source_fingerprint,
+      appliedRange: item.applied_range
+        ? {
+            startMs: item.applied_range.start_ms,
+            endMs: item.applied_range.end_ms,
+          }
+        : item.applied_range,
+      outputVersion: item.output_version,
+      ...(item.evidence ? { evidence: item.evidence } : {}),
+    })),
     createdAt: proposal.created_at,
   }
 }
@@ -2531,6 +2768,8 @@ export async function createDirectorReviewProposal(
     targetId: string
     issueTypes: DirectorReviewIssueType[]
     instruction?: string
+    compileIntent?: boolean
+    intentSelection?: { startMs: number; endMs: number }
   },
 ): Promise<DirectorReviewProposal> {
   const result = await requestJson<ApiDirectorReviewProposal>(
@@ -2547,6 +2786,15 @@ export async function createDirectorReviewProposal(
         target_id: input.targetId,
         issue_types: input.issueTypes,
         instruction: input.instruction,
+        compile_intent: input.compileIntent ?? false,
+        ...(input.intentSelection
+          ? {
+              intent_selection: {
+                start_ms: input.intentSelection.startMs,
+                end_ms: input.intentSelection.endMs,
+              },
+            }
+          : {}),
         actor: '创作者',
       }),
     },
@@ -2556,7 +2804,11 @@ export async function createDirectorReviewProposal(
 
 export async function executeDirectorReviewProposal(
   proposalId: string,
-  input: { expectedVersion: number; optionId: string },
+  input: {
+    expectedVersion: number
+    optionId: string
+    intentConfirmationToken?: string
+  },
 ): Promise<DirectorReviewProposal> {
   const result = await requestJson<{
     proposal: ApiDirectorReviewProposal
@@ -2572,6 +2824,7 @@ export async function executeDirectorReviewProposal(
       option_id: input.optionId,
       actor: '创作者',
       confirmed: true,
+      intent_confirmation_token: input.intentConfirmationToken,
     }),
   })
   return mapDirectorReviewProposal(result.proposal)
@@ -3949,6 +4202,9 @@ function mapCharacter(character: ApiCharacter): CharacterRecord {
     ...(character.locked_candidate_id === null
       ? {}
       : { lockedCandidateId: character.locked_candidate_id }),
+    ...(character.locked_identity_version_id == null
+      ? {}
+      : { lockedIdentityVersionId: character.locked_identity_version_id }),
     lockVersion: character.lock_version,
     candidates: character.candidates.map((candidate) => ({
       id: candidate.id,
@@ -4456,6 +4712,18 @@ export async function fetchPreproduction(
       version: number
       name: string
       payload: Record<string, unknown>
+      reference_asset_ids: string[]
+      image_candidates: Array<{
+        id: string
+        asset_url: string
+        status: string
+        created_at: string
+        batch_id?: string | null
+        style_id?: string | null
+        style_label?: string | null
+        source_asset_id?: string | null
+        adjustment_prompt?: string | null
+      }>
       status: string
       content_hash: string
     }>
@@ -4465,6 +4733,18 @@ export async function fetchPreproduction(
       version: number
       name: string
       payload: Record<string, unknown>
+      reference_asset_ids: string[]
+      image_candidates: Array<{
+        id: string
+        asset_url: string
+        status: string
+        created_at: string
+        batch_id?: string | null
+        style_id?: string | null
+        style_label?: string | null
+        source_asset_id?: string | null
+        adjustment_prompt?: string | null
+      }>
       status: string
       content_hash: string
     }>
@@ -4474,6 +4754,7 @@ export async function fetchPreproduction(
       version: number
       provider: string
       voice_key: string
+      payload: Record<string, unknown>
       consent_status: string
       cloning_enabled: boolean
       status: string
@@ -4495,10 +4776,34 @@ export async function fetchPreproduction(
     })),
     locations: data.locations.map((item) => ({
       ...item,
+      referenceAssetIds: item.reference_asset_ids,
+      imageCandidates: item.image_candidates.map((candidate) => ({
+        id: candidate.id,
+        assetUrl: candidate.asset_url,
+        status: candidate.status,
+        createdAt: candidate.created_at,
+        batchId: candidate.batch_id ?? undefined,
+        styleId: candidate.style_id ?? undefined,
+        styleLabel: candidate.style_label ?? undefined,
+        sourceAssetId: candidate.source_asset_id ?? undefined,
+        adjustmentPrompt: candidate.adjustment_prompt ?? undefined,
+      })),
       contentHash: item.content_hash,
     })),
     props: data.props.map((item) => ({
       ...item,
+      referenceAssetIds: item.reference_asset_ids,
+      imageCandidates: item.image_candidates.map((candidate) => ({
+        id: candidate.id,
+        assetUrl: candidate.asset_url,
+        status: candidate.status,
+        createdAt: candidate.created_at,
+        batchId: candidate.batch_id ?? undefined,
+        styleId: candidate.style_id ?? undefined,
+        styleLabel: candidate.style_label ?? undefined,
+        sourceAssetId: candidate.source_asset_id ?? undefined,
+        adjustmentPrompt: candidate.adjustment_prompt ?? undefined,
+      })),
       contentHash: item.content_hash,
     })),
     voices: data.voices.map((item) => ({
@@ -4507,6 +4812,7 @@ export async function fetchPreproduction(
       version: item.version,
       provider: item.provider,
       voiceKey: item.voice_key,
+      payload: item.payload,
       consentStatus: item.consent_status,
       cloningEnabled: item.cloning_enabled,
       status: item.status,
@@ -4518,6 +4824,104 @@ export async function fetchPreproduction(
       contentHash: item.content_hash,
     })),
   }
+}
+
+export async function previewWorldAssetReferencePrompt(
+  projectId: string,
+  assetType: 'location' | 'prop',
+  versionId: string,
+  expectedVersion: number,
+  options?: {
+    count?: number
+    characterIds?: string[]
+    sourceAssetId?: string
+    adjustmentPrompt?: string
+  },
+): Promise<{
+  basePrompt: string
+  variants: Array<{ styleId: string; styleLabel: string; prompt: string }>
+}> {
+  const data = await requestJson<{
+    base_prompt: string
+    variants: Array<{ style_id: string; style_label: string; prompt: string }>
+  }>(
+    `/api/v1/projects/${projectId}/preproduction/${assetType}/${versionId}/reference-images/preview`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        expected_version: expectedVersion,
+        count: options?.count ?? 1,
+        character_ids: options?.characterIds ?? [],
+        source_asset_id: options?.sourceAssetId,
+        adjustment_prompt: options?.adjustmentPrompt,
+      }),
+    },
+  )
+  return {
+    basePrompt: data.base_prompt,
+    variants: data.variants.map((item) => ({
+      styleId: item.style_id,
+      styleLabel: item.style_label,
+      prompt: item.prompt,
+    })),
+  }
+}
+
+export async function generateWorldAssetReference(
+  projectId: string,
+  assetType: 'location' | 'prop',
+  versionId: string,
+  expectedVersion: number,
+  count: number,
+  sourceAssetId?: string,
+  adjustmentPrompt?: string,
+  options?: {
+    characterIds?: string[]
+    customBasePrompt?: string
+  },
+): Promise<Job[]> {
+  const result = await requestJson<{ job: ApiJob; jobs: ApiJob[] }>(
+    `/api/v1/projects/${projectId}/preproduction/${assetType}/${versionId}/reference-images`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': crypto.randomUUID(),
+      },
+      body: JSON.stringify({
+        expected_version: expectedVersion,
+        count,
+        source_asset_id: sourceAssetId,
+        adjustment_prompt: adjustmentPrompt,
+        character_ids: options?.characterIds ?? [],
+        custom_base_prompt: options?.customBasePrompt,
+        actor: 'demo-user',
+      }),
+    },
+  )
+  return result.jobs.map(mapJob)
+}
+
+export async function lockWorldAssetReference(
+  projectId: string,
+  assetType: 'location' | 'prop',
+  versionId: string,
+  assetId: string,
+  expectedVersion: number,
+): Promise<void> {
+  await requestJson(
+    `/api/v1/projects/${projectId}/preproduction/${assetType}/${versionId}/reference-images/lock`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        expected_version: expectedVersion,
+        asset_id: assetId,
+        actor: 'demo-user',
+      }),
+    },
+  )
 }
 
 export async function approvePreproduction(

@@ -21,6 +21,7 @@ from app.db.models import (
     ReviewRecord,
     ScriptLine,
     ScriptScene,
+    ScriptVersion,
     ShotSpec,
     SoundBriefVersion,
     StoryboardVersion,
@@ -29,6 +30,10 @@ from app.db.models import (
     WorkflowNode,
 )
 from app.services.assets import register_file
+from app.services.director_intent_consumption import (
+    confirmed_director_intents_by_scene,
+    update_director_intent_inheritance_receipt,
+)
 from app.services.events import append_event
 from app.services.generation_records import ensure_generation_record
 from app.services.jobs import enqueue_job
@@ -62,6 +67,7 @@ def _cue_payload(
     text: str,
     emotion: str,
     source: str = "GENERATED",
+    director_intent: dict[str, object] | None = None,
 ) -> dict[str, object]:
     return {
         "schema_version": "audio-cue-v1",
@@ -71,6 +77,7 @@ def _cue_payload(
         "source": source,
         "rights_status": "SYNTHETIC_OWNED",
         "provider_contract": "audio-adapter-v1",
+        "director_intent": director_intent,
     }
 
 
@@ -106,6 +113,20 @@ def create_audio_pipeline(session: Session, job: Job) -> tuple[SoundBriefVersion
     )
     if not specs:
         raise ValueError("分镜没有可用的镜头规格")
+    script = session.get(ScriptVersion, storyboard.script_version_id)
+    if script is None:
+        raise ValueError("分镜对应的剧本版本不存在")
+    director_intents = confirmed_director_intents_by_scene(session, script=script)
+    audio_intents = {
+        ordinal: intent.snapshot_for("AUDIO")
+        for ordinal, intent in director_intents.items()
+    }
+    scene_ordinals = {
+        scene.id: scene.ordinal
+        for scene in session.scalars(
+            select(ScriptScene).where(ScriptScene.script_version_id == script.id)
+        ).all()
+    }
     now = datetime.now(UTC)
     total_duration_ms = sum(item.duration_ms for item in specs)
     sound_payload = {
@@ -116,6 +137,7 @@ def create_audio_pipeline(session: Session, job: Job) -> tuple[SoundBriefVersion
         "sfx": "仅使用剧本显式意图，不凭空增加关键叙事事件",
         "duration_ms": total_duration_ms,
         "rights_status": "SYNTHETIC_OWNED",
+        "director_intent_consumption": list(audio_intents.values()),
     }
     brief = SoundBriefVersion(
         id=str(uuid4()),
@@ -137,6 +159,8 @@ def create_audio_pipeline(session: Session, job: Job) -> tuple[SoundBriefVersion
     cursor_ms = 0
     seen_scenes: set[str] = set()
     for spec in specs:
+        scene_ordinal = scene_ordinals.get(spec.script_scene_id)
+        audio_intent = audio_intents.get(scene_ordinal) if scene_ordinal is not None else None
         line_ids = json.loads(spec.script_line_ids_json)
         line = session.get(ScriptLine, line_ids[0]) if line_ids else None
         if line is not None and line.line_type in {"DIALOGUE", "VOICE_OVER"}:
@@ -153,6 +177,7 @@ def create_audio_pipeline(session: Session, job: Job) -> tuple[SoundBriefVersion
                         line.line_type,
                         text=line.text,
                         emotion=line.emotion,
+                        director_intent=audio_intent,
                     ),
                 }
             )
@@ -174,6 +199,7 @@ def create_audio_pipeline(session: Session, job: Job) -> tuple[SoundBriefVersion
                         "AMBIENCE",
                         text=f"{scene.location if scene else 'scene'} 空间环境底噪",
                         emotion="neutral",
+                        director_intent=audio_intent,
                     ),
                 }
             )
@@ -192,6 +218,7 @@ def create_audio_pipeline(session: Session, job: Job) -> tuple[SoundBriefVersion
                                 "SFX",
                                 text=str(sfx),
                                 emotion="accent",
+                                director_intent=audio_intent,
                             ),
                         }
                     )
@@ -210,11 +237,22 @@ def create_audio_pipeline(session: Session, job: Job) -> tuple[SoundBriefVersion
                 "BGM",
                 text="整集短剧节奏型配乐，2 个方向候选中的批准版本",
                 emotion="building",
+                director_intent=audio_intents.get(
+                    scene_ordinals.get(specs[0].script_scene_id, -1)
+                ),
             ),
         }
     )
 
     child_ids: list[str] = []
+    intent_evidence: dict[str, dict[str, object]] = {
+        intent.change_set_id: {
+            "scene_ordinal": ordinal,
+            "audio_cue_ids": [],
+            "receipt_hashes": [],
+        }
+        for ordinal, intent in director_intents.items()
+    }
     for ordinal, spec in enumerate(cue_specs, start=1):
         cue_payload = dict(spec["payload"])
         cue = AudioCue(
@@ -257,6 +295,7 @@ def create_audio_pipeline(session: Session, job: Job) -> tuple[SoundBriefVersion
                 "cue_type": cue.cue_type,
                 "duration_ms": cue.duration_ms,
                 "prompt": cue.payload_json,
+                "director_intent": cue_payload.get("director_intent"),
                 "voice_profile_id": cue.voice_profile_id,
                 "rights_status": "SYNTHETIC_OWNED",
                 "seed": cue.content_hash[:16],
@@ -277,6 +316,34 @@ def create_audio_pipeline(session: Session, job: Job) -> tuple[SoundBriefVersion
             )
         )
         child_ids.append(child.id)
+        cue_intent = cue_payload.get("director_intent")
+        if isinstance(cue_intent, dict):
+            source_change_set_id = cue_intent.get("source_change_set_id")
+            evidence = intent_evidence.get(str(source_change_set_id))
+            if evidence is not None:
+                audio_cue_ids = evidence["audio_cue_ids"]
+                receipt_hashes = evidence["receipt_hashes"]
+                if isinstance(audio_cue_ids, list):
+                    audio_cue_ids.append(cue.id)
+                if isinstance(receipt_hashes, list):
+                    receipt_hashes.append(cue_intent.get("receipt_hash"))
+
+    for confirmed_intent in director_intents.values():
+        evidence = intent_evidence.get(confirmed_intent.change_set_id)
+        if evidence is None or not evidence.get("audio_cue_ids"):
+            continue
+        update_director_intent_inheritance_receipt(
+            session,
+            intent=confirmed_intent,
+            consumer="AUDIO",
+            status="INHERITED",
+            output_version=brief.id,
+            evidence={
+                **evidence,
+                "sound_brief_version_id": brief.id,
+                "prompt_source": "audio_cues.payload_json.director_intent",
+            },
+        )
 
     node = session.scalar(select(WorkflowNode).where(WorkflowNode.job_id == job.id))
     if node is not None:
@@ -345,6 +412,11 @@ def materialize_audio_take(
                 latency_ms=0,
                 estimated_cost_usd=0.0,
                 metadata={"rights_status": "SYNTHETIC_OWNED", "reused_existing_output": True},
+                director_intent=(
+                    payload.get("director_intent")
+                    if isinstance(payload.get("director_intent"), dict)
+                    else {}
+                ),
             )
             existing.generation_record_id = record.id
         return existing, None
@@ -390,6 +462,11 @@ def materialize_audio_take(
         latency_ms=0,
         estimated_cost_usd=0.0,
         metadata={"rights_status": "SYNTHETIC_OWNED"},
+        director_intent=(
+            payload.get("director_intent")
+            if isinstance(payload.get("director_intent"), dict)
+            else {}
+        ),
     )
     for check_type, score, evidence in (
         ("AUDIO_DURATION", 1.0, {"expected_ms": cue.duration_ms, "actual_ms": cue.duration_ms}),

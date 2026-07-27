@@ -85,6 +85,7 @@ EXPECTED_JOB_TYPES = {
     "GENERATE_CHARACTER_VISUAL_CANDIDATE",
     "GENERATE_CHARACTER_IDENTITY_DOSSIER",
     "GENERATE_CHARACTER_LOOKS",
+    "GENERATE_WORLD_ASSET_IMAGE",
     "PREPARE_PREPRODUCTION_ASSETS",
     "GENERATE_STORYBOARD_V2",
     "GENERATE_STORYBOARD_TAKE",
@@ -1052,6 +1053,225 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
     assert len(preproduction["props"]) >= 1
     assert len(preproduction["voices"]) == 2
     assert all(item["cloning_enabled"] is False for item in preproduction["voices"])
+    assert all(item["payload"]["voice_description"] for item in preproduction["voices"])
+
+    invalid_reference_count = await client.post(
+        (
+            f"/api/v1/projects/{project_id}/preproduction/location/"
+            f"{preproduction['locations'][0]['id']}/reference-images"
+        ),
+        json={
+            "expected_version": current_version,
+            "count": 4,
+            "actor": "test-director",
+        },
+        headers={"Idempotency-Key": "world-reference-invalid-count"},
+    )
+    assert invalid_reference_count.status_code == 422
+    invalid_reference_refinement = await client.post(
+        (
+            f"/api/v1/projects/{project_id}/preproduction/location/"
+            f"{preproduction['locations'][0]['id']}/reference-images"
+        ),
+        json={
+            "expected_version": current_version,
+            "source_asset_id": "00000000-0000-4000-8000-000000000000",
+            "actor": "test-director",
+        },
+        headers={"Idempotency-Key": "world-reference-missing-adjustment"},
+    )
+    assert invalid_reference_refinement.status_code == 422
+
+    locked_character_ids = [
+        item["id"]
+        for item in preproduction["characters"]
+        if item.get("locked_identity_version_id") or item.get("locked_candidate_id")
+    ]
+    assert locked_character_ids
+    location_id = preproduction["locations"][0]["id"]
+    prompt_preview = await client.post(
+        (
+            f"/api/v1/projects/{project_id}/preproduction/location/"
+            f"{location_id}/reference-images/preview"
+        ),
+        json={
+            "expected_version": current_version,
+            "count": 2,
+            "character_ids": locked_character_ids[:2],
+        },
+    )
+    assert prompt_preview.status_code == 200, prompt_preview.text
+    preview_data = prompt_preview.json()["data"]
+    assert "角色形象锁定" in preview_data["base_prompt"]
+    assert len(preview_data["variants"]) == 2
+    assert preview_data["base_prompt"] in preview_data["variants"][0]["prompt"]
+
+    too_many_character_refs = await client.post(
+        (
+            f"/api/v1/projects/{project_id}/preproduction/location/"
+            f"{location_id}/reference-images"
+        ),
+        json={
+            "expected_version": current_version,
+            "character_ids": [
+                "00000000-0000-4000-8000-000000000001",
+                "00000000-0000-4000-8000-000000000002",
+                "00000000-0000-4000-8000-000000000003",
+                "00000000-0000-4000-8000-000000000004",
+            ],
+            "actor": "test-director",
+        },
+        headers={"Idempotency-Key": "world-reference-too-many-characters"},
+    )
+    assert too_many_character_refs.status_code == 422
+
+    missing_character_ref = await client.post(
+        (
+            f"/api/v1/projects/{project_id}/preproduction/location/"
+            f"{location_id}/reference-images"
+        ),
+        json={
+            "expected_version": current_version,
+            "character_ids": ["00000000-0000-4000-8000-000000000099"],
+            "actor": "test-director",
+        },
+        headers={"Idempotency-Key": "world-reference-missing-character"},
+    )
+    assert missing_character_ref.status_code == 404
+
+    custom_base_prompt = "自定义场景提示词，用于验证覆盖默认组装逻辑，至少二十个汉字。"
+    custom_prompt_generate = await client.post(
+        (
+            f"/api/v1/projects/{project_id}/preproduction/location/"
+            f"{location_id}/reference-images"
+        ),
+        json={
+            "expected_version": current_version,
+            "count": 1,
+            "character_ids": locked_character_ids[:1],
+            "custom_base_prompt": custom_base_prompt,
+            "actor": "test-director",
+        },
+        headers={"Idempotency-Key": "world-reference-custom-prompt"},
+    )
+    assert custom_prompt_generate.status_code == 202, custom_prompt_generate.text
+    custom_job_id = custom_prompt_generate.json()["data"]["jobs"][0]["id"]
+    with Session(get_engine(get_settings().database_url)) as session:
+        custom_job = session.get(Job, custom_job_id)
+        assert custom_job is not None
+        custom_payload = json.loads(custom_job.input_json)
+        assert custom_payload["custom_base_prompt"] == custom_base_prompt
+        assert custom_payload["character_ids"] == locked_character_ids[:1]
+        assert custom_payload["character_reference_asset_ids"]
+        assert custom_payload["prompt"].startswith(custom_base_prompt)
+    assert await worker.run_once() is True
+
+    location_reference_for_cross_asset: str | None = None
+    for asset_type, items in (
+        ("location", preproduction["locations"]),
+        ("prop", preproduction["props"]),
+    ):
+        for item in items:
+            if asset_type == "prop" and location_reference_for_cross_asset is not None:
+                cross_asset_refinement = await client.post(
+                    (
+                        f"/api/v1/projects/{project_id}/preproduction/"
+                        f"{asset_type}/{item['id']}/reference-images"
+                    ),
+                    json={
+                        "expected_version": current_version,
+                        "source_asset_id": location_reference_for_cross_asset,
+                        "adjustment_prompt": "改为更温暖的材质",
+                        "actor": "test-director",
+                    },
+                    headers={
+                        "Idempotency-Key": f"world-reference-cross-asset-{item['id']}"
+                    },
+                )
+                assert cross_asset_refinement.status_code == 404
+            requested_count = 3 if asset_type == "location" and item is items[0] else 1
+            generated_reference = await client.post(
+                (
+                    f"/api/v1/projects/{project_id}/preproduction/"
+                    f"{asset_type}/{item['id']}/reference-images"
+                ),
+                json={
+                    "expected_version": current_version,
+                    "count": requested_count,
+                    "actor": "test-director",
+                },
+                headers={"Idempotency-Key": f"world-reference-{asset_type}-{item['id']}"},
+            )
+            assert generated_reference.status_code == 202, generated_reference.text
+            assert len(generated_reference.json()["data"]["jobs"]) == requested_count
+            for _ in range(requested_count):
+                assert await worker.run_once() is True
+            current_workspace = (
+                await client.get(f"/api/v1/projects/{project_id}/preproduction")
+            ).json()["data"]
+            current_item = next(
+                candidate
+                for candidate in current_workspace[f"{asset_type}s"]
+                if candidate["id"] == item["id"]
+            )
+            if requested_count == 3:
+                latest_batch_id = current_item["image_candidates"][0]["batch_id"]
+                latest_batch = [
+                    candidate
+                    for candidate in current_item["image_candidates"]
+                    if candidate["batch_id"] == latest_batch_id
+                ]
+                assert len(latest_batch) == 3
+                assert len({candidate["style_id"] for candidate in latest_batch}) == 3
+                source_candidate = current_item["image_candidates"][0]
+                refined_reference = await client.post(
+                    (
+                        f"/api/v1/projects/{project_id}/preproduction/"
+                        f"{asset_type}/{item['id']}/reference-images"
+                    ),
+                    json={
+                        "expected_version": current_version,
+                        "count": 1,
+                        "source_asset_id": source_candidate["id"],
+                        "adjustment_prompt": "保留空间结构，将主光改为红色应急灯",
+                        "actor": "test-director",
+                    },
+                    headers={
+                        "Idempotency-Key": f"world-reference-refine-{item['id']}"
+                    },
+                )
+                assert refined_reference.status_code == 202, refined_reference.text
+                assert await worker.run_once() is True
+                current_workspace = (
+                    await client.get(f"/api/v1/projects/{project_id}/preproduction")
+                ).json()["data"]
+                current_item = next(
+                    candidate
+                    for candidate in current_workspace[f"{asset_type}s"]
+                    if candidate["id"] == item["id"]
+                )
+                refined_candidate = current_item["image_candidates"][0]
+                assert refined_candidate["style_id"] == "reference-refinement"
+                assert refined_candidate["source_asset_id"] == source_candidate["id"]
+                assert refined_candidate["adjustment_prompt"] == (
+                    "保留空间结构，将主光改为红色应急灯"
+                )
+            reference_candidate = current_item["image_candidates"][0]
+            if asset_type == "location" and location_reference_for_cross_asset is None:
+                location_reference_for_cross_asset = reference_candidate["id"]
+            locked_reference = await client.post(
+                (
+                    f"/api/v1/projects/{project_id}/preproduction/"
+                    f"{asset_type}/{item['id']}/reference-images/lock"
+                ),
+                json={
+                    "expected_version": current_version,
+                    "asset_id": reference_candidate["id"],
+                    "actor": "test-director",
+                },
+            )
+            assert locked_reference.status_code == 200, locked_reference.text
+            current_version = locked_reference.json()["data"]["project_lock_version"]
 
     approved_preproduction = await client.post(
         f"/api/v1/projects/{project_id}/preproduction/approve",

@@ -1,3 +1,5 @@
+import re
+
 from app.domain.canvas import (
     CanvasEdgeProjection,
     CanvasNodeProjection,
@@ -5,6 +7,8 @@ from app.domain.canvas import (
     CanvasViewStateContract,
 )
 from app.domain.film_ir import FilmIRObject, FilmIRProjection, FilmIRReference
+
+MAX_BEAT_LABEL_LENGTH = 18
 
 VISIBLE_TYPES = {
     "Project",
@@ -24,8 +28,28 @@ VISIBLE_TYPES = {
 }
 
 
+def _beat_label(attributes: dict[str, object]) -> str:
+    explicit_title = attributes.get("title")
+    source = explicit_title if isinstance(explicit_title, str) else attributes.get("summary")
+    if not isinstance(source, str) or not source.strip():
+        source = attributes.get("description")
+    if not isinstance(source, str) or not source.strip():
+        return "剧情关键点"
+
+    normalized = " ".join(source.split()).strip()
+    first_clause = re.split(r"[，。；！？、]", normalized, maxsplit=1)[0].strip()
+    candidate = first_clause or normalized
+    if len(candidate) > MAX_BEAT_LABEL_LENGTH:
+        semantic_prefix = re.split(r"(?=准备|随后|同时|开始|并且|并)", candidate, maxsplit=1)[0].strip()
+        if 6 <= len(semantic_prefix) <= MAX_BEAT_LABEL_LENGTH:
+            candidate = semantic_prefix
+    return candidate[:MAX_BEAT_LABEL_LENGTH]
+
+
 def _label(item: FilmIRObject) -> str:
     attributes = item.attributes
+    if item.type == "Beat":
+        return _beat_label(attributes)
     for field in ("name", "title", "heading", "summary", "text", "character_key"):
         value = attributes.get(field)
         if isinstance(value, str) and value.strip():
@@ -89,6 +113,7 @@ def _content_summary(item: FilmIRObject) -> str | None:
 def _operation_context(item: FilmIRObject) -> dict[str, object]:
     allowed_fields = {
         "Character": {"character_key", "role"},
+        "DialogueLine": {"line_type", "speaker_key"},
         "Shot": {
             "camera_movement",
             "description",

@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ArrowLeft, Check, LoaderCircle, LockKeyhole, Mic2, RefreshCw, Sparkles, UsersRound } from 'lucide-react'
+import { ArrowLeft, Check, ChevronDown, LoaderCircle, LockKeyhole, Mic2, RefreshCw, Sparkles, UsersRound } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router'
 import {
   approvePreproduction,
   fetchPreproduction,
+  fetchProjectJobs,
   fetchProject,
+  generateWorldAssetReference,
   lockCharacterCandidate,
+  lockWorldAssetReference,
+  previewWorldAssetReferencePrompt,
   type PreproductionWorkspace,
 } from '../api/client'
 import { Button, PageHeader, StatusBadge, Surface, getStatusLabel } from '../components/ui'
@@ -15,7 +19,66 @@ import { ServiceRequiredState } from '../components/ServiceRequiredState'
 import { useStudio } from '../store/StudioContext'
 import { useToast } from '../store/ToastContext'
 import { localizeCharacterRole, localizeDisplayText } from '../utils/localizeDisplayText'
-import type { ProjectRecord } from '../types'
+import type { Job, ProjectRecord } from '../types'
+
+const PREPRODUCTION_COMPLETE_STATUSES = new Set([
+  'PREPRODUCTION_APPROVED',
+  'STORYBOARD_READY',
+  'STORYBOARD_APPROVED',
+  'CHARACTER_LOCKED',
+  'PRODUCING',
+  'PREVIEW_READY',
+  'APPROVED',
+  'EXPORTING',
+  'EXPORTED',
+])
+
+const ACTIVE_WORLD_GENERATION_STATUSES = new Set([
+  'PENDING',
+  'RETRY_WAIT',
+  'RUNNING',
+  'CANCEL_REQUESTED',
+])
+
+const MAX_WORLD_CHARACTER_REFS = 3
+
+function formatLookLabel(label: string) {
+  return localizeDisplayText(label).replace(/^造型\s*\d+\s*·\s*/, '')
+}
+
+function formatVoiceSetting(payload: Record<string, unknown>) {
+  const text = (key: string) => typeof payload[key] === 'string' ? payload[key].trim() : ''
+  const description = text('voice_description')
+  const ageLabels: Record<string, string> = {
+    adult: '成年声线',
+    young_adult: '青年声线',
+    child: '儿童声线',
+    senior: '年长声线',
+  }
+  const expressionLabels: Record<string, string> = {
+    neutral: '中性表达',
+    feminine: '偏女性表达',
+    masculine: '偏男性表达',
+  }
+  const toneLabels: Record<string, string> = {
+    'natural-cinematic': '自然、克制的电影感',
+  }
+  const languageLabels: Record<string, string> = {
+    'zh-CN': '普通话',
+    'en-US': '美式英语',
+  }
+  const summary = description || [
+    ageLabels[text('age_impression')] ?? text('age_impression'),
+    expressionLabels[text('gender_expression')] ?? text('gender_expression'),
+  ].filter(Boolean).join(' · ') || '尚未填写声线描述'
+  const detail = description
+    ? toneLabels[text('tone')] ?? text('tone')
+    : [
+        toneLabels[text('tone')] ?? text('tone'),
+        languageLabels[text('language')] ?? text('language'),
+      ].filter(Boolean).join(' · ')
+  return { summary, detail }
+}
 
 export function PreproductionPage() {
   const { projectId } = useParams()
@@ -24,7 +87,19 @@ export function PreproductionPage() {
   const { notify } = useToast()
   const [project, setProject] = useState<ProjectRecord | null>(null)
   const [workspace, setWorkspace] = useState<PreproductionWorkspace | null>(null)
+  const [worldJobs, setWorldJobs] = useState<Job[]>([])
   const [selected, setSelected] = useState<Record<string, string>>({})
+  const [selectedWorldCandidate, setSelectedWorldCandidate] = useState<Record<string, string>>({})
+  const [worldGenerationCounts, setWorldGenerationCounts] = useState<Record<string, number>>({})
+  const [worldAdjustments, setWorldAdjustments] = useState<Record<string, string>>({})
+  const [worldCharacterRefs, setWorldCharacterRefs] = useState<Record<string, string[]>>({})
+  const [worldPromptOpen, setWorldPromptOpen] = useState<Record<string, boolean>>({})
+  const [worldPromptDraft, setWorldPromptDraft] = useState<Record<string, string>>({})
+  const [worldPromptDefault, setWorldPromptDefault] = useState<Record<string, string>>({})
+  const [worldPromptDirty, setWorldPromptDirty] = useState<Record<string, boolean>>({})
+  const [worldPromptStale, setWorldPromptStale] = useState<Record<string, boolean>>({})
+  const [worldPromptLoading, setWorldPromptLoading] = useState<Record<string, boolean>>({})
+  const [editingWorldAssetId, setEditingWorldAssetId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<string | null>(null)
   const [approveOpen, setApproveOpen] = useState(false)
@@ -32,12 +107,14 @@ export function PreproductionPage() {
 
   const refresh = useCallback(async () => {
     if (!projectId) return
-    const [nextProject, nextWorkspace] = await Promise.all([
+    const [nextProject, nextWorkspace, nextJobs] = await Promise.all([
       fetchProject(projectId),
       fetchPreproduction(projectId),
+      fetchProjectJobs(projectId),
     ])
     setProject(nextProject)
     setWorkspace(nextWorkspace)
+    setWorldJobs(nextJobs.filter((job) => job.jobType === 'GENERATE_WORLD_ASSET_IMAGE'))
     setSelected((current) => Object.fromEntries(nextWorkspace.characters.map((character) => [
       character.id,
       character.lockedCandidateId
@@ -102,6 +179,195 @@ export function PreproductionPage() {
     }
   }
 
+  async function loadWorldPromptPreview(
+    assetType: 'location' | 'prop',
+    versionId: string,
+    options?: {
+      force?: boolean
+      characterIds?: string[]
+      sourceAssetId?: string
+      adjustmentPrompt?: string
+    },
+  ) {
+    if (!projectId || !project) return
+    const force = options?.force ?? false
+    if (!force && worldPromptDirty[versionId]) {
+      setWorldPromptStale((current) => ({ ...current, [versionId]: true }))
+      return
+    }
+    setWorldPromptLoading((current) => ({ ...current, [versionId]: true }))
+    try {
+      const preview = await previewWorldAssetReferencePrompt(
+        projectId,
+        assetType,
+        versionId,
+        project.lockVersion,
+        {
+          count: worldGenerationCounts[versionId] ?? 1,
+          characterIds: options?.characterIds ?? worldCharacterRefs[versionId] ?? [],
+          sourceAssetId: options?.sourceAssetId,
+          adjustmentPrompt: options?.adjustmentPrompt,
+        },
+      )
+      setWorldPromptDefault((current) => ({ ...current, [versionId]: preview.basePrompt }))
+      setWorldPromptDraft((current) => ({ ...current, [versionId]: preview.basePrompt }))
+      setWorldPromptDirty((current) => ({ ...current, [versionId]: false }))
+      setWorldPromptStale((current) => ({ ...current, [versionId]: false }))
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '提示词预览失败')
+    } finally {
+      setWorldPromptLoading((current) => ({ ...current, [versionId]: false }))
+    }
+  }
+
+  function toggleWorldCharacterRef(
+    assetType: 'location' | 'prop',
+    versionId: string,
+    characterId: string,
+  ) {
+    const selectedIds = worldCharacterRefs[versionId] ?? []
+    let nextIds: string[]
+    if (selectedIds.includes(characterId)) {
+      nextIds = selectedIds.filter((id) => id !== characterId)
+    } else if (selectedIds.length >= MAX_WORLD_CHARACTER_REFS) {
+      notify(`最多关联 ${MAX_WORLD_CHARACTER_REFS} 个角色形象`)
+      return
+    } else {
+      nextIds = [...selectedIds, characterId]
+    }
+    setWorldCharacterRefs((current) => ({ ...current, [versionId]: nextIds }))
+    if (worldPromptOpen[versionId]) {
+      void loadWorldPromptPreview(assetType, versionId, { characterIds: nextIds })
+    } else {
+      setWorldPromptDefault((current) => {
+        const next = { ...current }
+        delete next[versionId]
+        return next
+      })
+      if (worldPromptDirty[versionId]) {
+        setWorldPromptStale((current) => ({ ...current, [versionId]: true }))
+      }
+    }
+  }
+
+  async function generateWorldReference(
+    assetType: 'location' | 'prop',
+    versionId: string,
+    name: string,
+  ) {
+    if (!projectId || !project) return
+    setBusy(`generate-${versionId}`)
+    setError(null)
+    try {
+      const count = worldGenerationCounts[versionId] ?? 1
+      const draft = worldPromptDraft[versionId]?.trim()
+      const defaultPrompt = worldPromptDefault[versionId]?.trim()
+      const customBasePrompt = (
+        worldPromptDirty[versionId]
+        && draft
+        && draft !== defaultPrompt
+        && draft.length >= 20
+      ) ? draft : undefined
+      const jobs = await generateWorldAssetReference(
+        projectId,
+        assetType,
+        versionId,
+        project.lockVersion,
+        count,
+        undefined,
+        undefined,
+        {
+          characterIds: worldCharacterRefs[versionId] ?? [],
+          customBasePrompt,
+        },
+      )
+      setWorldJobs((current) => [
+        ...jobs,
+        ...current.filter((item) => jobs.every((job) => item.id !== job.id)),
+      ])
+      notify(`${name}的 ${count} 张不同风格参考图已进入生成队列。`)
+      await refresh()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '参考图生成失败')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function lockWorldReference(
+    assetType: 'location' | 'prop',
+    versionId: string,
+    assetId: string,
+    name: string,
+  ) {
+    if (!projectId || !project) return
+    setBusy(`lock-${versionId}`)
+    setError(null)
+    try {
+      await lockWorldAssetReference(
+        projectId,
+        assetType,
+        versionId,
+        assetId,
+        project.lockVersion,
+      )
+      notify(`${name}参考图已锁定。`)
+      await refresh()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '参考图锁定失败')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function refineWorldReference(
+    assetType: 'location' | 'prop',
+    versionId: string,
+    sourceAssetId: string,
+    name: string,
+  ) {
+    if (!projectId || !project) return
+    const adjustmentPrompt = worldAdjustments[versionId]?.trim()
+    if (!adjustmentPrompt) return
+    setBusy(`refine-${versionId}`)
+    setError(null)
+    try {
+      const draft = worldPromptDraft[versionId]?.trim()
+      const defaultPrompt = worldPromptDefault[versionId]?.trim()
+      const customBasePrompt = (
+        worldPromptDirty[versionId]
+        && draft
+        && draft !== defaultPrompt
+        && draft.length >= 20
+      ) ? draft : undefined
+      const jobs = await generateWorldAssetReference(
+        projectId,
+        assetType,
+        versionId,
+        project.lockVersion,
+        1,
+        sourceAssetId,
+        adjustmentPrompt,
+        {
+          characterIds: worldCharacterRefs[versionId] ?? [],
+          customBasePrompt,
+        },
+      )
+      setWorldJobs((current) => [
+        ...jobs,
+        ...current.filter((item) => jobs.every((job) => item.id !== job.id)),
+      ])
+      setWorldAdjustments((current) => ({ ...current, [versionId]: '' }))
+      setEditingWorldAssetId(null)
+      notify(`${name}已基于所选参考图和修改要求进入生成队列。`)
+      await refresh()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '参考图修改生成失败')
+    } finally {
+      setBusy(null)
+    }
+  }
+
   if (!loading && (!project || !workspace || !projectId)) {
     return <ServiceRequiredState feature="前期资产" projectId={projectId} />
   }
@@ -114,7 +380,61 @@ export function PreproductionPage() {
   const looksReady = workspace.characters.every(
     (character) => workspace.looks.filter((look) => look.characterId === character.id).length >= 1,
   )
-  const canApprove = project.status === 'PREPRODUCTION_READY' && allLocked && looksReady
+  const worldAssets = [
+    ...workspace.locations.map((item) => ({
+      ...item,
+      assetType: 'location' as const,
+      typeLabel: '场景',
+    })),
+    ...workspace.props.map((item) => ({
+      ...item,
+      assetType: 'prop' as const,
+      typeLabel: '关键道具',
+    })),
+  ]
+  const worldAssetsReady = worldAssets.every((item) => item.referenceAssetIds.length > 0)
+  const canApprove = (
+    project.status === 'PREPRODUCTION_READY'
+    && allLocked
+    && looksReady
+    && worldAssetsReady
+  )
+  const unlockedCharacterNames = workspace.characters
+    .filter((character) => !character.lockedCandidateId)
+    .map((character) => character.name)
+  const missingLookCharacterNames = workspace.characters
+    .filter((character) => (
+      workspace.looks.every((look) => look.characterId !== character.id)
+    ))
+    .map((character) => character.name)
+  const missingWorldAssetNames = worldAssets
+    .filter((item) => item.referenceAssetIds.length === 0)
+    .map((item) => item.name)
+  const approvalDisabled = !canApprove || busy !== null
+  const preproductionComplete = PREPRODUCTION_COMPLETE_STATUSES.has(project.status)
+  const approvalDisabledReasons = preproductionComplete
+    ? ['第 3 阶段已经批准，无需重复操作']
+    : [
+      busy !== null ? '正在处理其他前期资产操作，请稍候' : null,
+      project.status !== 'PREPRODUCTION_READY'
+        ? `项目当前为「${getStatusLabel(project.status)}」，请先完成上一阶段`
+        : null,
+      workspace.characters.length === 0
+        ? '尚未生成角色候选'
+        : unlockedCharacterNames.length > 0
+          ? `请先锁定角色：${unlockedCharacterNames.join('、')}`
+          : null,
+      missingLookCharacterNames.length > 0
+        ? `请先为角色准备至少 1 个造型：${missingLookCharacterNames.join('、')}`
+        : null,
+      missingWorldAssetNames.length > 0
+        ? `请先生成并锁定参考图：${missingWorldAssetNames.join('、')}`
+        : null,
+    ].filter((reason): reason is string => Boolean(reason))
+  const approvalDisabledReason = approvalDisabled
+    ? `暂不可批准：${approvalDisabledReasons.join('；')}`
+    : null
+  const approvalTooltipId = 'preproduction-approval-disabled-reason'
 
   return <div className="page page--preproduction">
     <PageHeader
@@ -131,8 +451,8 @@ export function PreproductionPage() {
     </section>
 
     <Surface className="story-section">
-      <div className="section-heading"><div><h2>已锁定身份引用</h2><p>角色身份已在剧本生成前人工锁定；本阶段只读取身份与基础 Look Version，不会替换候选或覆盖既有镜头。</p></div></div>
-      <div className="preproduction-character-list">{workspace.characters.map((character) => {
+      <div className="section-heading"><div><h2>角色准备情况</h2><p>逐个确认角色的身份参考图、当前造型和声音权限；本阶段不会自动替换已锁定的身份。</p></div></div>
+      <div className="preproduction-character-list character-readiness-list">{workspace.characters.map((character) => {
         const lockedReferenceUrl = character.lockedCandidateId && activeProject.id === projectId
           ? activeProject.shots.find((shot) => (
             shot.currentImageUrl
@@ -143,17 +463,39 @@ export function PreproductionPage() {
           ? character.candidates.find((candidate) => candidate.id === character.lockedCandidateId)
           : undefined
         const lockedImageUrl = lockedReferenceUrl || lockedCandidate?.assetUrl
+        const looks = workspace.looks.filter((look) => look.characterId === character.id)
+        const voices = workspace.voices.filter((voice) => voice.characterId === character.id)
+        const look = looks.reduce((latest, item) => (
+          !latest || item.version > latest.version ? item : latest
+        ), looks[0])
+        const voice = voices.reduce((latest, item) => (
+          !latest || item.version > latest.version ? item : latest
+        ), voices[0])
+        const voiceSetting = voice ? formatVoiceSetting(voice.payload) : null
         return <article key={character.id}>
-        <header><div><p className="eyebrow">{localizeCharacterRole(character.role)}</p><h3>{character.name}</h3><p>{character.visualBrief}</p></div><StatusBadge status={character.status} /></header>
-        {lockedCandidate && lockedImageUrl ? (
-          <div className="preproduction-locked-look">
-            <img alt={`${character.name} 已锁定形象`} src={lockedImageUrl} />
+        <header><div><p className="eyebrow">{localizeCharacterRole(character.role)}</p><h3>{character.name}</h3><p>{character.visualBrief}</p></div></header>
+        <div className="character-readiness__grid">
+          <div className="character-readiness__identity">
+            {lockedCandidate && lockedImageUrl ? <img alt={`${character.name} 已锁定形象`} src={lockedImageUrl} /> : <div className="character-readiness__placeholder"><UsersRound size={20} /></div>}
             <div>
-              <strong>已锁定形象</strong>
-              <small>候选 {lockedCandidate.ordinal}{lockedReferenceUrl ? ' · 项目参考镜头' : ''}</small>
+              <span><LockKeyhole size={14} />身份参考</span>
+              <strong>{character.lockedCandidateId ? '已锁定形象' : '等待锁定'}</strong>
+              <small>{lockedCandidate ? `候选 ${lockedCandidate.ordinal}${lockedReferenceUrl ? ' · 项目参考镜头' : ''}` : '请从下方候选中选择'}</small>
             </div>
           </div>
-        ) : (
+          <div className="character-assets__summary">
+            <span><Sparkles size={14} />当前造型</span>
+            <strong>{look ? formatLookLabel(look.label) : '尚未准备'}</strong>
+            <small>{look ? `第 ${look.version} 版 · ${localizeDisplayText(look.usageScope)} · ${getStatusLabel(look.status)}` : '需要生成并批准角色造型'}</small>
+          </div>
+          <div className="character-assets__summary character-assets__summary--voice">
+            <span><Mic2 size={14} />声音设定</span>
+            <strong>{voiceSetting?.summary ?? '尚未准备'}</strong>
+            {voiceSetting?.detail ? <small>{voiceSetting.detail}</small> : null}
+            <small>{voice ? `${getStatusLabel(voice.consentStatus)} · ${voice.cloningEnabled ? '真人声音克隆已开启' : '真人声音克隆关闭'}` : '需要配置声音档案'}</small>
+          </div>
+        </div>
+        {character.lockedCandidateId ? null : (
           <div className="character-candidate-grid">{character.candidates.map((candidate) => {
             const active = selected[character.id] === candidate.id
             return <button className={`character-candidate ${active ? 'character-candidate--selected' : ''}`} key={candidate.id} onClick={() => setSelected((value) => ({ ...value, [character.id]: candidate.id }))}><img alt={`${character.name} 候选 ${candidate.ordinal}`} src={candidate.assetUrl} /><span><strong>候选 {candidate.ordinal}</strong><small>生成种子 · {candidate.seed}</small></span>{active ? <em><Check size={15} />已选择</em> : null}</button>
@@ -171,13 +513,301 @@ export function PreproductionPage() {
       })}</div>
     </Surface>
 
-    <section className="preproduction-assets">
-      <article><p className="eyebrow">造型版本</p><h2>{workspace.looks.length} 个已生成版本</h2>{workspace.looks.map((look) => <div key={look.id}><strong>{localizeDisplayText(look.label)}</strong><StatusBadge status={look.status} /><span>第 {look.version} 版 · {localizeDisplayText(look.usageScope)}</span></div>)}</article>
-      <article><p className="eyebrow">声音安全</p><h2>声音档案</h2>{workspace.voices.map((voice) => <div key={voice.id}><Mic2 size={15} /><strong>{voice.voiceKey}</strong><span>{getStatusLabel(voice.consentStatus)}</span><small>{voice.cloningEnabled ? '已开启克隆' : '真人声音克隆关闭'}</small></div>)}</article>
-      <article><p className="eyebrow">世界资产</p><h2>场景与道具</h2>{workspace.locations.map((location) => <div key={location.id}><strong>{location.name}</strong><span>场景第 {location.version} 版</span></div>)}{workspace.props.map((prop) => <div key={prop.id}><strong>{prop.name}</strong><span>道具第 {prop.version} 版</span></div>)}</article>
+    <section className="preproduction-assets preproduction-assets--world-only">
+      <article className="world-assets">
+        <p className="eyebrow">世界资产</p>
+        <h2>场景与关键道具参考图</h2>
+        <p className="world-assets__intro">每轮可生成 1–3 张同主题、不同风格的候选图；人工选择并锁定其中一张后，分镜和后续镜头才会引用它。</p>
+        <div className="world-assets__grid">{worldAssets.map((item) => {
+          const latestBatchId = item.imageCandidates[0]?.batchId
+          const batchCandidates = latestBatchId
+            ? item.imageCandidates.filter((candidate) => candidate.batchId === latestBatchId)
+            : item.imageCandidates.slice(0, 1)
+          const visibleCandidates = batchCandidates
+          const candidate = visibleCandidates.find((candidate) => (
+            candidate.id === selectedWorldCandidate[item.id]
+          )) ?? visibleCandidates[0]
+          const generationJobs = worldJobs.filter((job) => (
+            job.entityId === item.id
+            && ACTIVE_WORLD_GENERATION_STATUSES.has(job.status)
+          ))
+          const generationJob = generationJobs[0]
+          const isGenerating = generationJobs.length > 0
+          const hasLockedReference = item.referenceAssetIds.length > 0
+          const candidateIsLocked = Boolean(
+            candidate && item.referenceAssetIds.includes(candidate.id),
+          )
+          const stateLabel = isGenerating
+            ? generationJob?.status === 'RETRY_WAIT' ? '等待重试' : '生成中'
+            : hasLockedReference
+            ? candidateIsLocked ? '已锁定' : '新候选待确认'
+            : candidate ? '待确认' : '缺少参考图'
+          return <section
+            aria-busy={isGenerating}
+            className="world-asset-card"
+            key={`${item.assetType}-${item.id}`}
+          >
+            <header>
+              <div><span>{item.typeLabel}</span><h3>{item.name}</h3></div>
+              <strong data-ready={hasLockedReference}>{stateLabel}</strong>
+            </header>
+            <div className={`world-asset-card__candidates world-asset-card__candidates--${Math.min(Math.max(visibleCandidates.length, 1), 3)}`}>
+              {visibleCandidates.length > 0 ? visibleCandidates.map((option) => {
+                const optionIsLocked = item.referenceAssetIds.includes(option.id)
+                const optionIsSelected = option.id === candidate?.id
+                return <button
+                  aria-label={`选择${item.name}${option.styleLabel ?? ''}参考图`}
+                  aria-pressed={optionIsSelected}
+                  className="world-asset-card__candidate"
+                  data-selected={optionIsSelected}
+                  key={option.id}
+                  onClick={() => setSelectedWorldCandidate((current) => ({
+                    ...current,
+                    [item.id]: option.id,
+                  }))}
+                  type="button"
+                >
+                  <img alt={`${item.name}${option.styleLabel ?? ''}参考图候选`} src={option.assetUrl} />
+                  <span>{option.styleLabel ?? '参考图候选'}{optionIsLocked ? ' · 已锁定' : ''}</span>
+                </button>
+              }) : (
+                <div className="world-asset-card__media">
+                  <div className="world-asset-card__placeholder"><Sparkles size={22} /><span>尚未生成参考图</span></div>
+                </div>
+              )}
+            </div>
+            <div className="world-asset-card__generation">
+              <label>
+                <span>本轮生成</span>
+                <select
+                  aria-label={`${item.name}本轮生成数量`}
+                  disabled={busy !== null || isGenerating}
+                  onChange={(event) => setWorldGenerationCounts((current) => ({
+                    ...current,
+                    [item.id]: Number(event.target.value),
+                  }))}
+                  value={worldGenerationCounts[item.id] ?? 1}
+                >
+                  <option value={1}>1 张</option>
+                  <option value={2}>2 张</option>
+                  <option value={3}>3 张</option>
+                </select>
+              </label>
+              <div className="world-asset-card__character-refs">
+                <span>关联角色形象</span>
+                <div className="world-asset-card__character-chips">
+                  {workspace.characters.map((character) => {
+                    const locked = Boolean(
+                      character.lockedCandidateId || character.lockedIdentityVersionId,
+                    )
+                    const lockedCandidate = character.lockedCandidateId
+                      ? character.candidates.find((candidate) => candidate.id === character.lockedCandidateId)
+                      : character.candidates.find((candidate) => candidate.selected)
+                        ?? character.candidates[0]
+                    const imageUrl = lockedCandidate?.assetUrl
+                    const selectedIds = worldCharacterRefs[item.id] ?? []
+                    const selected = selectedIds.includes(character.id)
+                    return <button
+                      aria-label={locked ? `关联${character.name}形象` : `${character.name}尚未锁定形象`}
+                      aria-pressed={selected}
+                      className="world-asset-card__character-chip"
+                      data-selected={selected}
+                      disabled={!locked || busy !== null || isGenerating}
+                      key={character.id}
+                      onClick={() => toggleWorldCharacterRef(item.assetType, item.id, character.id)}
+                      title={locked ? undefined : '请先锁定角色形象'}
+                      type="button"
+                    >
+                      {imageUrl ? (
+                        <img alt="" src={imageUrl} />
+                      ) : (
+                        <span className="world-asset-card__character-chip-fallback"><UsersRound size={12} /></span>
+                      )}
+                      <em>{character.name}</em>
+                      {selected ? <Check size={12} /> : null}
+                    </button>
+                  })}
+                </div>
+                <small>
+                  {(worldCharacterRefs[item.id] ?? []).length > 0
+                    ? `已关联 ${(worldCharacterRefs[item.id] ?? []).length} 个角色形象，生成时作为外貌参考。`
+                    : '可选。用于旧照片、合影、有人出镜的场景等。'}
+                </small>
+              </div>
+              <div className="world-asset-card__prompt">
+                <button
+                  aria-expanded={Boolean(worldPromptOpen[item.id])}
+                  className="world-asset-card__prompt-toggle"
+                  disabled={busy !== null || isGenerating}
+                  onClick={() => {
+                    const nextOpen = !worldPromptOpen[item.id]
+                    setWorldPromptOpen((current) => ({ ...current, [item.id]: nextOpen }))
+                    if (nextOpen && !worldPromptDefault[item.id] && !worldPromptDirty[item.id]) {
+                      void loadWorldPromptPreview(item.assetType, item.id)
+                    }
+                  }}
+                  type="button"
+                >
+                  <span>查看并编辑提示词</span>
+                  <ChevronDown
+                    aria-hidden="true"
+                    className={worldPromptOpen[item.id] ? 'world-asset-card__prompt-chevron is-open' : 'world-asset-card__prompt-chevron'}
+                    size={16}
+                  />
+                </button>
+                {worldPromptOpen[item.id] ? (
+                  <div className="world-asset-card__prompt-panel">
+                    {worldPromptLoading[item.id] && !worldPromptDraft[item.id] ? (
+                      <small>正在加载默认提示词…</small>
+                    ) : (
+                      <>
+                        <textarea
+                          aria-label={`${item.name}参考图提示词`}
+                          disabled={busy !== null || isGenerating || worldPromptLoading[item.id]}
+                          maxLength={4000}
+                          onChange={(event) => {
+                            const value = event.target.value
+                            setWorldPromptDraft((current) => ({ ...current, [item.id]: value }))
+                            setWorldPromptDirty((current) => ({
+                              ...current,
+                              [item.id]: value.trim() !== (worldPromptDefault[item.id] ?? '').trim(),
+                            }))
+                          }}
+                          rows={6}
+                          value={worldPromptDraft[item.id] ?? ''}
+                        />
+                        <div className="world-asset-card__prompt-actions">
+                          <small>
+                            {(worldPromptDraft[item.id] ?? '').length} / 4000
+                            {worldPromptStale[item.id] ? ' · 角色已变，可重置提示词' : ''}
+                            {' · '}系统仍会按所选张数自动追加不同风格说明。
+                          </small>
+                          <Button
+                            disabled={busy !== null || isGenerating || worldPromptLoading[item.id]}
+                            onClick={() => void loadWorldPromptPreview(item.assetType, item.id, { force: true })}
+                            size="sm"
+                            variant="secondary"
+                          >
+                            {worldPromptLoading[item.id] ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />}
+                            重置为默认
+                          </Button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ) : null}
+              </div>
+              <small>主题与关键结构保持一致，系统自动分配不同风格。</small>
+            </div>
+            {generationJob ? (
+              <div className="world-asset-card__batch-status" role="status">
+                <LoaderCircle aria-hidden="true" className="spin" size={16} />
+                <span>{generationJobs.length} 张生成中 · {localizeDisplayText(generationJob.stage) || '正在生成参考图'}</span>
+              </div>
+            ) : null}
+            <small>{item.typeLabel}第 {item.version} 版</small>
+            <footer>
+              <Button
+                disabled={busy !== null || isGenerating}
+                onClick={() => void generateWorldReference(item.assetType, item.id, item.name)}
+                size="sm"
+                variant="secondary"
+              >
+                {busy === `generate-${item.id}` || isGenerating ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}
+                {isGenerating ? '生成中' : candidate ? '探索新风格' : '生成参考图'}
+              </Button>
+              {candidate ? (
+                <Button
+                  disabled={busy !== null || isGenerating}
+                  onClick={() => setEditingWorldAssetId((current) => (
+                    current === item.id ? null : item.id
+                  ))}
+                  size="sm"
+                  variant="secondary"
+                >
+                  基于所选图修改
+                </Button>
+              ) : null}
+              {candidate && !candidateIsLocked ? (
+                <Button
+                  disabled={busy !== null || isGenerating}
+                  onClick={() => void lockWorldReference(
+                    item.assetType,
+                    item.id,
+                    candidate.id,
+                    item.name,
+                  )}
+                  size="sm"
+                >
+                  {busy === `lock-${item.id}` ? <LoaderCircle className="spin" size={15} /> : <LockKeyhole size={15} />}
+                  锁定所选参考图
+                </Button>
+              ) : null}
+            </footer>
+            {candidate && editingWorldAssetId === item.id ? (
+              <div className="world-asset-card__refinement">
+                <div>
+                  <strong>基于所选图修改</strong>
+                  <small>将生成新的待确认候选，原图和当前锁定版本不会被覆盖。</small>
+                </div>
+                <label>
+                  <span>修改要求</span>
+                  <textarea
+                    aria-label={`${item.name}参考图修改要求`}
+                    maxLength={500}
+                    onChange={(event) => setWorldAdjustments((current) => ({
+                      ...current,
+                      [item.id]: event.target.value,
+                    }))}
+                    placeholder="例如：保留房间结构和培养舱位置，将灯光改为故障红色应急灯，并增加地面积水。"
+                    rows={3}
+                    value={worldAdjustments[item.id] ?? ''}
+                  />
+                </label>
+                <div>
+                  <small>{(worldAdjustments[item.id] ?? '').length} / 500</small>
+                  <Button
+                    disabled={!worldAdjustments[item.id]?.trim() || busy !== null || isGenerating}
+                    onClick={() => void refineWorldReference(
+                      item.assetType,
+                      item.id,
+                      candidate.id,
+                      item.name,
+                    )}
+                    size="sm"
+                  >
+                    {busy === `refine-${item.id}` ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}
+                    按修改要求生成
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+          </section>
+        })}</div>
+      </article>
     </section>
 
-    <section className="character-lock-bar"><div><LockKeyhole size={18} /><span><strong>第 3 阶段 · 视觉设定</strong><small>批准后，所有分镜镜头都会绑定稳定的角色造型、场景、道具和声音编号。</small></span></div><Button disabled={!canApprove || busy !== null} onClick={() => setApproveOpen(true)}>{busy === 'approve' ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}批准第 3 阶段并生成分镜</Button></section>
+    <section className="character-lock-bar">
+      <div><LockKeyhole size={18} /><span><strong>第 3 阶段 · 视觉设定</strong><small>批准后，所有分镜镜头都会绑定稳定的角色造型、场景、道具和声音编号。</small></span></div>
+      <span
+        aria-describedby={approvalDisabledReason ? approvalTooltipId : undefined}
+        className="preproduction-approval-control"
+        tabIndex={approvalDisabledReason ? 0 : undefined}
+        title={approvalDisabledReason ?? undefined}
+      >
+        <Button
+          aria-describedby={approvalDisabledReason ? approvalTooltipId : undefined}
+          disabled={approvalDisabled}
+          onClick={() => setApproveOpen(true)}
+        >
+          {busy === 'approve' ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}
+          批准第 3 阶段并生成分镜
+        </Button>
+        {approvalDisabledReason ? (
+          <span id={approvalTooltipId} role="tooltip">{approvalDisabledReason}</span>
+        ) : null}
+      </span>
+    </section>
 
     <ImpactConfirmModal
       confirmLabel="批准并生成分镜"

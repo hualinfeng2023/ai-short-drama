@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 
 from app.config import Settings
 from app.domain.director import DirectorReviewOutput, director_change_target_issues
+from app.domain.director_intent import DirectorIntentCompilationOutput
 from app.domain.narrative_targeting import (
     EmotionalReward,
     NarrativeProtagonist,
@@ -348,6 +349,16 @@ class ScriptLinePayload(BaseModel):
     localizations: dict[str, str] = Field(default_factory=dict)
 
 
+class ScriptSceneCharacterGoalPayload(BaseModel):
+    """角色在单个场景中的可执行目标，随 ScriptVersion 成为 canonical script state。"""
+
+    character_key: str = Field(min_length=1, max_length=80)
+    objective: str = Field(min_length=1, max_length=500)
+    obstacle: str = Field(min_length=1, max_length=500)
+    stakes: str = Field(min_length=1, max_length=500)
+    tactic: str = Field(min_length=1, max_length=500)
+
+
 class ScriptScenePayload(BaseModel):
     heading: str
     location: str
@@ -357,6 +368,10 @@ class ScriptScenePayload(BaseModel):
     duration_ms: int = Field(ge=1000, le=60_000)
     bgm_intent: str
     sfx_intents: list[str]
+    character_goals: list[ScriptSceneCharacterGoalPayload] = Field(
+        default_factory=list,
+        max_length=12,
+    )
     lines: list[ScriptLinePayload] = Field(min_length=1)
 
 
@@ -984,6 +999,234 @@ async def generate_director_scene_review(
     )
 
 
+def _deterministic_director_intent(
+    *,
+    context: dict[str, Any],
+    instruction: str,
+    evidence_ids: set[str],
+) -> DirectorIntentCompilationOutput:
+    scene = context.get("scene") if isinstance(context.get("scene"), dict) else {}
+    beat = context.get("beat") if isinstance(context.get("beat"), dict) else {}
+    goals = context.get("character_goals")
+    goal = goals[0] if isinstance(goals, list) and goals and isinstance(goals[0], dict) else {}
+    shots = context.get("shots")
+    shot = shots[0] if isinstance(shots, list) and shots and isinstance(shots[0], dict) else {}
+    goal_ref = next((item for item in evidence_ids if item.startswith("goal-")), "scene-context")
+    beat_ref = next((item for item in evidence_ids if item.startswith("beat-")), "scene-context")
+    world_ref = "world-rules" if "world-rules" in evidence_ids else beat_ref
+    is_tension = any(keyword in instruction for keyword in ("紧张", "压迫", "危机", "冲突"))
+    if is_tension:
+        directives = [
+            {
+                "channel": "NARRATIVE",
+                "status": "CHANGE",
+                "instruction": "把冲突行动提前，删除不影响因果成立的解释。",
+                "observable_effect": (
+                    f"人物更早采取“{goal.get('tactic') or '直接行动'}”，"
+                    "场景前半段即发生对抗。"
+                ),
+                "confidence": 0.88,
+                "evidence_refs": [beat_ref, goal_ref],
+            },
+            {
+                "channel": "CAMERA",
+                "status": "CHANGE",
+                "instruction": "从中景逐步推进到近景，并压缩人物周围负空间。",
+                "observable_effect": (
+                    f"当前{shot.get('shot_size') or '待生成'}景别在冲突动作出现时收紧，"
+                    "环境信息让位于人物压力。"
+                ),
+                "confidence": 0.76,
+                "evidence_refs": [beat_ref, "scene-context"],
+            },
+            {
+                "channel": "PERFORMANCE",
+                "status": "CHANGE",
+                "instruction": "缩短反应停顿，用呼吸变化和克制的手部动作外化压力。",
+                "observable_effect": "停顿缩短，压力通过可观察的呼吸与动作表现。",
+                "confidence": 0.82,
+                "evidence_refs": [goal_ref, "scene-context"],
+            },
+            {
+                "channel": "SOUND",
+                "status": "CHANGE",
+                "instruction": "降低非关键环境声，加入克制的低频压力层。",
+                "observable_effect": (
+                    f"保留“{scene.get('sfx_intents') or '关键现场声'}”，"
+                    "其余环境声在对白前后变薄。"
+                ),
+                "confidence": 0.73,
+                "evidence_refs": [beat_ref, "scene-context"],
+            },
+            {
+                "channel": "PACING",
+                "status": "CHANGE",
+                "instruction": "压缩主要动作与反应镜头，减少解释性停顿。",
+                "observable_effect": "同一情节信息在更短时间窗内完成，冲突更早兑现。",
+                "confidence": 0.86,
+                "evidence_refs": ["scene-context", beat_ref],
+            },
+        ]
+        rationale = (
+            "人物行动更早发生，同时收紧景别、表演停顿、声音空间与镜头时间，"
+            "能减少解释造成的泄压；角色目标和既有世界规则保持不变。"
+        )
+        overall_confidence = 0.81
+    else:
+        directives = [
+            {
+                "channel": "NARRATIVE",
+                "status": "CHANGE",
+                "instruction": instruction,
+                "observable_effect": (
+                    f"修改必须继续服务情节点“{beat.get('description') or '当前情节点'}”。"
+                ),
+                "confidence": 0.7,
+                "evidence_refs": [beat_ref, goal_ref],
+            },
+            *[
+                {
+                    "channel": channel,
+                    "status": "PRESERVE",
+                    "instruction": f"当前请求没有足够证据要求修改{label}，保持现状。",
+                    "observable_effect": f"{label}层不发生未获授权的变化。",
+                    "confidence": 0.7,
+                    "evidence_refs": ["scene-context"],
+                }
+                for channel, label in (
+                    ("CAMERA", "摄影"),
+                    ("PERFORMANCE", "表演"),
+                    ("SOUND", "声音"),
+                    ("PACING", "节奏"),
+                )
+            ],
+        ]
+        rationale = "只执行用户明确提出且能由当前情节点与角色目标支持的变化。"
+        overall_confidence = 0.7
+    return DirectorIntentCompilationOutput.model_validate(
+        {
+            "directives": directives,
+            "rationale": rationale,
+            "overall_confidence": overall_confidence,
+            "conflict_checks": [
+                {
+                    "code": "LOCKED_CHARACTER_PRESERVED",
+                    "category": "CHARACTER_LOCK",
+                    "severity": "BLOCKING",
+                    "status": "PASS",
+                    "message": "意图不修改角色身份、外观或关系。",
+                    "evidence_refs": [goal_ref],
+                },
+                {
+                    "code": "WORLD_RULE_PRESERVED",
+                    "category": "WORLD_RULE",
+                    "severity": "BLOCKING",
+                    "status": "PASS" if "world-rules" in evidence_ids else "UNKNOWN",
+                    "message": (
+                        "已对照当前 Story Bible 世界与连续性规则。"
+                        if "world-rules" in evidence_ids
+                        else "当前上下文缺少可验证的世界规则。"
+                    ),
+                    "evidence_refs": [world_ref],
+                },
+                {
+                    "code": "FILM_TERMS_GROUNDED",
+                    "category": "TERM_GROUNDING",
+                    "severity": "BLOCKING",
+                    "status": "PASS",
+                    "message": "每个专业通道都声明了可观察效果和当前情境证据。",
+                    "evidence_refs": [beat_ref, "scene-context"],
+                },
+                {
+                    "code": "CROSS_CHANNEL_ALIGNMENT",
+                    "category": "CROSS_CHANNEL",
+                    "severity": "BLOCKING",
+                    "status": "PASS",
+                    "message": "五个通道共同服务同一情节点和角色目标，没有互相抵消。",
+                    "evidence_refs": [beat_ref, goal_ref],
+                },
+            ],
+        }
+    )
+
+
+async def generate_director_intent_compilation(
+    settings: Settings,
+    *,
+    context: dict[str, Any],
+    instruction: str,
+    evidence_ids: set[str],
+) -> "TextGenerationResult":
+    if not settings.ark_api_key:
+        output = _deterministic_director_intent(
+            context=context,
+            instruction=instruction,
+            evidence_ids=evidence_ids,
+        )
+        return TextGenerationResult(
+            payload=output.model_dump(mode="json"),
+            provider="mock",
+            model="deterministic-director-intent-v1",
+            request_id=None,
+            repair_attempts=0,
+        )
+
+    prompt = (
+        "你是导演意图编译器，不是聊天助手。把用户请求编译为叙事、摄影、表演、声音、"
+        "节奏五个通道；每个结论必须写出可观察效果，并且 evidence_refs 只能引用允许的"
+        "证据 ID。不得改变角色身份、关系、世界规则或范围外事实；证据不足的通道必须"
+        "标记 UNRESOLVED，阻断冲突不能伪造 PASS。"
+        f"\n用户请求：{instruction}"
+        f"\n结构化上下文：{json.dumps(context, ensure_ascii=False)}"
+        f"\n允许的证据 ID：{json.dumps(sorted(evidence_ids), ensure_ascii=False)}"
+        "\n输出必须符合 JSON Schema：\n"
+        f"{json.dumps(DirectorIntentCompilationOutput.model_json_schema(), ensure_ascii=False)}"
+    )
+
+    def validate_evidence(candidate: BaseModel) -> None:
+        compiled = (
+            candidate
+            if isinstance(candidate, DirectorIntentCompilationOutput)
+            else DirectorIntentCompilationOutput.model_validate(
+                candidate.model_dump(mode="json", exclude_none=True)
+            )
+        )
+        used = {
+            ref
+            for directive in compiled.directives
+            for ref in directive.evidence_refs
+        }
+        used.update(
+            ref
+            for check in compiled.conflict_checks
+            for ref in check.evidence_refs
+        )
+        unknown = sorted(used - evidence_ids)
+        if unknown:
+            raise ModelOutputSemanticError(
+                "DIRECTOR_INTENT_EVIDENCE_INVALID",
+                "DirectorIntent 引用了当前上下文之外的证据",
+                repair_message="所有 evidence_refs 必须来自允许的证据 ID。",
+                details={"unknown_evidence_refs": unknown},
+            )
+
+    generated = await _ark_json(
+        settings,
+        prompt=prompt,
+        validator=DirectorIntentCompilationOutput,
+        semantic_validator=validate_evidence,
+        exclude_none=True,
+    )
+    validated = DirectorIntentCompilationOutput.model_validate(generated.payload)
+    return TextGenerationResult(
+        payload=validated.model_dump(mode="json"),
+        provider=generated.provider,
+        model=generated.model,
+        request_id=generated.request_id,
+        repair_attempts=generated.repair_attempts,
+    )
+
+
 @dataclass(frozen=True)
 class TextGenerationResult:
     payload: dict[str, Any]
@@ -1516,6 +1759,39 @@ def deterministic_story_package(brief: dict[str, Any], direction: dict[str, Any]
                 "bgm_intent": ("低频脉冲", "弦乐压力渐强", "骤停后单音悬念")[scene_index - 1],
                 "sfx_intents": (["雷声", "断电"], ["门锁", "雨声"], ["应急灯", "敲门"])[
                     scene_index - 1
+                ],
+                "character_goals": [
+                    {
+                        "character_key": "protagonist",
+                        "objective": (
+                            "找出旧照片的发送者"
+                            if scene_index == 1
+                            else "阻止知情者离开并逼其交代"
+                            if scene_index == 2
+                            else "确认门外来人的真实身份"
+                        ),
+                        "obstacle": (
+                            "断电与信息来源不明"
+                            if scene_index == 1
+                            else "知情者回避并试图保留主动权"
+                            if scene_index == 2
+                            else "照片信息与眼前事实互相矛盾"
+                        ),
+                        "stakes": (
+                            "错过追查旧案的第一条线索"
+                            if scene_index == 1
+                            else "关键证人离开后真相再次被掩盖"
+                            if scene_index == 2
+                            else "主角会把真正的关联者当成局外人"
+                        ),
+                        "tactic": (
+                            "立即追问信息来源"
+                            if scene_index == 1
+                            else "锁门并施加直接语言压力"
+                            if scene_index == 2
+                            else "用照片细节当场核验身份"
+                        ),
+                    }
                 ],
                 "lines": [
                     {
@@ -3080,7 +3356,9 @@ class RoutedTextProvider:
             "你是短剧编剧。只生成首集结构化场景和台词，不生成 Story Bible、分集大纲、"
             f"{targeting_prompt_guardrails(brief)}"
             "叙事引擎或质检。首集必须有 2 至 6 个场景，每个场景都改变故事状态；"
-            "每个场景 lines 至少 1 条，禁止空数组。"
+            "每个场景 lines 至少 1 条，禁止空数组；每个场景必须提供 character_goals，"
+            "逐个写明相关角色在该场景的 objective、obstacle、stakes 与 tactic，"
+            "不得用性别、年龄或职业刻板印象推断目标。"
             "场景时长总和必须匹配 Brief 目标，服务端会确定性计算总时长。"
             "严格返回 JSON，不要 Markdown。输出必须符合此 JSON Schema：\n"
             f"{json.dumps(EpisodeScriptDraft.model_json_schema(), ensure_ascii=False)}\nBrief:\n"

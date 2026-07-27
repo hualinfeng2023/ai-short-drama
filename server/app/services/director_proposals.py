@@ -25,6 +25,7 @@ from app.db.models import (
 )
 from app.domain.director import DirectorProposalRequest
 from app.services.dependency_analysis import analyze_script_scene_dependencies
+from app.services.director_intent import prepare_director_intent_preview
 from app.services.projects import canonical_json, content_hash
 from app.services.text_provider import TextProviderError, generate_director_scene_review
 from app.services.workspace import project_or_404
@@ -193,6 +194,9 @@ def record_director_generation_failure(
     details: dict[str, Any] | None,
     latency_ms: int | None,
     stage: str,
+    capability: str = "DIRECTOR_SCENE_REVIEW",
+    config_version: str = "director-proposal-v2",
+    audit_action: str = "DIRECTOR_SCENE_REVIEW_FAILED",
     command_id: str | None = None,
     retry_of_generation_record_id: str | None = None,
 ) -> GenerationRecord:
@@ -231,10 +235,10 @@ def record_director_generation_failure(
         job_id=None,
         entity_type="script_scene",
         entity_id=script_scene_id,
-        capability="DIRECTOR_SCENE_REVIEW",
+        capability=capability,
         provider=provider,
         model=model,
-        config_version="director-proposal-v2",
+        config_version=config_version,
         prompt_hash=content_hash(prompt_source),
         seed=None,
         reference_asset_ids_json="[]",
@@ -258,7 +262,7 @@ def record_director_generation_failure(
             id=str(uuid4()),
             project_id=project_id,
             actor=actor,
-            action="DIRECTOR_SCENE_REVIEW_FAILED",
+            action=audit_action,
             entity_type="script_scene",
             entity_id=script_scene_id,
             before_hash=content_hash(prompt_source),
@@ -352,6 +356,77 @@ async def prepare_director_proposal(
     latency_ms = max(0, round((perf_counter() - started_at) * 1000))
     review = generated.payload
     impact = _impact(session, project_id=project.id, script_scene=scene)
+    prepared_intent = None
+    if request.compile_intent:
+        intent_started_at = perf_counter()
+        intent_prompt_source = {
+            "instruction": request.instruction,
+            "target_type": request.target_type,
+            "target_id": request.target_id,
+            "selection": (
+                request.intent_selection.model_dump(mode="json")
+                if request.intent_selection is not None
+                else None
+            ),
+        }
+        try:
+            prepared_intent = await prepare_director_intent_preview(
+                session,
+                settings,
+                project_id=project.id,
+                target_type=request.target_type,
+                target_id=request.target_id,
+                instruction=request.instruction or "",
+                selection=request.intent_selection,
+            )
+        except TextProviderError as exc:
+            intent_latency_ms = max(
+                0, round((perf_counter() - intent_started_at) * 1000)
+            )
+            try:
+                record_director_generation_failure(
+                    session,
+                    project_id=project.id,
+                    script_scene_id=scene.id,
+                    script_version_id=script.id,
+                    actor=request.actor,
+                    provider="volcengine-ark" if settings.ark_api_key else "mock",
+                    model=(
+                        settings.ark_prompt_model
+                        if settings.ark_api_key
+                        else "deterministic-director-intent-v1"
+                    ),
+                    prompt_source=intent_prompt_source,
+                    error_code=exc.code,
+                    error_message=str(exc),
+                    retryable=exc.retryable,
+                    details=exc.details,
+                    latency_ms=intent_latency_ms,
+                    stage="INTENT_PROVIDER_VALIDATION",
+                    capability="DIRECTOR_INTENT_COMPILATION",
+                    config_version="director-intent-v1",
+                    audit_action="DIRECTOR_INTENT_COMPILATION_FAILED",
+                )
+                session.commit()
+            except Exception:
+                session.rollback()
+                logger.exception(
+                    "DirectorIntent 失败观测记录写入失败：project_id=%s scene_id=%s",
+                    project.id,
+                    scene.id,
+                )
+            raise HTTPException(
+                status_code=503 if exc.retryable else 422,
+                detail={
+                    "code": exc.code,
+                    "message": str(exc),
+                    "retryable": exc.retryable,
+                    "details": exc.details,
+                },
+            ) from exc
+        prepared_intent.provider["latency_ms"] = max(
+            0, round((perf_counter() - intent_started_at) * 1000)
+        )
     return DirectorProposalDraft(
         target_object_id=scene.id,
         target_version_id=script.id,
@@ -373,6 +448,17 @@ async def prepare_director_proposal(
                 "repair_attempts": generated.repair_attempts,
                 "latency_ms": latency_ms,
             },
+            "director_intent_preview": (
+                prepared_intent.preview.model_dump(mode="json")
+                if prepared_intent is not None
+                else None
+            ),
+            "director_intent_confirmation_token": (
+                prepared_intent.confirmation_token if prepared_intent is not None else None
+            ),
+            "director_intent_provider": (
+                prepared_intent.provider if prepared_intent is not None else None
+            ),
         },
     )
 

@@ -2,6 +2,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.domain.director_intent import DirectorIntentTimeRange
+
 DirectorIssueType = Literal[
     "STORY_LOGIC",
     "CHARACTER_MOTIVATION",
@@ -18,12 +20,22 @@ class DirectorProposalRequest(BaseModel):
     target_id: str = Field(min_length=36, max_length=36)
     issue_types: list[DirectorIssueType] = Field(min_length=1, max_length=4)
     instruction: str | None = Field(default=None, max_length=1000)
+    compile_intent: bool = False
+    intent_selection: DirectorIntentTimeRange | None = None
     retry_of_generation_record_id: str | None = Field(
         default=None,
         min_length=36,
         max_length=36,
     )
     actor: str = Field(default="demo-user", min_length=1, max_length=80)
+
+    @model_validator(mode="after")
+    def intent_requires_instruction(self) -> "DirectorProposalRequest":
+        if self.compile_intent and not self.instruction:
+            raise ValueError("编译导演意图时必须提供 instruction")
+        if self.intent_selection is not None and not self.compile_intent:
+            raise ValueError("intent_selection 只能用于导演意图编译")
+        return self
 
 
 class DirectorLinePatch(BaseModel):
@@ -167,6 +179,11 @@ class DirectorProposalExecuteRequest(BaseModel):
     option_id: str = Field(min_length=1, max_length=40)
     actor: str = Field(default="demo-user", min_length=1, max_length=80)
     confirmed: bool
+    intent_confirmation_token: str | None = Field(
+        default=None,
+        min_length=64,
+        max_length=64,
+    )
 
 
 class DirectorProposalDecisionRequest(BaseModel):

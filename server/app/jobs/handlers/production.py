@@ -27,6 +27,7 @@ from app.services.media_staging import seedream_fast_path_expires_at
 from app.services.preproduction import (
     materialize_character_candidate,
     materialize_character_looks,
+    materialize_world_asset_image,
     prepare_preproduction,
 )
 from app.services.production import (
@@ -304,6 +305,59 @@ async def generate_character_looks(
     look_ids = materialize_character_looks(session, job)
     await context.checkpoint(session, job, 90, "造型版本已登记")
     return {"look_ids": look_ids, "provider": "structured-mock"}
+
+
+@register_job_handler("GENERATE_WORLD_ASSET_IMAGE")
+async def generate_world_asset_image(
+    context: JobExecutionContext,
+    session: Session,
+    job: Job,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    asset_type = str(payload["asset_type"])
+    label = "场景" if asset_type == "location" else "道具"
+    await context.checkpoint(session, job, 18, f"组装{label}视觉设定")
+    source_asset_id = payload.get("source_asset_id")
+    character_reference_asset_ids = [
+        item
+        for item in payload.get("character_reference_asset_ids", [])
+        if isinstance(item, str)
+    ]
+    reference_ids: list[str] = []
+    if isinstance(source_asset_id, str):
+        reference_ids.append(source_asset_id)
+    for asset_id in character_reference_asset_ids:
+        if asset_id not in reference_ids:
+            reference_ids.append(asset_id)
+    references = reference_data_urls(
+        session,
+        context.settings,
+        reference_ids,
+    )
+    try:
+        image = await context.generate_image(
+            context.settings,
+            str(payload["prompt"]),
+            model=context.settings.ark_image_model,
+            size="2K",
+            reference_images=references,
+            seed=None,
+        )
+    except ImageProviderError as exc:
+        raise JobExecutionError(exc.code, exc.message, retryable=exc.retryable) from exc
+    await context.checkpoint(session, job, 82, f"登记{label}参考图候选")
+    asset = materialize_world_asset_image(
+        session,
+        context.settings,
+        job,
+        image,
+    )
+    return {
+        "asset_id": asset.id,
+        "asset_type": asset_type,
+        "version_id": str(payload["version_id"]),
+        "model": image.model,
+    }
 
 
 @register_job_handler("GENERATE_STORYBOARD_V2")

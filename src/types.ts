@@ -396,6 +396,7 @@ export interface CharacterRecord {
   visualBrief: string
   status: string
   lockedCandidateId?: string
+  lockedIdentityVersionId?: string
   lockVersion: number
   candidates: CharacterCandidate[]
 }
