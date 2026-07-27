@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from 'react'
-import { ArrowLeft, Check, Film, GitBranch, LoaderCircle, LockKeyhole, Maximize2, RefreshCw, Sparkles, ZoomIn, ZoomOut } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { ArrowLeft, Ban, Check, Film, GitBranch, LoaderCircle, LockKeyhole, Maximize2, RefreshCw, Sparkles, ZoomIn, ZoomOut } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router'
 import {
   approveStoryboardVersion,
+  cancelPersistedJob,
   fetchProject,
   fetchStoryboardWorkspace,
   regenerateStoryboardShot,
@@ -12,9 +13,17 @@ import { Button, EmptyState, Modal, PageHeader, StatusBadge, Surface } from '../
 import { ImpactConfirmModal } from '../components/ConfirmModal'
 import { PageLoadingSkeleton } from '../components/PageLoadingSkeleton'
 import { ServiceRequiredState } from '../components/ServiceRequiredState'
+import { useStudio } from '../store/StudioContext'
 import { useToast } from '../store/ToastContext'
-import type { ProjectRecord } from '../types'
+import type { JobStatus, ProjectRecord } from '../types'
 import { localizeDisplayText } from '../utils/localizeDisplayText'
+
+const ACTIVE_JOB_STATUSES = new Set<JobStatus>([
+  'PENDING',
+  'RETRY_WAIT',
+  'RUNNING',
+  'CANCEL_REQUESTED',
+])
 
 function workflowNodeLabel(value: string): string {
   if (value === 'storyboard.plan') return '分镜规划'
@@ -30,29 +39,97 @@ function workflowNodeLabel(value: string): string {
   return localizeDisplayText(value)
 }
 
-type PreviewShotState = {
+/** 卡片已单独展示镜头号，去掉标题里重复的 code 前缀/后缀。 */
+function displayShotTitle(title: string, code: string): string {
+  let next = title.trim()
+  const suffix = ` · ${code}`
+  if (next.endsWith(suffix)) next = next.slice(0, -suffix.length).trim()
+  const prefix = `${code} `
+  if (next.startsWith(prefix)) next = next.slice(prefix.length).trim()
+  return next || title
+}
+
+type DetailShotState = {
   shotSpecId: string
   code: string
   title: string
-  imageUrl: string
+  description: string
+  dialogue: string
+  durationMs: number
+  shotSize: string
+  cameraMovement: string
   status: string
+  imageUrl: string
+  imagePrompt: string
+  delivery: string
+}
+
+function deliveryLabel(value: string): string {
+  if (value === 'ACTION') return '动作画面'
+  if (value === 'VOICE_OVER') return '画外音'
+  if (value === 'DIALOGUE') return '对白'
+  return value
+}
+
+function openShotDetail(
+  shot: StoryboardWorkspace['shots'][number],
+): DetailShotState {
+  return {
+    shotSpecId: shot.shotSpecId,
+    code: shot.code,
+    title: shot.title,
+    description: shot.description,
+    dialogue: shot.dialogue,
+    durationMs: shot.durationMs,
+    shotSize: shot.shotSize,
+    cameraMovement: shot.cameraMovement,
+    status: shot.status,
+    imageUrl: shot.imageUrl ?? '',
+    imagePrompt: shot.imagePrompt ?? '',
+    delivery: shot.delivery ?? '',
+  }
 }
 
 export function StoryboardPage() {
   const { projectId } = useParams()
   const navigate = useNavigate()
   const { notify } = useToast()
+  const { jobs } = useStudio()
   const [project, setProject] = useState<ProjectRecord | null>(null)
   const [workspace, setWorkspace] = useState<StoryboardWorkspace | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [regenBusyId, setRegenBusyId] = useState<string | null>(null)
+  const [animaticCancelBusy, setAnimaticCancelBusy] = useState(false)
   const [approveOpen, setApproveOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [previewShot, setPreviewShot] = useState<PreviewShotState | null>(null)
+  const [previewShot, setPreviewShot] = useState<DetailShotState | null>(null)
   const [previewZoom, setPreviewZoom] = useState(100)
-  const [regenTarget, setRegenTarget] = useState<PreviewShotState | null>(null)
+  const [regenTarget, setRegenTarget] = useState<DetailShotState | null>(null)
   const [regenNote, setRegenNote] = useState('')
+
+  const activeAnimaticJob = useMemo(() => {
+    if (!projectId) return null
+    const fromJobs = jobs
+      .filter(
+        (job) =>
+          job.projectId === projectId
+          && job.jobType === 'GENERATE_ANIMATIC'
+          && ACTIVE_JOB_STATUSES.has(job.status),
+      )
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    if (fromJobs[0]) return fromJobs[0]
+    const nodeJobId = workspace?.workflow?.nodes
+      .filter(
+        (node) =>
+          (node.nodeKey === 'animatic.render' || node.nodeKey.startsWith('animatic.render.'))
+          && node.jobId
+          && !['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(node.status),
+      )
+      .map((node) => node.jobId)
+      .find((jobId): jobId is string => Boolean(jobId))
+    return nodeJobId ? { id: nodeJobId, status: 'RUNNING' as JobStatus, stage: '正在装配' } : null
+  }, [jobs, projectId, workspace?.workflow?.nodes])
 
   const refresh = useCallback(async () => {
     if (!projectId) return
@@ -115,6 +192,21 @@ export function StoryboardPage() {
     }
   }
 
+  async function stopAnimatic() {
+    if (!activeAnimaticJob || animaticCancelBusy) return
+    setAnimaticCancelBusy(true)
+    setError(null)
+    try {
+      await cancelPersistedJob(activeAnimaticJob.id)
+      notify('已发送停止请求，节奏样片会在当前检查点结束。', 'info')
+      await refresh()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '停止节奏样片失败')
+    } finally {
+      setAnimaticCancelBusy(false)
+    }
+  }
+
   if (!loading && (!project || !workspace || !projectId)) {
     return <ServiceRequiredState feature="动态分镜" projectId={projectId} />
   }
@@ -129,7 +221,7 @@ export function StoryboardPage() {
     workspace.storyboard.status !== 'APPROVED'
     && project.status !== 'STORYBOARD_APPROVED'
 
-  return <div className="page page--storyboard">
+  return <div className="page page--storyboard" data-aspect={project.aspectRatio}>
     <PageHeader
       title="动态分镜审核"
       description="镜头数由批准后的剧本动态决定；不满意的镜头可单独重生成，再批准进入正式制作。"
@@ -154,27 +246,35 @@ export function StoryboardPage() {
       <Surface className="story-section storyboard-board"><div className="section-heading"><div><p className="eyebrow">镜头规格</p><h2>剧本驱动的镜头序列</h2></div></div><div className="storyboard-shot-grid">{workspace.shots.map((shot) => {
             const regenerating = shot.status === 'QUEUED' || regenBusyId === shot.shotSpecId
             const failed = shot.status === 'FAILED'
+            const openDetail = () => {
+              setPreviewShot(openShotDetail(shot))
+              setPreviewZoom(100)
+            }
             return (
-            <article className={regenerating ? 'is-generating' : failed ? 'is-failed' : undefined} key={shot.shotSpecId} title={shot.contentHash}>
+            <article
+              aria-label={`查看 ${shot.code} 分镜详情`}
+              className={[
+                'storyboard-shot-card',
+                regenerating ? 'is-generating' : '',
+                failed ? 'is-failed' : '',
+              ].filter(Boolean).join(' ')}
+              key={shot.shotSpecId}
+              onClick={openDetail}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  openDetail()
+                }
+              }}
+              role="button"
+              tabIndex={0}
+              title={shot.contentHash}
+            >
               {shot.imageUrl ? (
                 <div className="storyboard-shot-card__media-wrap">
-                  <button
-                    aria-label={`放大查看 ${shot.code} 原图`}
-                    className="storyboard-shot-card__media"
-                    onClick={() => {
-                      setPreviewShot({
-                        shotSpecId: shot.shotSpecId,
-                        code: shot.code,
-                        title: shot.title,
-                        imageUrl: shot.imageUrl!,
-                        status: shot.status,
-                      })
-                      setPreviewZoom(100)
-                    }}
-                    type="button"
-                  >
-                    <img alt={`${shot.code} 分镜`} src={shot.imageUrl} />
-                  </button>
+                  <div aria-hidden className="storyboard-shot-card__media">
+                    <img alt="" src={shot.imageUrl} />
+                  </div>
                   {regenerating ? (
                     <div className="storyboard-shot-card__generating-overlay" aria-busy="true">
                       <span className="storyboard-placeholder__aurora" aria-hidden />
@@ -205,7 +305,7 @@ export function StoryboardPage() {
                 <header>
                   <div className="storyboard-shot-card__heading">
                     <strong>{shot.code}</strong>
-                    <span>{shot.title}</span>
+                    <span>{displayShotTitle(shot.title, shot.code)}</span>
                   </div>
                   <small>{(shot.durationMs / 1000).toFixed(1)} 秒</small>
                 </header>
@@ -217,14 +317,9 @@ export function StoryboardPage() {
                   {canRegenerate ? (
                     <Button
                       disabled={Boolean(regenBusyId) || regenerating}
-                      onClick={() => {
-                        setRegenTarget({
-                          shotSpecId: shot.shotSpecId,
-                          code: shot.code,
-                          title: shot.title,
-                          imageUrl: shot.imageUrl ?? '',
-                          status: shot.status,
-                        })
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        setRegenTarget(openShotDetail(shot))
                         setRegenNote('')
                       }}
                       size="sm"
@@ -240,7 +335,38 @@ export function StoryboardPage() {
             )
           })}</div></Surface>
       <aside>
-        <Surface className="approval-card"><p className="eyebrow">节奏样片</p><h2>低成本节奏样片</h2>{workspace.storyboard.animaticUrl ? <video controls preload="metadata" src={workspace.storyboard.animaticUrl} /> : <div className="preview-media-wait"><LoaderCircle className="spin" size={20} />正在装配</div>}<p>包含分镜、临时音轨、字幕与逐镜头时长。</p></Surface>
+        <Surface className="approval-card">
+          <p className="eyebrow">节奏样片</p>
+          <h2>低成本节奏样片</h2>
+          {workspace.storyboard.animaticUrl && !activeAnimaticJob ? (
+            <video controls preload="metadata" src={workspace.storyboard.animaticUrl} />
+          ) : activeAnimaticJob ? (
+            <div className="preview-media-wait">
+              <LoaderCircle className="spin" size={20} />
+              <span>
+                {activeAnimaticJob.status === 'CANCEL_REQUESTED'
+                  ? '正在停止'
+                  : activeAnimaticJob.stage || '正在装配'}
+              </span>
+              <Button
+                disabled={animaticCancelBusy || activeAnimaticJob.status === 'CANCEL_REQUESTED'}
+                onClick={() => void stopAnimatic()}
+                size="sm"
+                variant="secondary"
+              >
+                {animaticCancelBusy || activeAnimaticJob.status === 'CANCEL_REQUESTED'
+                  ? <LoaderCircle className="spin" size={14} />
+                  : <Ban size={14} />}
+                {activeAnimaticJob.status === 'CANCEL_REQUESTED' ? '停止中' : '停止'}
+              </Button>
+            </div>
+          ) : (
+            <div className="preview-media-wait">
+              <span>尚未生成</span>
+            </div>
+          )}
+          <p>包含分镜、临时音轨、字幕与逐镜头时长。装配中可随时停止。</p>
+        </Surface>
         <Surface className="approval-card"><p className="eyebrow">生成进度</p><h2><GitBranch size={18} />任务顺序</h2><div className="workflow-node-list">{workspace.workflow?.nodes.map((node) => <div key={node.id}><span>{workflowNodeLabel(node.nodeKey)}</span><StatusBadge status={node.status} /><small>{node.dependencies.map(workflowNodeLabel).join(' → ') || '起始步骤'}</small></div>)}</div></Surface>
       </aside>
     </div>
@@ -262,8 +388,8 @@ export function StoryboardPage() {
     />
 
     <Modal
-      className="modal--identity-image-viewer"
-      description={previewShot ? `${previewShot.title} · 完整原图` : undefined}
+      className="modal--identity-image-viewer modal--storyboard-shot-detail"
+      description={previewShot ? `${displayShotTitle(previewShot.title, previewShot.code)} · 分镜详情` : undefined}
       footer={<>
         {canRegenerate && previewShot ? (
           <Button
@@ -281,24 +407,67 @@ export function StoryboardPage() {
       </>}
       onClose={() => { setPreviewShot(null); setPreviewZoom(100) }}
       open={previewShot !== null}
-      title={previewShot ? `${previewShot.code} 分镜原图` : '分镜原图'}
+      title={previewShot ? `${previewShot.code} 分镜详情` : '分镜详情'}
     >
       {previewShot ? (
-        <div className="identity-image-viewer">
-          <div className="identity-image-viewer__toolbar">
-            <span><Maximize2 size={15} /><strong>{previewZoom === 100 ? '适应画面' : `${previewZoom}%`}</strong></span>
+        <div className="storyboard-shot-detail">
+          <div className="storyboard-shot-detail__media">
+            {previewShot.imageUrl ? (
+              <div className="identity-image-viewer">
+                <div className="identity-image-viewer__toolbar">
+                  <span><Maximize2 size={15} /><strong>{previewZoom === 100 ? '适应画面' : `${previewZoom}%`}</strong></span>
+                  <div>
+                    <Button aria-label="缩小分镜原图" disabled={previewZoom <= 100} onClick={() => setPreviewZoom((current) => Math.max(100, current - 25))} size="sm" variant="secondary"><ZoomOut size={15} /></Button>
+                    <Button disabled={previewZoom === 100} onClick={() => setPreviewZoom(100)} size="sm" variant="secondary">复位</Button>
+                    <Button aria-label="放大分镜原图" disabled={previewZoom >= 200} onClick={() => setPreviewZoom((current) => Math.min(200, current + 25))} size="sm" variant="secondary"><ZoomIn size={15} /></Button>
+                  </div>
+                </div>
+                <div className="identity-image-viewer__viewport">
+                  <div className="identity-image-viewer__canvas" style={{ height: `${previewZoom}%`, width: `${previewZoom}%` }}>
+                    <img alt={`${previewShot.code} 分镜原图`} draggable={false} src={previewShot.imageUrl} />
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="storyboard-placeholder storyboard-placeholder--failed storyboard-shot-detail__empty">
+                <span className="storyboard-placeholder__status">
+                  {previewShot.status === 'QUEUED' ? '绘制分镜中' : '暂无画面'}
+                </span>
+              </div>
+            )}
+          </div>
+          <aside className="storyboard-shot-detail__meta">
+            <p className="eyebrow">镜头规格</p>
+            <h3>{displayShotTitle(previewShot.title, previewShot.code)}</h3>
+            <dl>
+              <div><dt>镜头号</dt><dd>{previewShot.code}</dd></div>
+              <div><dt>时长</dt><dd>{(previewShot.durationMs / 1000).toFixed(1)} 秒</dd></div>
+              <div><dt>景别</dt><dd>{localizeDisplayText(previewShot.shotSize)}</dd></div>
+              <div><dt>运镜</dt><dd>{localizeDisplayText(previewShot.cameraMovement)}</dd></div>
+              {previewShot.delivery ? (
+                <div><dt>交付</dt><dd>{deliveryLabel(previewShot.delivery)}</dd></div>
+              ) : null}
+              <div><dt>状态</dt><dd><StatusBadge status={previewShot.status} /></dd></div>
+            </dl>
             <div>
-              <Button aria-label="缩小分镜原图" disabled={previewZoom <= 100} onClick={() => setPreviewZoom((current) => Math.max(100, current - 25))} size="sm" variant="secondary"><ZoomOut size={15} /></Button>
-              <Button disabled={previewZoom === 100} onClick={() => setPreviewZoom(100)} size="sm" variant="secondary">复位</Button>
-              <Button aria-label="放大分镜原图" disabled={previewZoom >= 200} onClick={() => setPreviewZoom((current) => Math.min(200, current + 25))} size="sm" variant="secondary"><ZoomIn size={15} /></Button>
+              <span>画面描述</span>
+              <p>{previewShot.description || '—'}</p>
             </div>
-          </div>
-          <div className="identity-image-viewer__viewport">
-            <div className="identity-image-viewer__canvas" style={{ height: `${previewZoom}%`, width: `${previewZoom}%` }}>
-              <img alt={`${previewShot.code} 分镜原图`} draggable={false} src={previewShot.imageUrl} />
+            {previewShot.dialogue ? (
+              <div>
+                <span>台词 / 画外音</span>
+                <blockquote>{previewShot.dialogue}</blockquote>
+              </div>
+            ) : null}
+            <div className="storyboard-shot-detail__prompt">
+              <span>生图提示词</span>
+              {previewShot.imagePrompt ? (
+                <pre>{previewShot.imagePrompt}</pre>
+              ) : (
+                <p>暂无记录。重新生成此镜后可查看实际出图提示词。</p>
+              )}
             </div>
-          </div>
-          <small>点击缩略图可查看完整原图；放大后可滚动画布检查细节。</small>
+          </aside>
         </div>
       ) : null}
     </Modal>

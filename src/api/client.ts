@@ -762,6 +762,8 @@ export interface StoryboardWorkspace {
     propVersionIds: string[]
     status: string
     imageUrl?: string
+    imagePrompt?: string
+    delivery?: string
     contentHash: string
   }>
   workflow: null | {
@@ -773,6 +775,7 @@ export interface StoryboardWorkspace {
       nodeKey: string
       nodeType: string
       status: string
+      jobId?: string
       dependencies: string[]
       degraded: boolean
     }>
@@ -5012,6 +5015,8 @@ export async function fetchStoryboardWorkspace(
       prop_version_ids: string[]
       status: string
       image_url: string | null
+      image_prompt?: string | null
+      delivery?: string | null
       content_hash: string
     }>
     workflow: null | {
@@ -5023,6 +5028,7 @@ export async function fetchStoryboardWorkspace(
         node_key: string
         node_type: string
         status: string
+        job_id: string | null
         dependencies: string[]
         degraded: boolean
       }>
@@ -5059,6 +5065,8 @@ export async function fetchStoryboardWorkspace(
       propVersionIds: item.prop_version_ids,
       status: item.status,
       ...(item.image_url === null ? {} : { imageUrl: item.image_url }),
+      ...(item.image_prompt ? { imagePrompt: item.image_prompt } : {}),
+      ...(item.delivery ? { delivery: item.delivery } : {}),
       contentHash: item.content_hash,
     })),
     workflow: data.workflow === null ? null : {
@@ -5070,6 +5078,7 @@ export async function fetchStoryboardWorkspace(
         nodeKey: item.node_key,
         nodeType: item.node_type,
         status: item.status,
+        ...(item.job_id === null ? {} : { jobId: item.job_id }),
         dependencies: item.dependencies,
         degraded: item.degraded,
       })),

@@ -1,5 +1,6 @@
 import base64
 import json
+import re
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
@@ -102,19 +103,290 @@ def _scene_character_keys(
     return result[:8]
 
 
+def _is_face_hidden_brief(visual_brief: str | None) -> bool:
+    """角色设定要求不露脸或仅出局部（手/剪影）时视为隐面。"""
+    brief = (visual_brief or "").strip()
+    if not brief:
+        return False
+    tokens = (
+        "不露出面部",
+        "不露脸",
+        "全程不露出面部",
+        "仅出现",
+        "只出手",
+        "仅出手",
+        "戴无菌",
+        "无菌白手套",
+        "不露出可识别",
+    )
+    return any(token in brief for token in tokens)
+
+
+_AUDIO_NOISE_PATTERNS = (
+    r"黑场[，,]?",
+    r"三声间隔清晰的有力胎心响起[，,]?",
+    r"[^\s，。；]{0,12}(?:胎心|心跳|心音)[^\s，。；]{0,12}(?:响起|搏动|震动|回响)",
+    r"(?:画外音|旁白|音效|配乐|音乐|BGM|脚步声|呼吸声|耳语|呢喃|低语|轰鸣|回响)[^。；]*[。；]?",
+    r"声音[^。；]{0,24}[。；]?",
+    r"人物正在说[：:][^。；]*[。；]?",
+    r"正在说[：:][^。；]*[。；]?",
+    r"画外音[：:][^。；]*[。；]?",
+)
+
+_TIMELINE_NOISE_PATTERNS = (
+    r"(?:几秒后|片刻后|随后|然后|接着|此时|此刻|与此同时|渐渐|逐渐|慢慢)[，,]?",
+    r"(?:\d+(?:\.\d+)?\s*(?:秒|分钟)后)[，,]?",
+    r"淡入[，,]?",
+    r"淡出[，,]?",
+)
+
+_CAMERA_MOVE_NOISE_PATTERNS = (
+    r"(?:跟拍|手持|推镜|拉镜|摇镜|横移|运镜|推进|后拉|甩镜|升降)[^。；]*",
+    r"(?:TRACK|DOLLY_IN|DOLLY|PAN|HANDHELD|STATIC)\s*运镜",
+    r"背景有轻微运动模糊倾向[^。；]*[。；]?",
+    r"像推进中途截取的一帧",
+    r"仿佛刚停住的摇镜瞬间",
+    r"像纪录片跟拍前的停顿",
+)
+
+_FRAME_SPLIT_PATTERNS = (
+    r"镜头拉焦(?:露出|到|至)?",
+    r"拉焦(?:露出|到|至)",
+    r"焦点(?:拉开|推近|落到|移到)",
+    r"(?:再|然后|随后)?(?:拉开|推近|推到|拉到|切到|切向|转为|变成|变为|过渡到)",
+    r"露出整(?=[间个])",
+)
+
+
+def _strip_patterns(text: str, patterns: tuple[str, ...]) -> str:
+    result = text
+    for pattern in patterns:
+        result = re.sub(pattern, "", result, flags=re.IGNORECASE)
+    return result
+
+
+def _normalize_frame_clause(text: str) -> str:
+    cleaned = text.strip(" ，,。；;、")
+    cleaned = re.sub(r"[，,]{2,}", "，", cleaned)
+    cleaned = re.sub(r"[。；]{2,}", "。", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return cleaned.strip(" ，,。；;")
+
+
+def _split_conflicting_frame_beats(text: str) -> tuple[str, str | None]:
+    """识别首帧/尾帧冲突，返回 (前段, 后段或 None)。"""
+    for pattern in _FRAME_SPLIT_PATTERNS:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        before = _normalize_frame_clause(text[: match.start()])
+        after = _normalize_frame_clause(text[match.end() :])
+        if before and after and before != after:
+            return before, after
+    return _normalize_frame_clause(text), None
+
+
+def _prefer_frame_for_shot_size(before: str, after: str | None, shot_size: str) -> str:
+    """按景别挑选更匹配的单帧；无冲突则返回 before。"""
+    if not after:
+        return before
+    size = shot_size.upper()
+    before_close = any(token in before for token in ("极微距", "微距", "特写", "近景", "表面", "局部"))
+    after_wide = any(token in after for token in ("整间", "全景", "广角", "纵深", "两侧", "环境"))
+    if size in {"CU", "MCU"}:
+        return before if before_close or not after_wide else before
+    if size == "WS":
+        return after if after_wide or len(after) >= max(8, len(before) // 2) else before
+    return after if len(after) >= len(before) else before
+
+
+def _remove_non_visual_language(text: str) -> str:
+    """删除声音、时间轴与运镜过程用语，只留可见描述。"""
+    cleaned = _strip_patterns(text, _AUDIO_NOISE_PATTERNS)
+    cleaned = _strip_patterns(cleaned, _TIMELINE_NOISE_PATTERNS)
+    cleaned = _strip_patterns(cleaned, _CAMERA_MOVE_NOISE_PATTERNS)
+    cleaned = re.sub(
+        r"(?:正在|继续|开始|结束)?(?:说话|表演|完成台词)[^。；]*[。；]?",
+        "",
+        cleaned,
+    )
+    cleaned = re.sub(r"随胎心轻轻震动", "凝结在玻璃上", cleaned)
+    return _normalize_frame_clause(cleaned)
+
+
+def _strip_non_visual_sentences(text: str) -> str:
+    """去掉纯叙事/目的句，只保留含可见物象的句子。"""
+    visual_cues = (
+        "舱", "玻璃", "冰霜", "冷凝", "胚胎", "产房", "婴儿床", "桌", "手", "手套",
+        "镜头", "暗部", "房间", "走廊", "窗", "门", "脸", "眼",
+        "穿", "站", "坐", "表面", "金属", "识别器", "暖光", "冷光", "阴影",
+        "微距", "特写", "全景", "广角", "中景", "近景",
+    )
+    narrative_cues = (
+        "抛出", "交代", "钩子", "冲突", "规则", "完成台词", "保持与锁定",
+        "背景设定", "核心钩子", "开场抛出",
+    )
+    parts = re.split(r"[。；;]", text)
+    kept: list[str] = []
+    for part in parts:
+        clause = part.strip(" ，,")
+        if not clause:
+            continue
+        has_visual = any(token in clause for token in visual_cues)
+        has_narrative = any(token in clause for token in narrative_cues)
+        if has_narrative and not has_visual:
+            continue
+        if not has_visual and not has_narrative and len(clause) > 48:
+            continue
+        kept.append(clause)
+    return "。".join(kept)
+
+
+def compile_single_frame_visual_brief(
+    description: str,
+    *,
+    shot_size: str,
+) -> str:
+    """把导演阐述压缩为当前这一帧真正可见的画面规格。"""
+    text = (description or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"^画外音覆盖于[：:]", "", text).strip()
+    text = re.sub(r"视觉锚点[：:]", "", text).strip()
+    # 去掉「角色以…完成台词」表演句，只留后续视觉锚点
+    text = re.sub(
+        r"^[^。]*以[^。]*状态完成台词[^。]*。?",
+        "",
+        text,
+    ).strip()
+    text = _remove_non_visual_language(text)
+    text = _strip_non_visual_sentences(text)
+    before, after = _split_conflicting_frame_beats(text)
+    before = _strip_non_visual_sentences(_remove_non_visual_language(before))
+    after_clean = (
+        _strip_non_visual_sentences(_remove_non_visual_language(after)) if after else None
+    )
+    chosen = _prefer_frame_for_shot_size(before, after_clean, shot_size)
+    chosen = _strip_non_visual_sentences(_remove_non_visual_language(chosen))
+    return chosen or before or (description or "").strip()
+
+
+def _storyboard_static_frame_direction(
+    *,
+    shot_size: str,
+    time_of_day: str,
+    has_on_camera_dialogue: bool,
+) -> str:
+    """单帧静帧摄影指引：只有景别与光线，不含运镜过程。"""
+    shot_language = {
+        "WS": "广角全景静帧，环境纵深可见，主体不必居中",
+        "MS": "中景静帧，人物与环境信息平衡",
+        "MCU": "中近景静帧，上半身与表情主导画面",
+        "CU": "近景/微距静帧，焦点在局部材质、眼神或物件表面",
+    }.get(shot_size, f"{shot_size} 静帧景别")
+    time_lower = time_of_day.lower()
+    if any(token in time_lower for token in ("夜", "night", "晚", "凌晨", "午夜")):
+        lighting = "冷色实景光与局部暖光并存，主体有明确明暗交界，拒绝平光美颜"
+    else:
+        lighting = "侧前方自然主光塑造体积，保留真实阴影与材质反光"
+    expression = (
+        "若人物在画面中：表情克制，口部可呈说话瞬间，禁止摆拍假笑"
+        if has_on_camera_dialogue
+        else "若人物在画面中：表情克制自然，禁止空眼神与塑料微笑"
+    )
+    return (
+        f"{shot_language}。固定机位单帧，禁止表现推拉摇移过程。"
+        f"{expression}。{lighting}。"
+        "按电影剧照/实拍静帧理解："
+        "非对称构图、空气透视与生活痕迹；皮肤保留毛孔与细微瑕疵，衣料有真实褶皱。"
+        "严禁：居中证件照、磨皮美颜、塑料皮肤、文字字幕水印、拼贴分镜格。"
+    )
+
+
+def _shot_delivery(
+    line: ScriptLine,
+    speaker: Character | None,
+) -> str:
+    """将剧本行映射为生图交付方式：ACTION / VOICE_OVER / DIALOGUE。"""
+    if line.line_type == "ACTION":
+        return "ACTION"
+    if line.line_type == "VOICE_OVER":
+        return "VOICE_OVER"
+    if line.line_type == "DIALOGUE":
+        if speaker is not None and _is_face_hidden_brief(speaker.visual_brief):
+            return "VOICE_OVER"
+        return "DIALOGUE"
+    # 未知类型按画外音保守处理，避免误生成口型镜头
+    return "VOICE_OVER"
+
+
+def _action_visual_text(purpose: str, action_line: ScriptLine | None) -> str:
+    if action_line is None:
+        return purpose.strip()
+    purpose_part = purpose.strip()
+    action_part = action_line.text.strip()
+    if purpose_part and action_part:
+        return f"{purpose_part}。{action_part}"
+    return purpose_part or action_part
+
+
+def _visual_description_for_line(
+    line: ScriptLine,
+    *,
+    delivery: str,
+    purpose: str,
+    speaking_label: str,
+    action_visual: str,
+) -> str:
+    """按交付方式组装镜头画面描述，VO 继承同场 ACTION 视觉。"""
+    action_visual = action_visual.strip() or purpose.strip() or "延续当前场景空间"
+    if delivery == "ACTION":
+        return _action_visual_text(purpose, line)
+    if delivery == "VOICE_OVER":
+        return f"画外音覆盖于：{action_visual}"
+    # DIALOGUE：保留表演意图，同时锚定同场视觉，避免丢分镜画面
+    performance = (
+        f"{speaking_label}以{line.emotion}状态完成台词，保持与锁定身份参考图为同一人"
+    )
+    if action_visual and action_visual != purpose.strip():
+        return f"{performance}。视觉锚点：{action_visual}"
+    return performance
+
+
 def _line_character_keys(
     line: ScriptLine,
     *,
     characters_by_key: dict[str, Character],
     scene_character_keys: list[str],
+    delivery: str | None = None,
+    visual_anchor_text: str | None = None,
 ) -> list[str]:
+    """按交付方式绑定出镜角色；台词提名不再自动入镜。"""
+    resolved_delivery = delivery or (
+        "ACTION"
+        if line.line_type == "ACTION"
+        else "VOICE_OVER"
+        if line.line_type == "VOICE_OVER"
+        else "DIALOGUE"
+    )
     result: list[str] = []
-    candidates = [line.speaker_key, *_mentioned_character_keys(line.text, characters_by_key)]
-    for character_key in candidates:
-        if character_key in characters_by_key and character_key not in result:
+    if resolved_delivery == "ACTION":
+        candidates = [line.speaker_key, *_mentioned_character_keys(line.text, characters_by_key)]
+        for character_key in candidates:
+            if character_key in characters_by_key and character_key not in result:
+                result.append(character_key)
+        if not result:
+            result.extend(scene_character_keys)
+        return result[:8]
+
+    # VO / 隐面台词：只认画面锚点里点名的角色，不因 speaker 或台词提及入镜
+    anchor = visual_anchor_text or ""
+    for character_key in _mentioned_character_keys(anchor, characters_by_key):
+        if character_key not in result:
             result.append(character_key)
-    if not result and line.line_type in {"ACTION", "VOICE_OVER"}:
-        result.extend(scene_character_keys)
+    if resolved_delivery == "DIALOGUE" and line.speaker_key in characters_by_key:
+        if line.speaker_key not in result:
+            result.insert(0, line.speaker_key)
     return result[:8]
 
 
@@ -167,21 +439,44 @@ def _character_reference_asset_ids(session: Session, character: Character) -> li
 def _storyboard_identity_prompt(characters: list[Character]) -> str:
     if not characters:
         return ""
-    references = "\n".join(
-        f"- 参考图对应角色：{character.name}（{character.role}）；"
-        f"{character.visual_brief.strip() or '沿用锁定身份五官与发型'}"
-        for character in characters
-    )
-    return "\n".join(
+    reference_lines: list[str] = []
+    has_visible_face = False
+    has_hidden_face = False
+    for character in characters:
+        brief = character.visual_brief.strip() or "沿用锁定身份五官与发型"
+        if _is_face_hidden_brief(character.visual_brief):
+            has_hidden_face = True
+            reference_lines.append(
+                f"- 参考图对应角色：{character.name}（{character.role}）；{brief}。"
+                "严格服从上述隐面/局部出镜设定，禁止擅自露脸或另造可识别五官。"
+            )
+        else:
+            has_visible_face = True
+            reference_lines.append(
+                f"- 参考图对应角色：{character.name}（{character.role}）；{brief}"
+            )
+    constraints: list[str] = [
+        "角色身份锁定（硬约束）：",
+        *reference_lines,
+    ]
+    if has_visible_face:
+        constraints.extend(
+            (
+                "- 输入参考图是每个露脸角色唯一的身份基准。画面中的人物必须与参考图为同一人：",
+                "脸型、五官比例、瞳距、鼻梁、唇形、发型核心特征、发色、年龄感与辨识度保持一致。",
+            )
+        )
+    if has_hidden_face:
+        constraints.append(
+            "- 隐面/局部出镜角色以 visual_brief 为准，不要求五官或唇形可见，禁止用口罩折中出完整人脸。"
+        )
+    constraints.extend(
         (
-            "角色身份锁定（硬约束）：",
-            references,
-            "- 输入参考图是每个角色唯一的身份基准。画面中的人物必须与参考图为同一人：",
-            "脸型、五官比例、瞳距、鼻梁、唇形、发型核心特征、发色、年龄感与辨识度保持一致。",
             "- 允许改变表情、姿势、景别、光线与背景；禁止换脸、混脸、另造相似替身。",
             "- 当前镜头未绑定的角色不要入镜；不要新增路人抢戏。",
         )
     )
+    return "\n".join(constraints)
 
 
 def _storyboard_photographic_direction(
@@ -191,43 +486,12 @@ def _storyboard_photographic_direction(
     time_of_day: str,
     has_dialogue: bool,
 ) -> str:
-    shot_language = {
-        "WS": "广角全景，用环境纵深交代人物位置，主体不必居中",
-        "MS": "中景，人物与环境信息平衡，身体有自然重心偏移",
-        "MCU": "中近景，上半身与微表情主导画面，视线可偏离镜头",
-        "CU": "近景特写，焦点在眼神与呼吸，允许轻微构图失衡",
-    }.get(shot_size, f"{shot_size} 景别")
-    movement = {
-        "STATIC": "机位克制稳定，像纪录片跟拍前的停顿",
-        "PAN": "画面边缘保留运动空间，仿佛刚停住的摇镜瞬间",
-        "DOLLY_IN": "透视略压缩，像推进中途截取的一帧",
-        "TRACK": "背景有轻微运动模糊倾向，主体清晰",
-        "HANDHELD": "极轻微手持呼吸感，避免过度晃动",
-    }.get(camera_movement, camera_movement)
-    time_lower = time_of_day.lower()
-    if any(token in time_lower for token in ("夜", "night", "晚", "凌晨")):
-        lighting = (
-            "以场景实景光为主：窗光、屏幕光或顶灯形成明确方向，"
-            "面部有明暗交界，拒绝平光美颜灯"
-        )
-    else:
-        lighting = (
-            "侧前方自然主光塑造体积，环境反光只补暗部，"
-            "保留真实阴影与材质反光，拒绝影棚环形灯效果"
-        )
-    expression = (
-        "人物处于说话或刚说完的间隙：口型、眼神与呼吸不同步于摆拍微笑，"
-        "表情克制、有情绪残留"
-        if has_dialogue
-        else "表情克制自然，靠眼神与肩颈微张力传情，禁止空眼神与塑料微笑"
-    )
-    return (
-        f"{shot_language}；{movement}。{expression}。{lighting}。"
-        "按电影剧照/实拍静帧理解，而非电商肖像或 LinkedIn 头像："
-        "非对称构图、前景轻微遮挡、空气透视与生活痕迹；"
-        "皮肤保留毛孔与细微瑕疵，衣料有真实褶皱，景深自然。"
-        "严禁：居中证件照构图、过度对称、磨皮美颜、塑料皮肤、"
-        "完美打光网红脸、假笑、眼神空洞、CGI 感、插画感。"
+    """兼容旧调用；单帧出图改走静态指引。"""
+    del camera_movement
+    return _storyboard_static_frame_direction(
+        shot_size=shot_size,
+        time_of_day=time_of_day,
+        has_on_camera_dialogue=has_dialogue,
     )
 
 
@@ -242,8 +506,10 @@ def build_storyboard_take_prompt(
     camera_movement: str,
     characters: list[Character],
     aspect_ratio: str | None = None,
+    delivery: str = "DIALOGUE",
 ) -> str:
-    """为低成本分镜生成身份锁定 + 写实电影静帧提示词。"""
+    """为低成本分镜生成可执行单帧图像规格（出图前去掉声音/时间轴/运镜冲突）。"""
+    del camera_movement  # 单帧出图不使用运镜过程信息
     resolved_ratio = aspect_ratio or project.aspect_ratio
     orientation_label = {
         "1:1": "正方形",
@@ -255,23 +521,42 @@ def build_storyboard_take_prompt(
         "2:3": "竖向摄影画幅",
         "21:9": "超宽银幕画幅",
     }.get(resolved_ratio, "指定画幅")
-    dialogue_hint = f"人物正在说：{dialogue}。" if dialogue.strip() else ""
+    frame_brief = compile_single_frame_visual_brief(description, shot_size=shot_size)
+    has_on_camera_dialogue = delivery == "DIALOGUE" and bool(dialogue.strip())
     identity_block = _storyboard_identity_prompt(characters)
     cast_names = "、".join(character.name for character in characters) or "无具名角色"
-    photo_direction = _storyboard_photographic_direction(
+    photo_direction = _storyboard_static_frame_direction(
         shot_size=shot_size,
-        camera_movement=camera_movement,
         time_of_day=time_of_day,
-        has_dialogue=bool(dialogue.strip()),
+        has_on_camera_dialogue=has_on_camera_dialogue,
+    )
+    dialogue_visual = (
+        "人物呈平静说话瞬间的口型与眼神，画面中不出现任何可读文字或字幕。"
+        if has_on_camera_dialogue
+        else ""
     )
     return (
-        f"{description.rstrip('。')}。{dialogue_hint}"
-        f"出镜角色：{cast_names}。地点：{location}，时间：{time_of_day}。"
-        f"{shot_size} 景别，{camera_movement} 运镜，{orientation_label} {resolved_ratio}。"
+        f"单帧静帧规格：{frame_brief}。"
+        f"可见主体与空间：出镜角色 {cast_names}；地点 {location}；时段 {time_of_day}。"
+        f"{dialogue_visual}"
+        f"{shot_size} 景别，{orientation_label} {resolved_ratio}。"
         f"{photo_direction}"
-        f"整体风格延续{project.style}，色彩克制、层次丰富，避免画面文字、字幕、水印、边框和拼贴。"
+        f"整体风格延续{project.style}，色彩克制、层次丰富。"
         f"{identity_block}"
     )
+
+
+def _delivery_from_prompt_payload(
+    prompt_payload: object,
+    *,
+    dialogue: str,
+) -> str:
+    """从 ShotSpec.prompt_json 读取 delivery，缺省时按是否有台词回退。"""
+    if isinstance(prompt_payload, dict):
+        raw = prompt_payload.get("delivery")
+        if raw in {"ACTION", "VOICE_OVER", "DIALOGUE"}:
+            return str(raw)
+    return "DIALOGUE" if dialogue.strip() else "ACTION"
 
 
 def resolve_storyboard_take_generation_inputs(
@@ -314,6 +599,11 @@ def resolve_storyboard_take_generation_inputs(
         reference_asset_ids = [
             item for item in payload.get("reference_asset_ids", []) if isinstance(item, str)
         ]
+    try:
+        prompt_payload = json.loads(spec.prompt_json or "{}")
+    except json.JSONDecodeError:
+        prompt_payload = {}
+    delivery = _delivery_from_prompt_payload(prompt_payload, dialogue=shot.dialogue)
     prompt = build_storyboard_take_prompt(
         project,
         description=shot.description,
@@ -324,11 +614,8 @@ def resolve_storyboard_take_generation_inputs(
         camera_movement=shot.camera_movement,
         characters=characters,
         aspect_ratio=project.aspect_ratio,
+        delivery=delivery,
     )
-    try:
-        prompt_payload = json.loads(spec.prompt_json or "{}")
-    except json.JSONDecodeError:
-        prompt_payload = {}
     director_intent = (
         prompt_payload.get("director_intent")
         if isinstance(prompt_payload, dict)
@@ -339,6 +626,13 @@ def resolve_storyboard_take_generation_inputs(
     note = payload.get("note")
     if isinstance(note, str) and note.strip():
         prompt = f"{prompt}\n导演修改意图：{note.strip()}。"
+    # 回写实际出图提示词，供分镜详情页核对
+    if isinstance(prompt_payload, dict):
+        prompt_payload["image_prompt"] = prompt
+        prompt_payload["delivery"] = delivery
+        if reference_asset_ids:
+            prompt_payload["reference_asset_ids"] = reference_asset_ids[:8]
+        spec.prompt_json = canonical_json(prompt_payload)
     seed = int(payload.get("seed") or 0)
     return prompt, reference_asset_ids[:8], seed
 
@@ -552,12 +846,29 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
         location = location_by_name.get(script_scene.location) or (
             locations[0] if locations else None
         )
+        last_action_visual = script_scene.purpose.strip()
+        last_action_shot_size: str | None = None
+        last_action_camera: str | None = None
         for line, duration_sec in zip(lines, durations, strict=True):
             code = f"S{shot_ordinal:02d}"
+            speaking_character = characters_by_key.get(line.speaker_key)
+            speaking_label = speaking_character.name if speaking_character is not None else "旁白"
+            delivery = _shot_delivery(line, speaking_character)
+            if delivery == "ACTION":
+                last_action_visual = _action_visual_text(script_scene.purpose, line)
+            description = _visual_description_for_line(
+                line,
+                delivery=delivery,
+                purpose=script_scene.purpose,
+                speaking_label=speaking_label,
+                action_visual=last_action_visual,
+            )
             line_character_keys = _line_character_keys(
                 line,
                 characters_by_key=characters_by_key,
                 scene_character_keys=scene_character_keys,
+                delivery=delivery,
+                visual_anchor_text=last_action_visual,
             )
             bound_characters = [characters_by_key[key] for key in line_character_keys]
             character_ids = [character.id for character in bound_characters]
@@ -577,21 +888,26 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
                 if character.active_story_state_version_id
             ]
             dialogue = line.text if line.line_type in {"DIALOGUE", "VOICE_OVER"} else ""
-            speaking_character = characters_by_key.get(line.speaker_key)
-            speaking_label = speaking_character.name if speaking_character is not None else "旁白"
-            description = (
-                f"{script_scene.purpose}。{line.text}"
-                if line.line_type == "ACTION"
-                else f"{speaking_label}以{line.emotion}状态完成台词，保持与锁定身份参考图为同一人"
-            )
-            shot_size = ("WS", "MS", "MCU", "CU")[(shot_ordinal - 1) % 4]
-            camera = ("STATIC", "TRACK", "DOLLY_IN", "PAN")[(shot_ordinal - 1) % 4]
+            cycled_size = ("WS", "MS", "MCU", "CU")[(shot_ordinal - 1) % 4]
+            cycled_camera = ("STATIC", "TRACK", "DOLLY_IN", "PAN")[(shot_ordinal - 1) % 4]
+            if delivery == "ACTION":
+                shot_size = cycled_size
+                camera = cycled_camera
+                last_action_shot_size = shot_size
+                last_action_camera = camera
+            elif last_action_shot_size and last_action_camera:
+                # VO / 隐面台词继承同场上一 ACTION 景别运镜，避免冲掉画面语言
+                shot_size = last_action_shot_size
+                camera = last_action_camera
+            else:
+                shot_size = cycled_size
+                camera = cycled_camera
             shot = Shot(
                 id=str(uuid4()),
                 scene_id=scene.id,
                 code=code,
                 ordinal=shot_ordinal,
-                title=f"{script_scene.heading} · {code}",
+                title=script_scene.heading,
                 description=description,
                 dialogue=dialogue,
                 duration_sec=duration_sec,
@@ -628,12 +944,14 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
                 camera_movement=camera,
                 characters=bound_characters,
                 aspect_ratio=project.aspect_ratio,
+                delivery=delivery,
             )
             if prompt_intent is not None:
                 image_prompt = f"{image_prompt}\n{director_intent_prompt_block(prompt_intent)}"
             prompt_payload = {
                 "description": description,
                 "dialogue": dialogue,
+                "delivery": delivery,
                 "style": project.style,
                 "location": script_scene.location,
                 "time_of_day": script_scene.time_of_day,
@@ -1220,6 +1538,10 @@ def regenerate_storyboard_shot(
         for asset_id in _character_reference_asset_ids(session, character):
             if asset_id not in reference_asset_ids:
                 reference_asset_ids.append(asset_id)
+    try:
+        regen_prompt_payload = json.loads(spec.prompt_json or "{}")
+    except json.JSONDecodeError:
+        regen_prompt_payload = {}
     image_prompt = build_storyboard_take_prompt(
         project,
         description=shot.description,
@@ -1230,10 +1552,23 @@ def regenerate_storyboard_shot(
         camera_movement=shot.camera_movement,
         characters=characters,
         aspect_ratio=project.aspect_ratio,
+        delivery=_delivery_from_prompt_payload(
+            regen_prompt_payload,
+            dialogue=shot.dialogue,
+        ),
     )
     cleaned_note = note.strip() if isinstance(note, str) and note.strip() else None
     if cleaned_note:
         image_prompt = f"{image_prompt}\n导演修改意图：{cleaned_note}。"
+    if isinstance(regen_prompt_payload, dict):
+        regen_prompt_payload["image_prompt"] = image_prompt
+        if "delivery" not in regen_prompt_payload:
+            regen_prompt_payload["delivery"] = _delivery_from_prompt_payload(
+                regen_prompt_payload,
+                dialogue=shot.dialogue,
+            )
+        regen_prompt_payload["reference_asset_ids"] = reference_asset_ids
+        spec.prompt_json = canonical_json(regen_prompt_payload)
     spec.status = "QUEUED"
     shot.status = "QUEUED"
     shot.lock_version += 1
@@ -1593,6 +1928,19 @@ def storyboard_workspace(session: Session, project_id: str) -> dict[str, object]
                 Take.is_current.is_(True),
             )
         )
+        try:
+            prompt_payload = json.loads(spec.prompt_json or "{}")
+        except json.JSONDecodeError:
+            prompt_payload = {}
+        image_prompt = ""
+        delivery = None
+        if isinstance(prompt_payload, dict):
+            raw_prompt = prompt_payload.get("image_prompt")
+            if isinstance(raw_prompt, str):
+                image_prompt = raw_prompt
+            raw_delivery = prompt_payload.get("delivery")
+            if raw_delivery in {"ACTION", "VOICE_OVER", "DIALOGUE"}:
+                delivery = raw_delivery
         shots.append(
             {
                 "shot_spec_id": spec.id,
@@ -1610,6 +1958,8 @@ def storyboard_workspace(session: Session, project_id: str) -> dict[str, object]
                 "status": spec.status,
                 "image_url": f"/api/v1/assets/{take.asset_id}/content" if take else None,
                 "content_hash": spec.content_hash,
+                "image_prompt": image_prompt,
+                "delivery": delivery,
             }
         )
     workflow = (

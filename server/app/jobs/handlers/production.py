@@ -6,7 +6,7 @@ from functools import partial
 from sqlalchemy.orm import Session
 
 from app.db.models import Job
-from app.jobs.contracts import JobExecutionContext, JobExecutionError
+from app.jobs.contracts import JobCancelled, JobExecutionContext, JobExecutionError
 from app.jobs.registry import register_job_handler
 from app.services.character_image_qc import evaluate_character_image_quality
 from app.services.character_visuals import (
@@ -472,14 +472,22 @@ async def generate_animatic(
     )
     media_task = asyncio.create_task(asyncio.to_thread(build))
     progress = 30
-    while not media_task.done():
-        try:
-            await asyncio.wait_for(asyncio.shield(media_task), timeout=2)
-        except TimeoutError:
-            progress = min(82, progress + 8)
-            await context.checkpoint(session, job, progress, "FFmpeg 正在组装带临时声音的节奏样片")
-            context.heartbeat(session, "RUNNING", job.id)
-    files = await media_task
+    try:
+        while not media_task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(media_task), timeout=2)
+            except TimeoutError:
+                progress = min(82, progress + 8)
+                await context.checkpoint(session, job, progress, "FFmpeg 正在组装带临时声音的节奏样片")
+                context.heartbeat(session, "RUNNING", job.id)
+        files = await media_task
+    except JobCancelled:
+        # 检查点已确认取消；尽量结束等待，避免继续登记样片资产
+        if not media_task.done():
+            media_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await media_task
+        raise
     await context.checkpoint(session, job, 88, "校验节奏样片时长、视频和临时音轨")
     asset = register_animatic(
         session,

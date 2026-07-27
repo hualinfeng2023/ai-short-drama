@@ -4,22 +4,45 @@ from types import SimpleNamespace
 from PIL import Image, ImageDraw
 
 from app.services.storyboards_v2 import (
+    _is_face_hidden_brief,
     _line_character_keys,
     _scene_character_keys,
+    _shot_delivery,
+    _visual_description_for_line,
     build_storyboard_take_prompt,
+    compile_single_frame_visual_brief,
     mask_character_reference_watermark,
 )
 
 
 def _characters() -> dict[str, SimpleNamespace]:
     return {
-        "protagonist": SimpleNamespace(name="林悦"),
-        "witness": SimpleNamespace(name="周启"),
+        "protagonist": SimpleNamespace(name="林悦", visual_brief="短发亚洲女性"),
+        "witness": SimpleNamespace(name="周启", visual_brief="中年男性"),
+        "child": SimpleNamespace(
+            name="孩子",
+            visual_brief="刚出生包裹在米白色柔软襁褓中，仅露出小手，不露出可识别身份的面部特征",
+        ),
+        "doctor": SimpleNamespace(
+            name="医生",
+            visual_brief="全程不露出面部，仅出现戴无菌白手套的双手，声音平静无起伏",
+        ),
     }
 
 
-def _line(speaker: str, text: str, line_type: str) -> SimpleNamespace:
-    return SimpleNamespace(speaker_key=speaker, text=text, line_type=line_type)
+def _line(
+    speaker: str,
+    text: str,
+    line_type: str,
+    *,
+    emotion: str = "平静",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        speaker_key=speaker,
+        text=text,
+        line_type=line_type,
+        emotion=emotion,
+    )
 
 
 def test_action_line_binds_every_character_explicitly_mentioned() -> None:
@@ -30,10 +53,11 @@ def test_action_line_binds_every_character_explicitly_mentioned() -> None:
         line,
         characters_by_key=characters,  # type: ignore[arg-type]
         scene_character_keys=["protagonist", "witness"],
+        delivery="ACTION",
     ) == ["protagonist", "witness"]
 
 
-def test_narration_without_names_inherits_the_scene_cast() -> None:
+def test_voice_over_binds_only_characters_named_in_action_visual() -> None:
     characters = _characters()
     lines = [
         _line("NARRATOR", "灯灭了。", "VOICE_OVER"),
@@ -43,11 +67,24 @@ def test_narration_without_names_inherits_the_scene_cast() -> None:
     scene_character_keys = _scene_character_keys(lines, characters)  # type: ignore[arg-type]
 
     assert scene_character_keys == ["protagonist", "witness"]
+    # 无画面锚点提名时，VO 不再整场继承 scene cast
+    assert (
+        _line_character_keys(
+            lines[0],
+            characters_by_key=characters,  # type: ignore[arg-type]
+            scene_character_keys=scene_character_keys,
+            delivery="VOICE_OVER",
+            visual_anchor_text="灯灭了。废弃走廊。",
+        )
+        == []
+    )
     assert _line_character_keys(
         lines[0],
         characters_by_key=characters,  # type: ignore[arg-type]
         scene_character_keys=scene_character_keys,
-    ) == ["protagonist", "witness"]
+        delivery="VOICE_OVER",
+        visual_anchor_text="林悦站在窗边，灯灭了。",
+    ) == ["protagonist"]
 
 
 def test_dialogue_line_keeps_the_speaking_character_when_no_one_else_is_named() -> None:
@@ -58,7 +95,52 @@ def test_dialogue_line_keeps_the_speaking_character_when_no_one_else_is_named() 
         line,
         characters_by_key=characters,  # type: ignore[arg-type]
         scene_character_keys=["protagonist", "witness"],
+        delivery="DIALOGUE",
     ) == ["witness"]
+
+
+def test_dialogue_mentioning_child_does_not_bind_child_character() -> None:
+    characters = _characters()
+    line = _line(
+        "doctor",
+        "这座城市的永生配额固定：今天你们的孩子出生，今晚就会有一个永生者自然老去死亡。",
+        "VOICE_OVER",
+    )
+
+    assert (
+        _line_character_keys(
+            line,
+            characters_by_key=characters,  # type: ignore[arg-type]
+            scene_character_keys=["doctor", "child"],
+            delivery="VOICE_OVER",
+            visual_anchor_text="正面完全对称广角镜头，空荡产房中央金属桌，夫妻分坐两端",
+        )
+        == []
+    )
+
+
+def test_face_hidden_dialogue_is_treated_as_voice_over_delivery() -> None:
+    characters = _characters()
+    line = _line("doctor", "守恒法不变。", "DIALOGUE", emotion="平静客观")
+    speaker = characters["doctor"]
+
+    assert _shot_delivery(line, speaker) == "VOICE_OVER"  # type: ignore[arg-type]
+    assert _is_face_hidden_brief(speaker.visual_brief)
+
+
+def test_voice_over_description_inherits_action_visual() -> None:
+    line = _line("doctor", "这是人类最后一个胚胎。", "VOICE_OVER", emotion="平静无起伏")
+    description = _visual_description_for_line(
+        line,  # type: ignore[arg-type]
+        delivery="VOICE_OVER",
+        purpose="开场抛出核心钩子",
+        speaking_label="医生",
+        action_visual="开场抛出核心钩子。极微距镜头拍摄胚胎舱表面",
+    )
+
+    assert "画外音覆盖于" in description
+    assert "极微距镜头拍摄胚胎舱表面" in description
+    assert "完成台词" not in description
 
 
 def test_character_reference_masks_the_lower_right_watermark_region() -> None:
@@ -104,25 +186,83 @@ def test_storyboard_take_prompt_locks_character_identity() -> None:
 
     prompt = build_storyboard_take_prompt(
         project,  # type: ignore[arg-type]
-        description="林悦以警觉状态完成台词，保持与锁定身份参考图为同一人",
+        description="林悦站在夜色办公室窗边，冷色工装，神情警觉",
         dialogue="Stay one more day.",
         location="Night office",
         time_of_day="夜",
         shot_size="MS",
         camera_movement="TRACK",
         characters=characters,  # type: ignore[arg-type]
+        delivery="DIALOGUE",
     )
 
+    assert "单帧静帧规格" in prompt
     assert "角色身份锁定（硬约束）" in prompt
     assert "林悦" in prompt
     assert "短发亚洲女性" in prompt
     assert "禁止换脸" in prompt
     assert "写实都市夜戏" in prompt
     assert "电影剧照" in prompt
-    assert "严禁：居中证件照构图" in prompt
     assert "塑料皮肤" in prompt
     assert "{" not in prompt
-    assert "Stay one more day." in prompt
+    # 台词文本不进画面；只保留可见口型约束，且不含运镜过程
+    assert "Stay one more day." not in prompt
+    assert "人物正在说" not in prompt
+    assert "TRACK" not in prompt
+    assert "运镜" not in prompt
+    assert "口型" in prompt
+    assert "固定机位单帧" in prompt
+
+
+def test_voice_over_prompt_uses_offscreen_audio_not_lip_sync() -> None:
+    project = SimpleNamespace(style="realistic_cinematic", aspect_ratio="9:16")
+    characters = [
+        SimpleNamespace(
+            name="医生",
+            role="规则执行者",
+            visual_brief="全程不露出面部，仅出现戴无菌白手套的双手，声音平静无起伏",
+        )
+    ]
+
+    prompt = build_storyboard_take_prompt(
+        project,  # type: ignore[arg-type]
+        description="画外音覆盖于：极微距镜头拍摄胚胎舱表面",
+        dialogue="这是人类最后一个胚胎。",
+        location="废弃人类胚胎储存产房",
+        time_of_day="午夜",
+        shot_size="CU",
+        camera_movement="STATIC",
+        characters=characters,  # type: ignore[arg-type]
+        delivery="VOICE_OVER",
+    )
+
+    assert "这是人类最后一个胚胎" not in prompt
+    assert "画外音：" not in prompt
+    assert "人物正在说" not in prompt
+    assert "胚胎舱表面" in prompt
+    assert "严格服从上述隐面" in prompt or "隐面/局部出镜" in prompt
+    assert "唇形、发型核心特征" not in prompt
+
+
+def test_compile_single_frame_strips_audio_and_splits_pull_focus() -> None:
+    source = (
+        "开场抛出核心钩子，交代背景设定。黑场，三声间隔清晰的有力胎心响起，"
+        "极微距镜头拍摄胚胎舱表面，一滴冷凝水随胎心轻轻震动，冰霜覆盖玻璃，"
+        "内部可见微弱暖光的胚胎，镜头拉焦露出整间废弃产房，两侧排列蒙尘空婴儿床"
+    )
+    close = compile_single_frame_visual_brief(source, shot_size="CU")
+    wide = compile_single_frame_visual_brief(source, shot_size="WS")
+
+    assert "胎心" not in close
+    assert "黑场" not in close
+    assert "拉焦" not in close
+    assert "胚胎舱" in close or "冰霜" in close or "冷凝水" in close
+    assert "废弃产房" not in close
+
+    assert "胎心" not in wide
+    assert "拉焦" not in wide
+    assert "废弃产房" in wide or "婴儿床" in wide
+    assert "极微距" not in wide
 
 
 def test_storyboard_shot_regenerate_request_schema_accepts_optional_note() -> None:
