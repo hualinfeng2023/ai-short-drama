@@ -47,6 +47,22 @@ def is_script_preproduction(session: Session, project_id: str) -> bool:
     return _approved_script(session, project_id) is not None
 
 
+def _voice_description(character_payload: dict[str, object]) -> str:
+    personality = [
+        str(item).strip()
+        for item in character_payload.get("personality", [])
+        if str(item).strip()
+    ]
+    age = str(character_payload.get("age", "")).strip()
+    dramatic_function = str(character_payload.get("dramatic_function", "")).strip()
+    parts = [
+        f"{age}感声线" if age else "",
+        f"整体呈现{'、'.join(personality[:3])}" if personality else "",
+        f"表演重点：{dramatic_function}" if dramatic_function else "",
+    ]
+    return "；".join(item for item in parts if item)
+
+
 def prepare_preproduction(session: Session, job: Job) -> list[str]:
     script = _approved_script(session, job.project_id)
     if script is None:
@@ -100,26 +116,12 @@ def prepare_preproduction(session: Session, job: Job) -> list[str]:
             select(VoiceProfile).where(VoiceProfile.character_id == character.id)
         )
         if voice is None:
-            personality = [
-                str(item).strip()
-                for item in character_payload.get("personality", [])
-                if str(item).strip()
-            ]
-            age = str(character_payload.get("age", "")).strip()
-            dramatic_function = str(character_payload.get("dramatic_function", "")).strip()
-            voice_description_parts = [
-                f"{age}感声线" if age else "",
-                f"整体呈现{'、'.join(personality[:3])}" if personality else "",
-                f"表演重点：{dramatic_function}" if dramatic_function else "",
-            ]
             voice_payload = {
                 "gender_expression": "neutral",
                 "age_impression": "adult",
                 "tone": "natural-cinematic",
                 "language": script.canonical_language,
-                "voice_description": "；".join(
-                    item for item in voice_description_parts if item
-                ),
+                "voice_description": _voice_description(character_payload),
             }
             session.add(
                 VoiceProfile(
@@ -426,11 +428,14 @@ def request_world_asset_image_generation(
     asset_type: str,
     version_id: str,
     expected_version: int,
+    count: int = 1,
+    source_asset_id: str | None = None,
+    adjustment_prompt: str | None = None,
     actor: str,
     idempotency_key: str,
     trace_id: str,
     commit: bool = True,
-) -> tuple[JobRead, bool]:
+) -> tuple[list[JobRead], bool]:
     project = project_or_404(session, project_id)
     if project.lock_version != expected_version:
         raise version_conflict(project, expected_version)
@@ -449,47 +454,112 @@ def request_world_asset_image_generation(
         version_id=version_id,
     )
     payload = json.loads(record.payload_json)
+    source_asset = session.get(Asset, source_asset_id) if source_asset_id else None
+    if source_asset_id and (
+        source_asset is None
+        or source_asset.project_id != project_id
+        or source_asset.kind != "world_asset_reference"
+        or source_asset.source_entity_type != f"{asset_type}_version"
+        or source_asset.source_entity_id != record.id
+        or source_asset.status != "READY"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "WORLD_ASSET_REFERENCE_NOT_FOUND",
+                "message": "用于修改生成的参考图不存在或不属于当前资产",
+            },
+        )
     if asset_type == "location":
-        prompt = (
+        base_prompt = (
             f"影视短剧场景设定基准图：{record.name}。"
             f"空间与视觉设定：{canonical_json(payload)}。"
             "建立清晰、可重复使用的空间结构、入口方向、主光方向与关键陈设位置。"
             "无人、无文字、无标志、无水印，写实电影美术概念图，横向构图。"
         )
         label = f"{record.name} · 场景参考图"
+        style_variants = (
+            ("cinematic-realism", "写实电影美术", "真实材质与自然光影，接近实景置景勘景照片"),
+            ("concept-art", "电影概念设计", "强化美术设计与空间层次，使用精细电影概念设计表达"),
+            ("atmospheric", "氛围叙事", "强化环境氛围、色彩关系与戏剧性光影，但保持空间结构不变"),
+        )
     else:
-        prompt = (
+        base_prompt = (
             f"影视短剧关键道具设定基准图：{record.name}。"
             f"外观与叙事设定：{canonical_json(payload)}。"
             "完整展示道具轮廓、材质、颜色、磨损和关键细节，便于跨镜头保持一致。"
             "单一道具、无人物、无文字说明、无标志、无水印，中性背景，写实电影道具设定图。"
         )
         label = f"{record.name} · 道具参考图"
-    job, replayed = enqueue_job(
-        session,
-        project_id=project_id,
-        job_type="GENERATE_WORLD_ASSET_IMAGE",
-        entity_type=f"{asset_type}_version",
-        entity_id=record.id,
-        idempotency_key=(
-            f"{project_id}:GENERATE_WORLD_ASSET_IMAGE:{asset_type}:{record.id}:{idempotency_key}"
-        ),
-        input_payload={
-            "asset_type": asset_type,
-            "version_id": record.id,
-            "prompt": prompt,
-            "actor": actor,
-        },
-        label=label,
-        stage="等待生成参考图",
-        trace_id=trace_id,
-        estimated_seconds=20,
-        retryable=True,
-    )
+        style_variants = (
+            ("studio-realism", "写实棚拍", "真实材质、准确比例与柔和棚拍光线"),
+            (
+                "production-design",
+                "电影道具设计",
+                "强化结构、工艺和可制作细节，使用电影道具概念设计表达",
+            ),
+            ("narrative-wear", "叙事质感", "强化与剧情相符的使用痕迹、年代感和戏剧性光影"),
+        )
+    if source_asset is not None and adjustment_prompt is not None:
+        style_variants = (
+            (
+                "reference-refinement",
+                "修改生成",
+                (
+                    f"以输入参考图为直接视觉基础，只执行以下修改要求："
+                    f"{adjustment_prompt.strip()}。"
+                    "除明确要求修改的内容外，保持原图的主体身份、空间结构、构图关系、"
+                    "关键陈设或道具细节不变。"
+                ),
+            ),
+        )
+    batch_id = str(uuid4())
+    jobs: list[Job] = []
+    replayed_flags: list[bool] = []
+    for style_slot, (style_id, style_label, style_prompt) in enumerate(
+        style_variants[:count],
+        start=1,
+    ):
+        prompt = (
+            f"{base_prompt}"
+            f"本候选采用「{style_label}」风格：{style_prompt}。"
+            "必须严格保持上述同一主题、叙事设定和关键结构，不得因风格变化改写场景或道具身份。"
+        )
+        job, replayed = enqueue_job(
+            session,
+            project_id=project_id,
+            job_type="GENERATE_WORLD_ASSET_IMAGE",
+            entity_type=f"{asset_type}_version",
+            entity_id=record.id,
+            idempotency_key=(
+                f"{project_id}:GENERATE_WORLD_ASSET_IMAGE:{asset_type}:"
+                f"{record.id}:{idempotency_key}:{style_slot}"
+            ),
+            input_payload={
+                "asset_type": asset_type,
+                "version_id": record.id,
+                "prompt": prompt,
+                "actor": actor,
+                "batch_id": batch_id,
+                "style_slot": style_slot,
+                "style_id": style_id,
+                "style_label": style_label,
+                "source_asset_id": source_asset.id if source_asset is not None else None,
+                "adjustment_prompt": adjustment_prompt.strip() if adjustment_prompt else None,
+            },
+            label=f"{label} · {style_label}",
+            stage=f"等待生成参考图 {style_slot}/{count}",
+            trace_id=trace_id,
+            estimated_seconds=20,
+            retryable=True,
+        )
+        jobs.append(job)
+        replayed_flags.append(replayed)
     if commit:
         session.commit()
-    session.refresh(job)
-    return job_to_read(job), replayed
+    for job in jobs:
+        session.refresh(job)
+    return [job_to_read(job) for job in jobs], all(replayed_flags)
 
 
 def materialize_world_asset_image(
@@ -531,6 +601,12 @@ def materialize_world_asset_image(
             "source_url": image.source_url,
             "asset_type": asset_type,
             "version_id": record.id,
+            "batch_id": payload.get("batch_id"),
+            "style_slot": payload.get("style_slot"),
+            "style_id": payload.get("style_id"),
+            "style_label": payload.get("style_label"),
+            "source_asset_id": payload.get("source_asset_id"),
+            "adjustment_prompt": payload.get("adjustment_prompt"),
         }
     )
     ensure_generation_record(
@@ -549,7 +625,14 @@ def materialize_world_asset_image(
         entity_type=f"{asset_type}_version",
         entity_id=record.id,
         estimated_cost_usd=0.0 if asset.provider == "mock" else None,
-        metadata={"asset_type": asset_type},
+        metadata={
+            "asset_type": asset_type,
+            "batch_id": payload.get("batch_id"),
+            "style_id": payload.get("style_id"),
+            "style_label": payload.get("style_label"),
+            "source_asset_id": payload.get("source_asset_id"),
+            "adjustment_prompt": payload.get("adjustment_prompt"),
+        },
     )
     append_event(
         session,
@@ -560,6 +643,9 @@ def materialize_world_asset_image(
             "asset_type": asset_type,
             "version_id": record.id,
             "asset_id": asset.id,
+            "batch_id": payload.get("batch_id"),
+            "style_id": payload.get("style_id"),
+            "source_asset_id": payload.get("source_asset_id"),
         },
     )
     session.flush()
@@ -784,6 +870,17 @@ def materialize_character_looks(session: Session, job: Job) -> list[str]:
 def preproduction_workspace(session: Session, project_id: str) -> dict[str, object]:
     project_or_404(session, project_id)
     characters = list_characters(session, project_id)
+    character_keys_by_id = {item.id: item.character_key for item in characters}
+    story_bible = session.scalar(
+        select(StoryBibleVersion)
+        .where(StoryBibleVersion.project_id == project_id)
+        .order_by(StoryBibleVersion.version.desc())
+    )
+    bible_characters_by_key: dict[str, dict[str, object]] = {}
+    if story_bible is not None:
+        for payload in json.loads(story_bible.payload_json).get("characters", []):
+            if isinstance(payload, dict) and isinstance(payload.get("key"), str):
+                bible_characters_by_key[str(payload["key"])] = payload
     looks = session.scalars(
         select(CharacterLookVersion)
         .where(CharacterLookVersion.project_id == project_id)
@@ -803,17 +900,33 @@ def preproduction_workspace(session: Session, project_id: str) -> dict[str, obje
     ).all()
     reference_candidates_by_entity: dict[str, list[dict[str, object]]] = {}
     for asset in world_reference_assets:
+        asset_metadata = json.loads(asset.metadata_json or "{}")
         reference_candidates_by_entity.setdefault(asset.source_entity_id, []).append(
             {
                 "id": asset.id,
                 "asset_url": f"/api/v1/assets/{asset.id}/content",
                 "status": asset.status,
                 "created_at": asset.created_at,
+                "batch_id": asset_metadata.get("batch_id"),
+                "style_id": asset_metadata.get("style_id"),
+                "style_label": asset_metadata.get("style_label"),
+                "source_asset_id": asset_metadata.get("source_asset_id"),
+                "adjustment_prompt": asset_metadata.get("adjustment_prompt"),
             }
         )
     voices = session.scalars(
         select(VoiceProfile).where(VoiceProfile.project_id == project_id)
     ).all()
+    voice_payloads: dict[str, dict[str, object]] = {}
+    for item in voices:
+        payload = json.loads(item.payload_json)
+        if not payload.get("voice_description"):
+            character_payload = bible_characters_by_key.get(
+                character_keys_by_id.get(item.character_id, "")
+            )
+            if character_payload is not None:
+                payload["voice_description"] = _voice_description(character_payload)
+        voice_payloads[item.id] = payload
     visual_bibles = session.scalars(
         select(VisualBibleVersion)
         .where(VisualBibleVersion.project_id == project_id)
@@ -870,7 +983,7 @@ def preproduction_workspace(session: Session, project_id: str) -> dict[str, obje
                 "version": item.version,
                 "provider": item.provider,
                 "voice_key": item.voice_key,
-                "payload": json.loads(item.payload_json),
+                "payload": voice_payloads[item.id],
                 "pronunciation": json.loads(item.pronunciation_json),
                 "consent_status": item.consent_status,
                 "cloning_enabled": item.cloning_enabled,

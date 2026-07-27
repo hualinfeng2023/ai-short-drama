@@ -802,7 +802,20 @@ class StoryPackageGenerateRequest(BaseModel):
 
 class WorldAssetImageGenerateRequest(BaseModel):
     expected_version: int = Field(ge=1)
+    count: int = Field(default=1, ge=1, le=3)
+    source_asset_id: str | None = Field(default=None, min_length=36, max_length=36)
+    adjustment_prompt: str | None = Field(default=None, min_length=1, max_length=500)
     actor: str = Field(default="demo-user", min_length=1, max_length=80)
+
+    @model_validator(mode="after")
+    def validate_reference_refinement(self) -> "WorldAssetImageGenerateRequest":
+        has_source = self.source_asset_id is not None
+        has_adjustment = self.adjustment_prompt is not None
+        if has_source != has_adjustment:
+            raise ValueError("基于参考图修改生成时，必须同时提供来源图片和修改要求")
+        if has_source and self.count != 1:
+            raise ValueError("基于参考图修改生成时，每次只能生成 1 张候选图")
+        return self
 
 
 class WorldAssetReferenceLockRequest(BaseModel):

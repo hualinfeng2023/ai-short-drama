@@ -526,6 +526,11 @@ export interface PreproductionWorkspace {
       assetUrl: string
       status: string
       createdAt: string
+      batchId?: string
+      styleId?: string
+      styleLabel?: string
+      sourceAssetId?: string
+      adjustmentPrompt?: string
     }>
     status: string
     contentHash: string
@@ -542,6 +547,11 @@ export interface PreproductionWorkspace {
       assetUrl: string
       status: string
       createdAt: string
+      batchId?: string
+      styleId?: string
+      styleLabel?: string
+      sourceAssetId?: string
+      adjustmentPrompt?: string
     }>
     status: string
     contentHash: string
@@ -4704,6 +4714,11 @@ export async function fetchPreproduction(
         asset_url: string
         status: string
         created_at: string
+        batch_id?: string | null
+        style_id?: string | null
+        style_label?: string | null
+        source_asset_id?: string | null
+        adjustment_prompt?: string | null
       }>
       status: string
       content_hash: string
@@ -4720,6 +4735,11 @@ export async function fetchPreproduction(
         asset_url: string
         status: string
         created_at: string
+        batch_id?: string | null
+        style_id?: string | null
+        style_label?: string | null
+        source_asset_id?: string | null
+        adjustment_prompt?: string | null
       }>
       status: string
       content_hash: string
@@ -4758,6 +4778,11 @@ export async function fetchPreproduction(
         assetUrl: candidate.asset_url,
         status: candidate.status,
         createdAt: candidate.created_at,
+        batchId: candidate.batch_id ?? undefined,
+        styleId: candidate.style_id ?? undefined,
+        styleLabel: candidate.style_label ?? undefined,
+        sourceAssetId: candidate.source_asset_id ?? undefined,
+        adjustmentPrompt: candidate.adjustment_prompt ?? undefined,
       })),
       contentHash: item.content_hash,
     })),
@@ -4769,6 +4794,11 @@ export async function fetchPreproduction(
         assetUrl: candidate.asset_url,
         status: candidate.status,
         createdAt: candidate.created_at,
+        batchId: candidate.batch_id ?? undefined,
+        styleId: candidate.style_id ?? undefined,
+        styleLabel: candidate.style_label ?? undefined,
+        sourceAssetId: candidate.source_asset_id ?? undefined,
+        adjustmentPrompt: candidate.adjustment_prompt ?? undefined,
       })),
       contentHash: item.content_hash,
     })),
@@ -4797,8 +4827,11 @@ export async function generateWorldAssetReference(
   assetType: 'location' | 'prop',
   versionId: string,
   expectedVersion: number,
-): Promise<Job> {
-  const result = await requestJson<{ job: ApiJob }>(
+  count: number,
+  sourceAssetId?: string,
+  adjustmentPrompt?: string,
+): Promise<Job[]> {
+  const result = await requestJson<{ job: ApiJob; jobs: ApiJob[] }>(
     `/api/v1/projects/${projectId}/preproduction/${assetType}/${versionId}/reference-images`,
     {
       method: 'POST',
@@ -4808,11 +4841,14 @@ export async function generateWorldAssetReference(
       },
       body: JSON.stringify({
         expected_version: expectedVersion,
+        count,
+        source_asset_id: sourceAssetId,
+        adjustment_prompt: adjustmentPrompt,
         actor: 'demo-user',
       }),
     },
   )
-  return mapJob(result.job)
+  return result.jobs.map(mapJob)
 }
 
 export async function lockWorldAssetReference(

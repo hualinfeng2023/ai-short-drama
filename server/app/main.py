@@ -34,6 +34,7 @@ from app.api.v1.storyboards import router as storyboards_router
 from app.api.v1.takes import router as takes_router
 from app.api.v1.timelines import router as timelines_router
 from app.config import get_settings
+from app.jobs.registry import load_job_handlers
 from app.jobs.worker import PersistentJobWorker
 
 truststore.inject_into_ssl()
@@ -44,6 +45,10 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
     settings = get_settings()
     worker: PersistentJobWorker | None = None
     if settings.job_worker_enabled:
+        # Import and validate every handler before the background worker can
+        # claim a job. Lazy first-job imports can otherwise observe a service
+        # module while the API router import graph is still being initialized.
+        load_job_handlers()
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         worker = PersistentJobWorker(settings)
         await worker.start()

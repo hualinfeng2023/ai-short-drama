@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams } from 'react-router'
 import {
   approvePreproduction,
   fetchPreproduction,
+  fetchProjectJobs,
   fetchProject,
   generateWorldAssetReference,
   lockCharacterCandidate,
@@ -17,7 +18,7 @@ import { ServiceRequiredState } from '../components/ServiceRequiredState'
 import { useStudio } from '../store/StudioContext'
 import { useToast } from '../store/ToastContext'
 import { localizeCharacterRole, localizeDisplayText } from '../utils/localizeDisplayText'
-import type { ProjectRecord } from '../types'
+import type { Job, ProjectRecord } from '../types'
 
 const PREPRODUCTION_COMPLETE_STATUSES = new Set([
   'PREPRODUCTION_APPROVED',
@@ -29,6 +30,13 @@ const PREPRODUCTION_COMPLETE_STATUSES = new Set([
   'APPROVED',
   'EXPORTING',
   'EXPORTED',
+])
+
+const ACTIVE_WORLD_GENERATION_STATUSES = new Set([
+  'PENDING',
+  'RETRY_WAIT',
+  'RUNNING',
+  'CANCEL_REQUESTED',
 ])
 
 function formatLookLabel(label: string) {
@@ -60,10 +68,12 @@ function formatVoiceSetting(payload: Record<string, unknown>) {
     ageLabels[text('age_impression')] ?? text('age_impression'),
     expressionLabels[text('gender_expression')] ?? text('gender_expression'),
   ].filter(Boolean).join(' · ') || '尚未填写声线描述'
-  const detail = [
-    toneLabels[text('tone')] ?? text('tone'),
-    languageLabels[text('language')] ?? text('language'),
-  ].filter(Boolean).join(' · ')
+  const detail = description
+    ? toneLabels[text('tone')] ?? text('tone')
+    : [
+        toneLabels[text('tone')] ?? text('tone'),
+        languageLabels[text('language')] ?? text('language'),
+      ].filter(Boolean).join(' · ')
   return { summary, detail }
 }
 
@@ -74,7 +84,12 @@ export function PreproductionPage() {
   const { notify } = useToast()
   const [project, setProject] = useState<ProjectRecord | null>(null)
   const [workspace, setWorkspace] = useState<PreproductionWorkspace | null>(null)
+  const [worldJobs, setWorldJobs] = useState<Job[]>([])
   const [selected, setSelected] = useState<Record<string, string>>({})
+  const [selectedWorldCandidate, setSelectedWorldCandidate] = useState<Record<string, string>>({})
+  const [worldGenerationCounts, setWorldGenerationCounts] = useState<Record<string, number>>({})
+  const [worldAdjustments, setWorldAdjustments] = useState<Record<string, string>>({})
+  const [editingWorldAssetId, setEditingWorldAssetId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<string | null>(null)
   const [approveOpen, setApproveOpen] = useState(false)
@@ -82,12 +97,14 @@ export function PreproductionPage() {
 
   const refresh = useCallback(async () => {
     if (!projectId) return
-    const [nextProject, nextWorkspace] = await Promise.all([
+    const [nextProject, nextWorkspace, nextJobs] = await Promise.all([
       fetchProject(projectId),
       fetchPreproduction(projectId),
+      fetchProjectJobs(projectId),
     ])
     setProject(nextProject)
     setWorkspace(nextWorkspace)
+    setWorldJobs(nextJobs.filter((job) => job.jobType === 'GENERATE_WORLD_ASSET_IMAGE'))
     setSelected((current) => Object.fromEntries(nextWorkspace.characters.map((character) => [
       character.id,
       character.lockedCandidateId
@@ -161,8 +178,19 @@ export function PreproductionPage() {
     setBusy(`generate-${versionId}`)
     setError(null)
     try {
-      await generateWorldAssetReference(projectId, assetType, versionId, project.lockVersion)
-      notify(`${name}参考图已进入生成队列，完成后会自动显示在本页。`)
+      const count = worldGenerationCounts[versionId] ?? 1
+      const jobs = await generateWorldAssetReference(
+        projectId,
+        assetType,
+        versionId,
+        project.lockVersion,
+        count,
+      )
+      setWorldJobs((current) => [
+        ...jobs,
+        ...current.filter((item) => jobs.every((job) => item.id !== job.id)),
+      ])
+      notify(`${name}的 ${count} 张不同风格参考图已进入生成队列。`)
       await refresh()
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '参考图生成失败')
@@ -192,6 +220,42 @@ export function PreproductionPage() {
       await refresh()
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '参考图锁定失败')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function refineWorldReference(
+    assetType: 'location' | 'prop',
+    versionId: string,
+    sourceAssetId: string,
+    name: string,
+  ) {
+    if (!projectId || !project) return
+    const adjustmentPrompt = worldAdjustments[versionId]?.trim()
+    if (!adjustmentPrompt) return
+    setBusy(`refine-${versionId}`)
+    setError(null)
+    try {
+      const jobs = await generateWorldAssetReference(
+        projectId,
+        assetType,
+        versionId,
+        project.lockVersion,
+        1,
+        sourceAssetId,
+        adjustmentPrompt,
+      )
+      setWorldJobs((current) => [
+        ...jobs,
+        ...current.filter((item) => jobs.every((job) => item.id !== job.id)),
+      ])
+      setWorldAdjustments((current) => ({ ...current, [versionId]: '' }))
+      setEditingWorldAssetId(null)
+      notify(`${name}已基于所选参考图和修改要求进入生成队列。`)
+      await refresh()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '参考图修改生成失败')
     } finally {
       setBusy(null)
     }
@@ -317,7 +381,7 @@ export function PreproductionPage() {
             <strong>{look ? formatLookLabel(look.label) : '尚未准备'}</strong>
             <small>{look ? `第 ${look.version} 版 · ${localizeDisplayText(look.usageScope)} · ${getStatusLabel(look.status)}` : '需要生成并批准角色造型'}</small>
           </div>
-          <div className="character-assets__summary">
+          <div className="character-assets__summary character-assets__summary--voice">
             <span><Mic2 size={14} />声音设定</span>
             <strong>{voiceSetting?.summary ?? '尚未准备'}</strong>
             {voiceSetting?.detail ? <small>{voiceSetting.detail}</small> : null}
@@ -346,40 +410,116 @@ export function PreproductionPage() {
       <article className="world-assets">
         <p className="eyebrow">世界资产</p>
         <h2>场景与关键道具参考图</h2>
-        <p className="world-assets__intro">生成后需人工确认锁定，分镜和后续镜头才会引用一致的空间与道具外观。</p>
+        <p className="world-assets__intro">每轮可生成 1–3 张同主题、不同风格的候选图；人工选择并锁定其中一张后，分镜和后续镜头才会引用它。</p>
         <div className="world-assets__grid">{worldAssets.map((item) => {
-          const candidate = item.imageCandidates[0]
+          const latestBatchId = item.imageCandidates[0]?.batchId
+          const batchCandidates = latestBatchId
+            ? item.imageCandidates.filter((candidate) => candidate.batchId === latestBatchId)
+            : item.imageCandidates.slice(0, 1)
+          const visibleCandidates = batchCandidates
+          const candidate = visibleCandidates.find((candidate) => (
+            candidate.id === selectedWorldCandidate[item.id]
+          )) ?? visibleCandidates[0]
+          const generationJobs = worldJobs.filter((job) => (
+            job.entityId === item.id
+            && ACTIVE_WORLD_GENERATION_STATUSES.has(job.status)
+          ))
+          const generationJob = generationJobs[0]
+          const isGenerating = generationJobs.length > 0
           const hasLockedReference = item.referenceAssetIds.length > 0
           const candidateIsLocked = Boolean(
             candidate && item.referenceAssetIds.includes(candidate.id),
           )
-          const stateLabel = hasLockedReference
+          const stateLabel = isGenerating
+            ? generationJob?.status === 'RETRY_WAIT' ? '等待重试' : '生成中'
+            : hasLockedReference
             ? candidateIsLocked ? '已锁定' : '新候选待确认'
             : candidate ? '待确认' : '缺少参考图'
-          return <section className="world-asset-card" key={`${item.assetType}-${item.id}`}>
+          return <section
+            aria-busy={isGenerating}
+            className="world-asset-card"
+            key={`${item.assetType}-${item.id}`}
+          >
             <header>
               <div><span>{item.typeLabel}</span><h3>{item.name}</h3></div>
               <strong data-ready={hasLockedReference}>{stateLabel}</strong>
             </header>
-            {candidate ? (
-              <img alt={`${item.name}参考图候选`} src={candidate.assetUrl} />
-            ) : (
-              <div className="world-asset-card__placeholder"><Sparkles size={22} /><span>尚未生成参考图</span></div>
-            )}
+            <div className={`world-asset-card__candidates world-asset-card__candidates--${Math.min(Math.max(visibleCandidates.length, 1), 3)}`}>
+              {visibleCandidates.length > 0 ? visibleCandidates.map((option) => {
+                const optionIsLocked = item.referenceAssetIds.includes(option.id)
+                const optionIsSelected = option.id === candidate?.id
+                return <button
+                  aria-label={`选择${item.name}${option.styleLabel ?? ''}参考图`}
+                  aria-pressed={optionIsSelected}
+                  className="world-asset-card__candidate"
+                  data-selected={optionIsSelected}
+                  key={option.id}
+                  onClick={() => setSelectedWorldCandidate((current) => ({
+                    ...current,
+                    [item.id]: option.id,
+                  }))}
+                  type="button"
+                >
+                  <img alt={`${item.name}${option.styleLabel ?? ''}参考图候选`} src={option.assetUrl} />
+                  <span>{option.styleLabel ?? '参考图候选'}{optionIsLocked ? ' · 已锁定' : ''}</span>
+                </button>
+              }) : (
+                <div className="world-asset-card__media">
+                  <div className="world-asset-card__placeholder"><Sparkles size={22} /><span>尚未生成参考图</span></div>
+                </div>
+              )}
+            </div>
+            <div className="world-asset-card__generation">
+              <label>
+                <span>本轮生成</span>
+                <select
+                  aria-label={`${item.name}本轮生成数量`}
+                  disabled={busy !== null || isGenerating}
+                  onChange={(event) => setWorldGenerationCounts((current) => ({
+                    ...current,
+                    [item.id]: Number(event.target.value),
+                  }))}
+                  value={worldGenerationCounts[item.id] ?? 1}
+                >
+                  <option value={1}>1 张</option>
+                  <option value={2}>2 张</option>
+                  <option value={3}>3 张</option>
+                </select>
+              </label>
+              <small>主题与关键结构保持一致，系统自动分配不同风格。</small>
+            </div>
+            {generationJob ? (
+              <div className="world-asset-card__batch-status" role="status">
+                <LoaderCircle aria-hidden="true" className="spin" size={16} />
+                <span>{generationJobs.length} 张生成中 · {localizeDisplayText(generationJob.stage) || '正在生成参考图'}</span>
+              </div>
+            ) : null}
             <small>{item.typeLabel}第 {item.version} 版</small>
             <footer>
               <Button
-                disabled={busy !== null}
+                disabled={busy !== null || isGenerating}
                 onClick={() => void generateWorldReference(item.assetType, item.id, item.name)}
                 size="sm"
                 variant="secondary"
               >
-                {busy === `generate-${item.id}` ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}
-                {candidate ? '重新生成' : '生成参考图'}
+                {busy === `generate-${item.id}` || isGenerating ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}
+                {isGenerating ? '生成中' : candidate ? '探索新风格' : '生成参考图'}
               </Button>
+              {candidate ? (
+                <Button
+                  disabled={busy !== null || isGenerating}
+                  onClick={() => setEditingWorldAssetId((current) => (
+                    current === item.id ? null : item.id
+                  ))}
+                  size="sm"
+                  variant="secondary"
+                >
+                  基于所选图修改
+                </Button>
+              ) : null}
               {candidate && !candidateIsLocked ? (
                 <Button
-                  disabled={busy !== null}
+                  disabled={busy !== null || isGenerating}
                   onClick={() => void lockWorldReference(
                     item.assetType,
                     item.id,
@@ -389,10 +529,48 @@ export function PreproductionPage() {
                   size="sm"
                 >
                   {busy === `lock-${item.id}` ? <LoaderCircle className="spin" size={15} /> : <LockKeyhole size={15} />}
-                  锁定参考图
+                  锁定所选参考图
                 </Button>
               ) : null}
             </footer>
+            {candidate && editingWorldAssetId === item.id ? (
+              <div className="world-asset-card__refinement">
+                <div>
+                  <strong>基于所选图修改</strong>
+                  <small>将生成新的待确认候选，原图和当前锁定版本不会被覆盖。</small>
+                </div>
+                <label>
+                  <span>修改要求</span>
+                  <textarea
+                    aria-label={`${item.name}参考图修改要求`}
+                    maxLength={500}
+                    onChange={(event) => setWorldAdjustments((current) => ({
+                      ...current,
+                      [item.id]: event.target.value,
+                    }))}
+                    placeholder="例如：保留房间结构和培养舱位置，将灯光改为故障红色应急灯，并增加地面积水。"
+                    rows={3}
+                    value={worldAdjustments[item.id] ?? ''}
+                  />
+                </label>
+                <div>
+                  <small>{(worldAdjustments[item.id] ?? '').length} / 500</small>
+                  <Button
+                    disabled={!worldAdjustments[item.id]?.trim() || busy !== null || isGenerating}
+                    onClick={() => void refineWorldReference(
+                      item.assetType,
+                      item.id,
+                      candidate.id,
+                      item.name,
+                    )}
+                    size="sm"
+                  >
+                    {busy === `refine-${item.id}` ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}
+                    按修改要求生成
+                  </Button>
+                </div>
+              </div>
+            ) : null}
           </section>
         })}</div>
       </article>

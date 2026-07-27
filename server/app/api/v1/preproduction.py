@@ -43,18 +43,21 @@ def generate_world_asset_reference(
     idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=160),
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
-    job, replayed = request_world_asset_image_generation(
+    jobs, replayed = request_world_asset_image_generation(
         session,
         project_id=project_id,
         asset_type=asset_type,
         version_id=version_id,
         expected_version=payload.expected_version,
+        count=payload.count,
+        source_asset_id=payload.source_asset_id,
+        adjustment_prompt=payload.adjustment_prompt,
         actor=payload.actor,
         idempotency_key=idempotency_key,
         trace_id=str(uuid4()),
     )
     response.headers["Idempotency-Replayed"] = str(replayed).lower()
-    return success({"job": job})
+    return success({"job": jobs[0], "jobs": jobs})
 
 
 @router.post(

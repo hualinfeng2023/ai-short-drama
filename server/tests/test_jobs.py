@@ -1055,21 +1055,73 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
     assert all(item["cloning_enabled"] is False for item in preproduction["voices"])
     assert all(item["payload"]["voice_description"] for item in preproduction["voices"])
 
+    invalid_reference_count = await client.post(
+        (
+            f"/api/v1/projects/{project_id}/preproduction/location/"
+            f"{preproduction['locations'][0]['id']}/reference-images"
+        ),
+        json={
+            "expected_version": current_version,
+            "count": 4,
+            "actor": "test-director",
+        },
+        headers={"Idempotency-Key": "world-reference-invalid-count"},
+    )
+    assert invalid_reference_count.status_code == 422
+    invalid_reference_refinement = await client.post(
+        (
+            f"/api/v1/projects/{project_id}/preproduction/location/"
+            f"{preproduction['locations'][0]['id']}/reference-images"
+        ),
+        json={
+            "expected_version": current_version,
+            "source_asset_id": "00000000-0000-4000-8000-000000000000",
+            "actor": "test-director",
+        },
+        headers={"Idempotency-Key": "world-reference-missing-adjustment"},
+    )
+    assert invalid_reference_refinement.status_code == 422
+
+    location_reference_for_cross_asset: str | None = None
     for asset_type, items in (
         ("location", preproduction["locations"]),
         ("prop", preproduction["props"]),
     ):
         for item in items:
+            if asset_type == "prop" and location_reference_for_cross_asset is not None:
+                cross_asset_refinement = await client.post(
+                    (
+                        f"/api/v1/projects/{project_id}/preproduction/"
+                        f"{asset_type}/{item['id']}/reference-images"
+                    ),
+                    json={
+                        "expected_version": current_version,
+                        "source_asset_id": location_reference_for_cross_asset,
+                        "adjustment_prompt": "改为更温暖的材质",
+                        "actor": "test-director",
+                    },
+                    headers={
+                        "Idempotency-Key": f"world-reference-cross-asset-{item['id']}"
+                    },
+                )
+                assert cross_asset_refinement.status_code == 404
+            requested_count = 3 if asset_type == "location" and item is items[0] else 1
             generated_reference = await client.post(
                 (
                     f"/api/v1/projects/{project_id}/preproduction/"
                     f"{asset_type}/{item['id']}/reference-images"
                 ),
-                json={"expected_version": current_version, "actor": "test-director"},
+                json={
+                    "expected_version": current_version,
+                    "count": requested_count,
+                    "actor": "test-director",
+                },
                 headers={"Idempotency-Key": f"world-reference-{asset_type}-{item['id']}"},
             )
             assert generated_reference.status_code == 202, generated_reference.text
-            assert await worker.run_once() is True
+            assert len(generated_reference.json()["data"]["jobs"]) == requested_count
+            for _ in range(requested_count):
+                assert await worker.run_once() is True
             current_workspace = (
                 await client.get(f"/api/v1/projects/{project_id}/preproduction")
             ).json()["data"]
@@ -1078,7 +1130,51 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
                 for candidate in current_workspace[f"{asset_type}s"]
                 if candidate["id"] == item["id"]
             )
+            if requested_count == 3:
+                latest_batch_id = current_item["image_candidates"][0]["batch_id"]
+                latest_batch = [
+                    candidate
+                    for candidate in current_item["image_candidates"]
+                    if candidate["batch_id"] == latest_batch_id
+                ]
+                assert len(latest_batch) == 3
+                assert len({candidate["style_id"] for candidate in latest_batch}) == 3
+                source_candidate = current_item["image_candidates"][0]
+                refined_reference = await client.post(
+                    (
+                        f"/api/v1/projects/{project_id}/preproduction/"
+                        f"{asset_type}/{item['id']}/reference-images"
+                    ),
+                    json={
+                        "expected_version": current_version,
+                        "count": 1,
+                        "source_asset_id": source_candidate["id"],
+                        "adjustment_prompt": "保留空间结构，将主光改为红色应急灯",
+                        "actor": "test-director",
+                    },
+                    headers={
+                        "Idempotency-Key": f"world-reference-refine-{item['id']}"
+                    },
+                )
+                assert refined_reference.status_code == 202, refined_reference.text
+                assert await worker.run_once() is True
+                current_workspace = (
+                    await client.get(f"/api/v1/projects/{project_id}/preproduction")
+                ).json()["data"]
+                current_item = next(
+                    candidate
+                    for candidate in current_workspace[f"{asset_type}s"]
+                    if candidate["id"] == item["id"]
+                )
+                refined_candidate = current_item["image_candidates"][0]
+                assert refined_candidate["style_id"] == "reference-refinement"
+                assert refined_candidate["source_asset_id"] == source_candidate["id"]
+                assert refined_candidate["adjustment_prompt"] == (
+                    "保留空间结构，将主光改为红色应急灯"
+                )
             reference_candidate = current_item["image_candidates"][0]
+            if asset_type == "location" and location_reference_for_cross_asset is None:
+                location_reference_for_cross_asset = reference_candidate["id"]
             locked_reference = await client.post(
                 (
                     f"/api/v1/projects/{project_id}/preproduction/"

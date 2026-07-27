@@ -317,13 +317,19 @@ async def generate_world_asset_image(
     asset_type = str(payload["asset_type"])
     label = "场景" if asset_type == "location" else "道具"
     await context.checkpoint(session, job, 18, f"组装{label}视觉设定")
+    source_asset_id = payload.get("source_asset_id")
+    references = reference_data_urls(
+        session,
+        context.settings,
+        [source_asset_id] if isinstance(source_asset_id, str) else [],
+    )
     try:
         image = await context.generate_image(
             context.settings,
             str(payload["prompt"]),
             model=context.settings.ark_image_model,
             size="2K",
-            reference_images=[],
+            reference_images=references,
             seed=None,
         )
     except ImageProviderError as exc:
