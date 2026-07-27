@@ -318,10 +318,21 @@ async def generate_world_asset_image(
     label = "场景" if asset_type == "location" else "道具"
     await context.checkpoint(session, job, 18, f"组装{label}视觉设定")
     source_asset_id = payload.get("source_asset_id")
+    character_reference_asset_ids = [
+        item
+        for item in payload.get("character_reference_asset_ids", [])
+        if isinstance(item, str)
+    ]
+    reference_ids: list[str] = []
+    if isinstance(source_asset_id, str):
+        reference_ids.append(source_asset_id)
+    for asset_id in character_reference_asset_ids:
+        if asset_id not in reference_ids:
+            reference_ids.append(asset_id)
     references = reference_data_urls(
         session,
         context.settings,
-        [source_asset_id] if isinstance(source_asset_id, str) else [],
+        reference_ids,
     )
     try:
         image = await context.generate_image(

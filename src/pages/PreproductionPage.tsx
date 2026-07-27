@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ArrowLeft, Check, LoaderCircle, LockKeyhole, Mic2, RefreshCw, Sparkles, UsersRound } from 'lucide-react'
+import { ArrowLeft, Check, ChevronDown, LoaderCircle, LockKeyhole, Mic2, RefreshCw, Sparkles, UsersRound } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router'
 import {
   approvePreproduction,
@@ -9,6 +9,7 @@ import {
   generateWorldAssetReference,
   lockCharacterCandidate,
   lockWorldAssetReference,
+  previewWorldAssetReferencePrompt,
   type PreproductionWorkspace,
 } from '../api/client'
 import { Button, PageHeader, StatusBadge, Surface, getStatusLabel } from '../components/ui'
@@ -38,6 +39,8 @@ const ACTIVE_WORLD_GENERATION_STATUSES = new Set([
   'RUNNING',
   'CANCEL_REQUESTED',
 ])
+
+const MAX_WORLD_CHARACTER_REFS = 3
 
 function formatLookLabel(label: string) {
   return localizeDisplayText(label).replace(/^造型\s*\d+\s*·\s*/, '')
@@ -89,6 +92,13 @@ export function PreproductionPage() {
   const [selectedWorldCandidate, setSelectedWorldCandidate] = useState<Record<string, string>>({})
   const [worldGenerationCounts, setWorldGenerationCounts] = useState<Record<string, number>>({})
   const [worldAdjustments, setWorldAdjustments] = useState<Record<string, string>>({})
+  const [worldCharacterRefs, setWorldCharacterRefs] = useState<Record<string, string[]>>({})
+  const [worldPromptOpen, setWorldPromptOpen] = useState<Record<string, boolean>>({})
+  const [worldPromptDraft, setWorldPromptDraft] = useState<Record<string, string>>({})
+  const [worldPromptDefault, setWorldPromptDefault] = useState<Record<string, string>>({})
+  const [worldPromptDirty, setWorldPromptDirty] = useState<Record<string, boolean>>({})
+  const [worldPromptStale, setWorldPromptStale] = useState<Record<string, boolean>>({})
+  const [worldPromptLoading, setWorldPromptLoading] = useState<Record<string, boolean>>({})
   const [editingWorldAssetId, setEditingWorldAssetId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<string | null>(null)
@@ -169,6 +179,77 @@ export function PreproductionPage() {
     }
   }
 
+  async function loadWorldPromptPreview(
+    assetType: 'location' | 'prop',
+    versionId: string,
+    options?: {
+      force?: boolean
+      characterIds?: string[]
+      sourceAssetId?: string
+      adjustmentPrompt?: string
+    },
+  ) {
+    if (!projectId || !project) return
+    const force = options?.force ?? false
+    if (!force && worldPromptDirty[versionId]) {
+      setWorldPromptStale((current) => ({ ...current, [versionId]: true }))
+      return
+    }
+    setWorldPromptLoading((current) => ({ ...current, [versionId]: true }))
+    try {
+      const preview = await previewWorldAssetReferencePrompt(
+        projectId,
+        assetType,
+        versionId,
+        project.lockVersion,
+        {
+          count: worldGenerationCounts[versionId] ?? 1,
+          characterIds: options?.characterIds ?? worldCharacterRefs[versionId] ?? [],
+          sourceAssetId: options?.sourceAssetId,
+          adjustmentPrompt: options?.adjustmentPrompt,
+        },
+      )
+      setWorldPromptDefault((current) => ({ ...current, [versionId]: preview.basePrompt }))
+      setWorldPromptDraft((current) => ({ ...current, [versionId]: preview.basePrompt }))
+      setWorldPromptDirty((current) => ({ ...current, [versionId]: false }))
+      setWorldPromptStale((current) => ({ ...current, [versionId]: false }))
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '提示词预览失败')
+    } finally {
+      setWorldPromptLoading((current) => ({ ...current, [versionId]: false }))
+    }
+  }
+
+  function toggleWorldCharacterRef(
+    assetType: 'location' | 'prop',
+    versionId: string,
+    characterId: string,
+  ) {
+    const selectedIds = worldCharacterRefs[versionId] ?? []
+    let nextIds: string[]
+    if (selectedIds.includes(characterId)) {
+      nextIds = selectedIds.filter((id) => id !== characterId)
+    } else if (selectedIds.length >= MAX_WORLD_CHARACTER_REFS) {
+      notify(`最多关联 ${MAX_WORLD_CHARACTER_REFS} 个角色形象`)
+      return
+    } else {
+      nextIds = [...selectedIds, characterId]
+    }
+    setWorldCharacterRefs((current) => ({ ...current, [versionId]: nextIds }))
+    if (worldPromptOpen[versionId]) {
+      void loadWorldPromptPreview(assetType, versionId, { characterIds: nextIds })
+    } else {
+      setWorldPromptDefault((current) => {
+        const next = { ...current }
+        delete next[versionId]
+        return next
+      })
+      if (worldPromptDirty[versionId]) {
+        setWorldPromptStale((current) => ({ ...current, [versionId]: true }))
+      }
+    }
+  }
+
   async function generateWorldReference(
     assetType: 'location' | 'prop',
     versionId: string,
@@ -179,12 +260,26 @@ export function PreproductionPage() {
     setError(null)
     try {
       const count = worldGenerationCounts[versionId] ?? 1
+      const draft = worldPromptDraft[versionId]?.trim()
+      const defaultPrompt = worldPromptDefault[versionId]?.trim()
+      const customBasePrompt = (
+        worldPromptDirty[versionId]
+        && draft
+        && draft !== defaultPrompt
+        && draft.length >= 20
+      ) ? draft : undefined
       const jobs = await generateWorldAssetReference(
         projectId,
         assetType,
         versionId,
         project.lockVersion,
         count,
+        undefined,
+        undefined,
+        {
+          characterIds: worldCharacterRefs[versionId] ?? [],
+          customBasePrompt,
+        },
       )
       setWorldJobs((current) => [
         ...jobs,
@@ -237,6 +332,14 @@ export function PreproductionPage() {
     setBusy(`refine-${versionId}`)
     setError(null)
     try {
+      const draft = worldPromptDraft[versionId]?.trim()
+      const defaultPrompt = worldPromptDefault[versionId]?.trim()
+      const customBasePrompt = (
+        worldPromptDirty[versionId]
+        && draft
+        && draft !== defaultPrompt
+        && draft.length >= 20
+      ) ? draft : undefined
       const jobs = await generateWorldAssetReference(
         projectId,
         assetType,
@@ -245,6 +348,10 @@ export function PreproductionPage() {
         1,
         sourceAssetId,
         adjustmentPrompt,
+        {
+          characterIds: worldCharacterRefs[versionId] ?? [],
+          customBasePrompt,
+        },
       )
       setWorldJobs((current) => [
         ...jobs,
@@ -486,6 +593,110 @@ export function PreproductionPage() {
                   <option value={3}>3 张</option>
                 </select>
               </label>
+              <div className="world-asset-card__character-refs">
+                <span>关联角色形象</span>
+                <div className="world-asset-card__character-chips">
+                  {workspace.characters.map((character) => {
+                    const locked = Boolean(
+                      character.lockedCandidateId || character.lockedIdentityVersionId,
+                    )
+                    const lockedCandidate = character.lockedCandidateId
+                      ? character.candidates.find((candidate) => candidate.id === character.lockedCandidateId)
+                      : character.candidates.find((candidate) => candidate.selected)
+                        ?? character.candidates[0]
+                    const imageUrl = lockedCandidate?.assetUrl
+                    const selectedIds = worldCharacterRefs[item.id] ?? []
+                    const selected = selectedIds.includes(character.id)
+                    return <button
+                      aria-label={locked ? `关联${character.name}形象` : `${character.name}尚未锁定形象`}
+                      aria-pressed={selected}
+                      className="world-asset-card__character-chip"
+                      data-selected={selected}
+                      disabled={!locked || busy !== null || isGenerating}
+                      key={character.id}
+                      onClick={() => toggleWorldCharacterRef(item.assetType, item.id, character.id)}
+                      title={locked ? undefined : '请先锁定角色形象'}
+                      type="button"
+                    >
+                      {imageUrl ? (
+                        <img alt="" src={imageUrl} />
+                      ) : (
+                        <span className="world-asset-card__character-chip-fallback"><UsersRound size={12} /></span>
+                      )}
+                      <em>{character.name}</em>
+                      {selected ? <Check size={12} /> : null}
+                    </button>
+                  })}
+                </div>
+                <small>
+                  {(worldCharacterRefs[item.id] ?? []).length > 0
+                    ? `已关联 ${(worldCharacterRefs[item.id] ?? []).length} 个角色形象，生成时作为外貌参考。`
+                    : '可选。用于旧照片、合影、有人出镜的场景等。'}
+                </small>
+              </div>
+              <div className="world-asset-card__prompt">
+                <button
+                  aria-expanded={Boolean(worldPromptOpen[item.id])}
+                  className="world-asset-card__prompt-toggle"
+                  disabled={busy !== null || isGenerating}
+                  onClick={() => {
+                    const nextOpen = !worldPromptOpen[item.id]
+                    setWorldPromptOpen((current) => ({ ...current, [item.id]: nextOpen }))
+                    if (nextOpen && !worldPromptDefault[item.id] && !worldPromptDirty[item.id]) {
+                      void loadWorldPromptPreview(item.assetType, item.id)
+                    }
+                  }}
+                  type="button"
+                >
+                  <span>查看并编辑提示词</span>
+                  <ChevronDown
+                    aria-hidden="true"
+                    className={worldPromptOpen[item.id] ? 'world-asset-card__prompt-chevron is-open' : 'world-asset-card__prompt-chevron'}
+                    size={16}
+                  />
+                </button>
+                {worldPromptOpen[item.id] ? (
+                  <div className="world-asset-card__prompt-panel">
+                    {worldPromptLoading[item.id] && !worldPromptDraft[item.id] ? (
+                      <small>正在加载默认提示词…</small>
+                    ) : (
+                      <>
+                        <textarea
+                          aria-label={`${item.name}参考图提示词`}
+                          disabled={busy !== null || isGenerating || worldPromptLoading[item.id]}
+                          maxLength={4000}
+                          onChange={(event) => {
+                            const value = event.target.value
+                            setWorldPromptDraft((current) => ({ ...current, [item.id]: value }))
+                            setWorldPromptDirty((current) => ({
+                              ...current,
+                              [item.id]: value.trim() !== (worldPromptDefault[item.id] ?? '').trim(),
+                            }))
+                          }}
+                          rows={6}
+                          value={worldPromptDraft[item.id] ?? ''}
+                        />
+                        <div className="world-asset-card__prompt-actions">
+                          <small>
+                            {(worldPromptDraft[item.id] ?? '').length} / 4000
+                            {worldPromptStale[item.id] ? ' · 角色已变，可重置提示词' : ''}
+                            {' · '}系统仍会按所选张数自动追加不同风格说明。
+                          </small>
+                          <Button
+                            disabled={busy !== null || isGenerating || worldPromptLoading[item.id]}
+                            onClick={() => void loadWorldPromptPreview(item.assetType, item.id, { force: true })}
+                            size="sm"
+                            variant="secondary"
+                          >
+                            {worldPromptLoading[item.id] ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />}
+                            重置为默认
+                          </Button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ) : null}
+              </div>
               <small>主题与关键结构保持一致，系统自动分配不同风格。</small>
             </div>
             {generationJob ? (

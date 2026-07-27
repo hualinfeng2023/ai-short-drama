@@ -427,6 +427,7 @@ interface ApiCharacter {
   visual_brief: string
   status: string
   locked_candidate_id: string | null
+  locked_identity_version_id?: string | null
   lock_version: number
   candidates: Array<{
     id: string
@@ -4201,6 +4202,9 @@ function mapCharacter(character: ApiCharacter): CharacterRecord {
     ...(character.locked_candidate_id === null
       ? {}
       : { lockedCandidateId: character.locked_candidate_id }),
+    ...(character.locked_identity_version_id == null
+      ? {}
+      : { lockedIdentityVersionId: character.locked_identity_version_id }),
     lockVersion: character.lock_version,
     candidates: character.candidates.map((candidate) => ({
       id: candidate.id,
@@ -4822,6 +4826,48 @@ export async function fetchPreproduction(
   }
 }
 
+export async function previewWorldAssetReferencePrompt(
+  projectId: string,
+  assetType: 'location' | 'prop',
+  versionId: string,
+  expectedVersion: number,
+  options?: {
+    count?: number
+    characterIds?: string[]
+    sourceAssetId?: string
+    adjustmentPrompt?: string
+  },
+): Promise<{
+  basePrompt: string
+  variants: Array<{ styleId: string; styleLabel: string; prompt: string }>
+}> {
+  const data = await requestJson<{
+    base_prompt: string
+    variants: Array<{ style_id: string; style_label: string; prompt: string }>
+  }>(
+    `/api/v1/projects/${projectId}/preproduction/${assetType}/${versionId}/reference-images/preview`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        expected_version: expectedVersion,
+        count: options?.count ?? 1,
+        character_ids: options?.characterIds ?? [],
+        source_asset_id: options?.sourceAssetId,
+        adjustment_prompt: options?.adjustmentPrompt,
+      }),
+    },
+  )
+  return {
+    basePrompt: data.base_prompt,
+    variants: data.variants.map((item) => ({
+      styleId: item.style_id,
+      styleLabel: item.style_label,
+      prompt: item.prompt,
+    })),
+  }
+}
+
 export async function generateWorldAssetReference(
   projectId: string,
   assetType: 'location' | 'prop',
@@ -4830,6 +4876,10 @@ export async function generateWorldAssetReference(
   count: number,
   sourceAssetId?: string,
   adjustmentPrompt?: string,
+  options?: {
+    characterIds?: string[]
+    customBasePrompt?: string
+  },
 ): Promise<Job[]> {
   const result = await requestJson<{ job: ApiJob; jobs: ApiJob[] }>(
     `/api/v1/projects/${projectId}/preproduction/${assetType}/${versionId}/reference-images`,
@@ -4844,6 +4894,8 @@ export async function generateWorldAssetReference(
         count,
         source_asset_id: sourceAssetId,
         adjustment_prompt: adjustmentPrompt,
+        character_ids: options?.characterIds ?? [],
+        custom_base_prompt: options?.customBasePrompt,
         actor: 'demo-user',
       }),
     },

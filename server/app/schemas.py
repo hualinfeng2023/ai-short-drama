@@ -800,15 +800,33 @@ class StoryPackageGenerateRequest(BaseModel):
     actor: str = Field(default="demo-user", min_length=1, max_length=80)
 
 
-class WorldAssetImageGenerateRequest(BaseModel):
+class WorldAssetImagePromptPreviewRequest(BaseModel):
+    """预览世界资产参考图提示词（不入队）。"""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
     expected_version: int = Field(ge=1)
     count: int = Field(default=1, ge=1, le=3)
+    character_ids: list[str] = Field(default_factory=list, max_length=3)
     source_asset_id: str | None = Field(default=None, min_length=36, max_length=36)
     adjustment_prompt: str | None = Field(default=None, min_length=1, max_length=500)
-    actor: str = Field(default="demo-user", min_length=1, max_length=80)
+
+    @field_validator("character_ids")
+    @classmethod
+    def normalize_character_ids(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for item in value:
+            text = item.strip()
+            if len(text) != 36:
+                raise ValueError("character_ids 必须是合法的角色 ID")
+            if text not in normalized:
+                normalized.append(text)
+        if len(normalized) > 3:
+            raise ValueError("最多关联 3 个角色形象")
+        return normalized
 
     @model_validator(mode="after")
-    def validate_reference_refinement(self) -> "WorldAssetImageGenerateRequest":
+    def validate_reference_refinement(self) -> "WorldAssetImagePromptPreviewRequest":
         has_source = self.source_asset_id is not None
         has_adjustment = self.adjustment_prompt is not None
         if has_source != has_adjustment:
@@ -816,6 +834,11 @@ class WorldAssetImageGenerateRequest(BaseModel):
         if has_source and self.count != 1:
             raise ValueError("基于参考图修改生成时，每次只能生成 1 张候选图")
         return self
+
+
+class WorldAssetImageGenerateRequest(WorldAssetImagePromptPreviewRequest):
+    custom_base_prompt: str | None = Field(default=None, min_length=20, max_length=4000)
+    actor: str = Field(default="demo-user", min_length=1, max_length=80)
 
 
 class WorldAssetReferenceLockRequest(BaseModel):

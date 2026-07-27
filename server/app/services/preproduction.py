@@ -32,6 +32,7 @@ from app.services.image_provider import GeneratedImage
 from app.services.jobs import enqueue_job, job_to_read
 from app.services.production import list_characters
 from app.services.projects import canonical_json, content_hash, version_conflict
+from app.services.storyboards_v2 import _character_reference_asset_ids
 from app.services.workspace import project_or_404
 
 
@@ -421,6 +422,243 @@ def _world_asset_record(
     return record
 
 
+def _resolve_world_asset_characters(
+    session: Session,
+    *,
+    project_id: str,
+    character_ids: list[str],
+) -> tuple[list[Character], list[str]]:
+    """校验并解析关联角色的锁定形象参考图。"""
+    if not character_ids:
+        return [], []
+    characters: list[Character] = []
+    reference_asset_ids: list[str] = []
+    for character_id in character_ids:
+        character = session.get(Character, character_id)
+        if character is None or character.project_id != project_id:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "CHARACTER_REFERENCE_NOT_FOUND",
+                    "message": "关联角色不存在或不属于当前项目",
+                },
+            )
+        asset_ids = _character_reference_asset_ids(session, character)
+        if not asset_ids:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "CHARACTER_REFERENCE_NOT_FOUND",
+                    "message": f"角色「{character.name}」尚未锁定可用形象参考图",
+                },
+            )
+        characters.append(character)
+        for asset_id in asset_ids:
+            if asset_id not in reference_asset_ids:
+                reference_asset_ids.append(asset_id)
+    return characters, reference_asset_ids[:6]
+
+
+def _world_asset_character_lock_prompt(characters: list[Character]) -> str:
+    if not characters:
+        return ""
+    lines = [
+        (
+            f"- 参考图对应角色：{character.name}（{character.role}）；"
+            f"{(character.visual_brief or '').strip() or '沿用锁定身份五官与发型'}"
+        )
+        for character in characters
+    ]
+    return "\n".join(
+        (
+            "角色形象锁定（硬约束）：",
+            *lines,
+            "- 输入参考图是关联角色的外貌基准；画面中呈现的关联人物必须与参考图为同一人。",
+            "- 允许改变表情、姿势、景别、光线与背景；禁止换脸、混脸或另造相似替身。",
+            "- 禁止无关路人抢戏；未关联角色不要入镜。",
+        )
+    )
+
+
+def _validate_world_asset_source_asset(
+    session: Session,
+    *,
+    project_id: str,
+    asset_type: str,
+    record: LocationVersion | PropVersion,
+    source_asset_id: str | None,
+) -> Asset | None:
+    if not source_asset_id:
+        return None
+    source_asset = session.get(Asset, source_asset_id)
+    if (
+        source_asset is None
+        or source_asset.project_id != project_id
+        or source_asset.kind != "world_asset_reference"
+        or source_asset.source_entity_type != f"{asset_type}_version"
+        or source_asset.source_entity_id != record.id
+        or source_asset.status != "READY"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "WORLD_ASSET_REFERENCE_NOT_FOUND",
+                "message": "用于修改生成的参考图不存在或不属于当前资产",
+            },
+        )
+    return source_asset
+
+
+def build_world_asset_image_prompts(
+    *,
+    asset_type: str,
+    record: LocationVersion | PropVersion,
+    count: int = 1,
+    characters: list[Character] | None = None,
+    source_asset: Asset | None = None,
+    adjustment_prompt: str | None = None,
+    custom_base_prompt: str | None = None,
+) -> dict[str, object]:
+    """组装世界资产参考图基础提示词与风格变体（preview / generate 共用）。"""
+    payload = json.loads(record.payload_json)
+    linked_characters = characters or []
+    character_lock = _world_asset_character_lock_prompt(linked_characters)
+    if asset_type == "location":
+        if linked_characters:
+            default_base = (
+                f"影视短剧场景设定基准图：{record.name}。"
+                f"空间与视觉设定：{canonical_json(payload)}。"
+                "建立清晰、可重复使用的空间结构、入口方向、主光方向与关键陈设位置。"
+                "关联角色可作为空间尺度或出镜参考，不强制必须入镜；"
+                "无文字、无标志、无水印，写实电影美术概念图，横向构图。"
+            )
+        else:
+            default_base = (
+                f"影视短剧场景设定基准图：{record.name}。"
+                f"空间与视觉设定：{canonical_json(payload)}。"
+                "建立清晰、可重复使用的空间结构、入口方向、主光方向与关键陈设位置。"
+                "无人、无文字、无标志、无水印，写实电影美术概念图，横向构图。"
+            )
+        label = f"{record.name} · 场景参考图"
+        style_variants = (
+            ("cinematic-realism", "写实电影美术", "真实材质与自然光影，接近实景置景勘景照片"),
+            ("concept-art", "电影概念设计", "强化美术设计与空间层次，使用精细电影概念设计表达"),
+            ("atmospheric", "氛围叙事", "强化环境氛围、色彩关系与戏剧性光影，但保持空间结构不变"),
+        )
+    else:
+        if linked_characters:
+            default_base = (
+                f"影视短剧关键道具设定基准图：{record.name}。"
+                f"外观与叙事设定：{canonical_json(payload)}。"
+                "完整展示道具轮廓、材质、颜色、磨损和关键细节，便于跨镜头保持一致。"
+                "允许道具上呈现关联角色的外貌（如照片、画像中的人物），禁止无关路人；"
+                "无文字说明、无标志、无水印，中性背景，写实电影道具设定图。"
+            )
+        else:
+            default_base = (
+                f"影视短剧关键道具设定基准图：{record.name}。"
+                f"外观与叙事设定：{canonical_json(payload)}。"
+                "完整展示道具轮廓、材质、颜色、磨损和关键细节，便于跨镜头保持一致。"
+                "单一道具、无人物、无文字说明、无标志、无水印，中性背景，写实电影道具设定图。"
+            )
+        label = f"{record.name} · 道具参考图"
+        style_variants = (
+            ("studio-realism", "写实棚拍", "真实材质、准确比例与柔和棚拍光线"),
+            (
+                "production-design",
+                "电影道具设计",
+                "强化结构、工艺和可制作细节，使用电影道具概念设计表达",
+            ),
+            ("narrative-wear", "叙事质感", "强化与剧情相符的使用痕迹、年代感和戏剧性光影"),
+        )
+    if character_lock:
+        default_base = f"{default_base}\n{character_lock}"
+    base_prompt = (
+        custom_base_prompt.strip()
+        if custom_base_prompt and custom_base_prompt.strip()
+        else default_base
+    )
+    if source_asset is not None and adjustment_prompt is not None:
+        style_variants = (
+            (
+                "reference-refinement",
+                "修改生成",
+                (
+                    f"以输入参考图为直接视觉基础，只执行以下修改要求："
+                    f"{adjustment_prompt.strip()}。"
+                    "除明确要求修改的内容外，保持原图的主体身份、空间结构、构图关系、"
+                    "关键陈设或道具细节不变。"
+                ),
+            ),
+        )
+    variants: list[dict[str, object]] = []
+    for style_id, style_label, style_prompt in style_variants[:count]:
+        variants.append(
+            {
+                "style_id": style_id,
+                "style_label": style_label,
+                "prompt": (
+                    f"{base_prompt}"
+                    f"本候选采用「{style_label}」风格：{style_prompt}。"
+                    "必须严格保持上述同一主题、叙事设定和关键结构，不得因风格变化改写场景或道具身份。"
+                ),
+            }
+        )
+    return {
+        "base_prompt": base_prompt,
+        "default_base_prompt": default_base,
+        "label": label,
+        "variants": variants,
+    }
+
+
+def preview_world_asset_image_prompts(
+    session: Session,
+    *,
+    project_id: str,
+    asset_type: str,
+    version_id: str,
+    expected_version: int,
+    count: int = 1,
+    character_ids: list[str] | None = None,
+    source_asset_id: str | None = None,
+    adjustment_prompt: str | None = None,
+) -> dict[str, object]:
+    project = project_or_404(session, project_id)
+    if project.lock_version != expected_version:
+        raise version_conflict(project, expected_version)
+    record = _world_asset_record(
+        session,
+        project_id=project_id,
+        asset_type=asset_type,
+        version_id=version_id,
+    )
+    characters, _ = _resolve_world_asset_characters(
+        session,
+        project_id=project_id,
+        character_ids=character_ids or [],
+    )
+    source_asset = _validate_world_asset_source_asset(
+        session,
+        project_id=project_id,
+        asset_type=asset_type,
+        record=record,
+        source_asset_id=source_asset_id,
+    )
+    built = build_world_asset_image_prompts(
+        asset_type=asset_type,
+        record=record,
+        count=count,
+        characters=characters,
+        source_asset=source_asset,
+        adjustment_prompt=adjustment_prompt,
+    )
+    return {
+        "base_prompt": built["base_prompt"],
+        "variants": built["variants"],
+    }
+
+
 def request_world_asset_image_generation(
     session: Session,
     *,
@@ -429,6 +667,8 @@ def request_world_asset_image_generation(
     version_id: str,
     expected_version: int,
     count: int = 1,
+    character_ids: list[str] | None = None,
+    custom_base_prompt: str | None = None,
     source_asset_id: str | None = None,
     adjustment_prompt: str | None = None,
     actor: str,
@@ -453,78 +693,35 @@ def request_world_asset_image_generation(
         asset_type=asset_type,
         version_id=version_id,
     )
-    payload = json.loads(record.payload_json)
-    source_asset = session.get(Asset, source_asset_id) if source_asset_id else None
-    if source_asset_id and (
-        source_asset is None
-        or source_asset.project_id != project_id
-        or source_asset.kind != "world_asset_reference"
-        or source_asset.source_entity_type != f"{asset_type}_version"
-        or source_asset.source_entity_id != record.id
-        or source_asset.status != "READY"
-    ):
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "code": "WORLD_ASSET_REFERENCE_NOT_FOUND",
-                "message": "用于修改生成的参考图不存在或不属于当前资产",
-            },
-        )
-    if asset_type == "location":
-        base_prompt = (
-            f"影视短剧场景设定基准图：{record.name}。"
-            f"空间与视觉设定：{canonical_json(payload)}。"
-            "建立清晰、可重复使用的空间结构、入口方向、主光方向与关键陈设位置。"
-            "无人、无文字、无标志、无水印，写实电影美术概念图，横向构图。"
-        )
-        label = f"{record.name} · 场景参考图"
-        style_variants = (
-            ("cinematic-realism", "写实电影美术", "真实材质与自然光影，接近实景置景勘景照片"),
-            ("concept-art", "电影概念设计", "强化美术设计与空间层次，使用精细电影概念设计表达"),
-            ("atmospheric", "氛围叙事", "强化环境氛围、色彩关系与戏剧性光影，但保持空间结构不变"),
-        )
-    else:
-        base_prompt = (
-            f"影视短剧关键道具设定基准图：{record.name}。"
-            f"外观与叙事设定：{canonical_json(payload)}。"
-            "完整展示道具轮廓、材质、颜色、磨损和关键细节，便于跨镜头保持一致。"
-            "单一道具、无人物、无文字说明、无标志、无水印，中性背景，写实电影道具设定图。"
-        )
-        label = f"{record.name} · 道具参考图"
-        style_variants = (
-            ("studio-realism", "写实棚拍", "真实材质、准确比例与柔和棚拍光线"),
-            (
-                "production-design",
-                "电影道具设计",
-                "强化结构、工艺和可制作细节，使用电影道具概念设计表达",
-            ),
-            ("narrative-wear", "叙事质感", "强化与剧情相符的使用痕迹、年代感和戏剧性光影"),
-        )
-    if source_asset is not None and adjustment_prompt is not None:
-        style_variants = (
-            (
-                "reference-refinement",
-                "修改生成",
-                (
-                    f"以输入参考图为直接视觉基础，只执行以下修改要求："
-                    f"{adjustment_prompt.strip()}。"
-                    "除明确要求修改的内容外，保持原图的主体身份、空间结构、构图关系、"
-                    "关键陈设或道具细节不变。"
-                ),
-            ),
-        )
+    characters, character_reference_asset_ids = _resolve_world_asset_characters(
+        session,
+        project_id=project_id,
+        character_ids=character_ids or [],
+    )
+    source_asset = _validate_world_asset_source_asset(
+        session,
+        project_id=project_id,
+        asset_type=asset_type,
+        record=record,
+        source_asset_id=source_asset_id,
+    )
+    built = build_world_asset_image_prompts(
+        asset_type=asset_type,
+        record=record,
+        count=count,
+        characters=characters,
+        source_asset=source_asset,
+        adjustment_prompt=adjustment_prompt,
+        custom_base_prompt=custom_base_prompt,
+    )
+    resolved_character_ids = [character.id for character in characters]
     batch_id = str(uuid4())
     jobs: list[Job] = []
     replayed_flags: list[bool] = []
-    for style_slot, (style_id, style_label, style_prompt) in enumerate(
-        style_variants[:count],
-        start=1,
-    ):
-        prompt = (
-            f"{base_prompt}"
-            f"本候选采用「{style_label}」风格：{style_prompt}。"
-            "必须严格保持上述同一主题、叙事设定和关键结构，不得因风格变化改写场景或道具身份。"
-        )
+    for style_slot, variant in enumerate(built["variants"], start=1):
+        style_id = str(variant["style_id"])
+        style_label = str(variant["style_label"])
+        prompt = str(variant["prompt"])
         job, replayed = enqueue_job(
             session,
             project_id=project_id,
@@ -546,8 +743,13 @@ def request_world_asset_image_generation(
                 "style_label": style_label,
                 "source_asset_id": source_asset.id if source_asset is not None else None,
                 "adjustment_prompt": adjustment_prompt.strip() if adjustment_prompt else None,
+                "character_ids": resolved_character_ids,
+                "character_reference_asset_ids": character_reference_asset_ids,
+                "custom_base_prompt": (
+                    custom_base_prompt.strip() if custom_base_prompt else None
+                ),
             },
-            label=f"{label} · {style_label}",
+            label=f"{built['label']} · {style_label}",
             stage=f"等待生成参考图 {style_slot}/{count}",
             trace_id=trace_id,
             estimated_seconds=20,
@@ -594,6 +796,14 @@ def materialize_world_asset_image(
         height=image.height,
     )
     asset.provider = "volcengine-ark" if settings.ark_api_key else "mock"
+    character_ids = [
+        item for item in payload.get("character_ids", []) if isinstance(item, str)
+    ]
+    character_reference_asset_ids = [
+        item
+        for item in payload.get("character_reference_asset_ids", [])
+        if isinstance(item, str)
+    ]
     asset.metadata_json = canonical_json(
         {
             "model": image.model,
@@ -607,6 +817,9 @@ def materialize_world_asset_image(
             "style_label": payload.get("style_label"),
             "source_asset_id": payload.get("source_asset_id"),
             "adjustment_prompt": payload.get("adjustment_prompt"),
+            "character_ids": character_ids,
+            "character_reference_asset_ids": character_reference_asset_ids,
+            "custom_base_prompt": payload.get("custom_base_prompt"),
         }
     )
     ensure_generation_record(
@@ -618,7 +831,7 @@ def materialize_world_asset_image(
         config_version="world-asset-reference-v1",
         prompt=str(payload["prompt"]),
         seed=None,
-        reference_asset_ids=[],
+        reference_asset_ids=character_reference_asset_ids,
         provider_request_id=image.request_id,
         provider_task_id=None,
         output_asset_id=asset.id,
@@ -632,6 +845,9 @@ def materialize_world_asset_image(
             "style_label": payload.get("style_label"),
             "source_asset_id": payload.get("source_asset_id"),
             "adjustment_prompt": payload.get("adjustment_prompt"),
+            "character_ids": character_ids,
+            "character_reference_asset_ids": character_reference_asset_ids,
+            "custom_base_prompt": payload.get("custom_base_prompt"),
         },
     )
     append_event(
