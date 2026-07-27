@@ -1,10 +1,22 @@
+import json
+from datetime import UTC, datetime
+
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.db.models import AuditLog, Project
+from app.db.models import (
+    AuditLog,
+    ChangeSet,
+    Character,
+    EpisodeOutlineVersion,
+    Project,
+    ScriptVersion,
+    StoryBibleVersion,
+    StoryVersion,
+)
 from app.db.session import get_engine
 from app.seed import PROJECT_ID
 
@@ -48,9 +60,200 @@ async def test_film_ir_is_read_only_projection_of_existing_rows(
         assert session.scalar(select(func.count()).select_from(AuditLog)) == before_audits
 
 
+async def test_film_ir_links_a_character_to_a_beat_that_explicitly_mentions_them(
+    client: AsyncClient,
+) -> None:
+    with Session(get_engine(get_settings().database_url)) as session:
+        character = session.scalar(
+            select(Character)
+            .where(Character.project_id == PROJECT_ID)
+            .order_by(Character.character_key)
+            .limit(1)
+        )
+        assert character is not None
+        now = datetime.now(UTC)
+        story = StoryVersion(
+            id="a1000000-0000-4000-8000-000000000002",
+            project_id=PROJECT_ID,
+            version=1,
+            proposal_version=1,
+            source_proposal_ids_json="[]",
+            parent_version_id=None,
+            schema_version="story-dna-v1",
+            provider="test",
+            model="test",
+            config_version="test",
+            title="角色节拍联动",
+            logline="角色在叙事节拍中推进冲突。",
+            payload_json="{}",
+            content_hash="test-character-beat-story",
+            status="APPROVED",
+            approved_at=now,
+            approved_by="test",
+            created_at=now,
+        )
+        session.add(story)
+        session.flush()
+        bible = StoryBibleVersion(
+            id="a1000000-0000-4000-8000-000000000003",
+            project_id=PROJECT_ID,
+            story_version_id=story.id,
+            version=1,
+            status="APPROVED",
+            payload_json="{}",
+            critic_json="{}",
+            content_hash="test-character-beat-bible",
+            parent_version_id=None,
+            schema_version="story-bible-v1",
+            provider="test",
+            model="test",
+            config_version="test",
+            approved_at=now,
+            approved_by="test",
+            created_at=now,
+        )
+        session.add(bible)
+        session.flush()
+        outline = EpisodeOutlineVersion(
+            id="a1000000-0000-4000-8000-000000000004",
+            project_id=PROJECT_ID,
+            story_bible_version_id=bible.id,
+            relationship_graph_version_id=None,
+            episode_ordinal=1,
+            version=1,
+            status="APPROVED",
+            payload_json="{}",
+            critic_json="{}",
+            content_hash="test-character-beat-outline",
+            parent_version_id=None,
+            schema_version="episode-outline-v1",
+            provider="test",
+            model="test",
+            config_version="test",
+            approved_at=now,
+            approved_by="test",
+            created_at=now,
+        )
+        session.add(outline)
+        session.flush()
+        script = ScriptVersion(
+            id="a1000000-0000-4000-8000-000000000001",
+            project_id=PROJECT_ID,
+            outline_version_id=outline.id,
+            relationship_graph_version_id=None,
+            episode_ordinal=1,
+            version=1,
+            status="READY_FOR_REVIEW",
+            payload_json=json.dumps(
+                {
+                    "title": "角色节拍联动剧本",
+                    "short_drama_engine": {
+                        "protagonist_desire": "角色必须在关键事件中推动冲突并作出选择。",
+                        "beats": [
+                            {
+                                "sequence": 1,
+                                "scene_ordinal": 1,
+                                "description": f"{character.name} 在此节拍中推进冲突",
+                            }
+                        ]
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            critic_json="{}",
+            content_hash="test-character-beat-link",
+            parent_version_id=None,
+            schema_version="script-v1",
+            canonical_language="zh-CN",
+            provider="test",
+            model="test",
+            config_version="test",
+            estimated_duration_ms=1_000,
+            approved_at=None,
+            approved_by=None,
+            created_at=now,
+        )
+        session.add(script)
+        session.commit()
+        character_id = character.id
+
+    response = await client.get(f"/api/v1/projects/{PROJECT_ID}/film-ir")
+
+    assert response.status_code == 200, response.text
+    edges = response.json()["data"]["edges"]
+    assert any(
+        edge["relation"] == "APPEARS_IN_BEAT"
+        and edge["source"]["type"] == "Character"
+        and edge["source"]["id"] == character_id
+        and edge["target"]["type"] == "Beat"
+        for edge in edges
+    )
+
+    canvas_response = await client.get(f"/api/v1/projects/{PROJECT_ID}/canvas-projection")
+    assert canvas_response.status_code == 200, canvas_response.text
+    script_node = next(
+        node
+        for node in canvas_response.json()["data"]["nodes"]
+        if node["ref"]["id"] == f"script:{PROJECT_ID}:1"
+    )
+    assert script_node["label"] == "角色节拍联动剧本"
+    assert script_node["content_summary"] == "角色必须在关键事件中推动冲突并作出选择。"
+
+
 async def test_film_ir_unknown_project_is_not_found(client: AsyncClient) -> None:
     response = await client.get("/api/v1/projects/not-a-project/film-ir")
     assert response.status_code == 404
+
+
+async def test_canvas_projection_shows_director_proposal_observation_and_recommendation(
+    client: AsyncClient,
+) -> None:
+    with Session(get_engine(get_settings().database_url)) as session:
+        now = datetime.now(UTC)
+        change_set_id = "b1000000-0000-4000-8000-000000000001"
+        change_set = ChangeSet(
+            id=change_set_id,
+            project_id=PROJECT_ID,
+            base_timeline_id=None,
+            base_relationship_graph_id=None,
+            scope_json="{}",
+            instruction="审查第 2 场的节奏",
+            impact_json=json.dumps(
+                {
+                    "proposal": {
+                        "issue_type": "PACING",
+                        "observation": "规则说明集中出现，紧张感被削弱。",
+                        "target_objects": [],
+                        "recommended_option": "option-b",
+                        "alternatives": [
+                            {"option_id": "option-a", "title": "缩短说明"},
+                            {"option_id": "option-b", "title": "先演示规则，再揭示代价"},
+                        ],
+                        "scene_ordinal": 2,
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            estimate_json="{}",
+            status="PROPOSED",
+            result_timeline_id=None,
+            result_relationship_graph_id=None,
+            created_at=now,
+        )
+        session.add(change_set)
+        session.commit()
+
+    response = await client.get(f"/api/v1/projects/{PROJECT_ID}/canvas-projection")
+
+    assert response.status_code == 200, response.text
+    director_node = next(
+        node
+        for node in response.json()["data"]["nodes"]
+        if node["ref"] == {"type": "DirectorProposal", "id": change_set_id, "version_id": None}
+    )
+    assert director_node["label"] == "规则说明集中出现，紧张感被削弱。"
+    assert director_node["content_summary"] == "第 2 场 · 推荐：先演示规则，再揭示代价"
+    assert director_node["operation_context"] == {}
 
 
 async def test_canvas_projection_reuses_film_ir_and_exposes_only_view_state_contract(
@@ -78,11 +281,25 @@ async def test_canvas_projection_reuses_film_ir_and_exposes_only_view_state_cont
     assert {"Project", "Scene", "Shot", "Character"} <= {
         node["ref"]["type"] for node in canvas["nodes"]
     }
+    character_nodes = [node for node in canvas["nodes"] if node["ref"]["type"] == "Character"]
+    assert any(node["thumbnail_url"] for node in character_nodes)
+    assert all(node["operation_context"]["character_key"] for node in character_nodes)
+    assert all(
+        node["thumbnail_url"] is None or node["thumbnail_url"].startswith("/api/v1/assets/")
+        for node in canvas["nodes"]
+    )
     nodes_by_type = {}
     for node in canvas["nodes"]:
         nodes_by_type.setdefault(node["ref"]["type"], []).append(node)
     assert nodes_by_type["Project"][0]["detail_route"] == f"/projects/{PROJECT_ID}"
     assert nodes_by_type["Shot"][0]["detail_route"] == f"/projects/{PROJECT_ID}/storyboard"
+    assert {
+        "description",
+        "dialogue",
+        "shot_size",
+        "camera_movement",
+        "shot_lock_version",
+    } <= set(nodes_by_type["Shot"][0]["operation_context"])
     assert nodes_by_type["Scene"][0]["detail_route"].startswith(
         f"/projects/{PROJECT_ID}/episodes/"
     )

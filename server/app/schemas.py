@@ -41,6 +41,7 @@ class ProjectRead(OrmModel):
     timeline_version: int
     preview_approved: bool
     export_ready: bool
+    thumbnail_url: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -819,6 +820,7 @@ class ScriptEpisodeUpdateRequest(BaseModel):
 
 class ScriptSceneUpdateRequest(BaseModel):
     expected_version: int = Field(ge=1)
+    beat_description: str | None = Field(default=None, min_length=1, max_length=2000)
     purpose: str | None = Field(default=None, min_length=1, max_length=2000)
     emotion: str | None = Field(default=None, min_length=1, max_length=80)
     bgm_intent: str | None = Field(default=None, max_length=1000)

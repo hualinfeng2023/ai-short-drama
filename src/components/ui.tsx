@@ -715,6 +715,7 @@ export function SelectControl({
 
 const statusMeta: Record<string, { label: string; tone: string; icon: ReactNode }> = {
   DRAFT: { label: '草稿', tone: 'neutral', icon: <CircleDot size={12} /> },
+  UNREVIEWED: { label: '未审核', tone: 'neutral', icon: <CircleDot size={12} /> },
   PROPOSED: { label: '待选择', tone: 'warning', icon: <AlertTriangle size={12} /> },
   APPLIED_PENDING_APPROVAL: { label: '修改版待批准', tone: 'warning', icon: <AlertTriangle size={12} /> },
   REJECTED: { label: '已拒绝', tone: 'neutral', icon: <X size={12} /> },

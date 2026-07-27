@@ -1,5 +1,6 @@
 import { type MouseEvent as ReactMouseEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  AlertCircle,
   AlertTriangle,
   ArrowLeft,
   BookOpenCheck,
@@ -1259,7 +1260,7 @@ export function StoryPage() {
         <main aria-label={activeWorkbenchMeta.label} className="story-workbench__content" ref={workbenchContentRef}>
           <div className="story-workbench__panel" hidden={visibleWorkbenchView !== 'overview'}>
       {brief ? <section className="story-brief-baseline" aria-labelledby="story-brief-baseline-title">
-        <header><div><p className="eyebrow">方向评审依据</p><h2 id="story-brief-baseline-title">本次创作基准</h2></div><span>所有方向均应符合以下条件</span></header>
+        <header><h2 id="story-brief-baseline-title">本次创作基准</h2></header>
         <dl className="story-brief-baseline__facts">
           <div><dt>平台</dt><dd>{labelValues(brief.platformTargets.map((item) => item.platform), PLATFORM_LABELS)}</dd></div>
           <div><dt>市场</dt><dd><MarketValues markets={[brief.primaryMarket, ...brief.secondaryMarkets]} /></dd></div>
@@ -1273,8 +1274,8 @@ export function StoryPage() {
         </div>
       </section> : null}
 
-      <section className="story-section">
-        <div className="section-heading"><div><p className="eyebrow">{directionSelectionOpen ? '方向审核' : '方向基线'}</p><h2>{directionSelectionOpen ? mergeMode ? '选择要合并的故事方向' : '选择一个故事方向' : '已确认的故事方向'}</h2><p>{directionSelectionOpen ? mergeMode ? '至少选择两个方向，系统会保留各自优势并生成一个新的融合版本。' : '先比较最影响决策的差异，需要时再展开完整方案。确认后先生成可审核的故事结构与角色关系。' : '该方向已作为故事设定与角色关系的创作基线，当前阶段不再重复展示其他候选方向。'}</p></div>{directions.length === 0 ? <Button disabled={acting || project.status !== 'DRAFT'} onClick={() => void runAction(async () => { const job = await generateStoryDirections(project.id, project.lockVersion, crypto.randomUUID()); setNotice(`任务已入队：${job.stage}`); navigate(`/tasks?project=${project.id}`) })}><BookOpenCheck size={16} />生成 3 个方向</Button> : null}</div>
+      <section className={`story-section story-direction-section ${directionSelectionOpen ? '' : 'story-direction-section--confirmed'}`}>
+        <div className="section-heading"><div>{directionSelectionOpen ? <><p className="eyebrow">方向审核</p><h2>{mergeMode ? '选择要合并的故事方向' : '选择一个故事方向'}</h2><p>{mergeMode ? '至少选择两个方向，系统会保留各自优势并生成一个新的融合版本。' : '先比较最影响决策的差异，需要时再展开完整方案。确认后先生成可审核的故事结构与角色关系。'}</p></> : <div className="story-direction-heading"><h2>已确认的故事方向</h2><span className="story-direction-heading__hint"><button aria-describedby="confirmed-direction-description" aria-label="查看方向基线说明" type="button"><AlertCircle aria-hidden="true" size={16} /></button><span id="confirmed-direction-description" role="tooltip">该方向已作为故事设定与角色关系的创作基线，当前阶段不再重复展示其他候选方向。</span></span></div>}</div>{directions.length === 0 ? <Button disabled={acting || project.status !== 'DRAFT'} onClick={() => void runAction(async () => { const job = await generateStoryDirections(project.id, project.lockVersion, crypto.randomUUID()); setNotice(`任务已入队：${job.stage}`); navigate(`/tasks?project=${project.id}`) })}><BookOpenCheck size={16} />生成 3 个方向</Button> : null}</div>
         {directions.length === 0 ? <div className="story-direction-empty" role="status">
           <p>还没有故事方向。完成以下步骤后即可开始生成：</p>
           <ul className="story-prerequisite-list">

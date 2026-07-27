@@ -234,6 +234,14 @@ export function StudioProvider({ children }: { children: ReactNode }) {
       'domain.command.executed',
     ]
     eventTypes.forEach((type) => source.addEventListener(type, refresh))
+    const refreshProjectThumbnails = () => {
+      void fetchProjects()
+        .then((projects) => {
+          if (active) setProjectSummaries(projects)
+        })
+        .catch(() => undefined)
+    }
+    source.addEventListener('project.thumbnail_ready', refreshProjectThumbnails)
     return () => {
       active = false
       window.clearInterval(interval)

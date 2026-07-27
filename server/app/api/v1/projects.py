@@ -54,6 +54,7 @@ from app.services.workspace import (
     get_workspace,
     list_projects,
     project_or_404,
+    project_to_read,
     scene_or_404,
     shot_or_404,
     shot_to_read,
@@ -204,7 +205,7 @@ async def story_rewrite(
 
 @router.get("/projects/{project_id}")
 def project(project_id: str, session: Session = Depends(get_session)) -> dict[str, object]:
-    return success(ProjectRead.model_validate(project_or_404(session, project_id)))
+    return success(project_to_read(project_or_404(session, project_id)))
 
 
 @router.delete("/projects/{project_id}")

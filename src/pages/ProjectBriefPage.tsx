@@ -9,6 +9,7 @@ import {
   ListChecks,
   ListPlus,
   LoaderCircle,
+  Maximize2,
   Play,
   RefreshCw,
   RotateCcw,
@@ -33,9 +34,10 @@ import {
   suggestProjectName,
   updateProjectDraft,
 } from '../api/client'
-import { Button, getStatusLabel, PageHeader, SelectControl, StatusBadge } from '../components/ui'
+import { Button, getStatusLabel, Modal, PageHeader, SelectControl, StatusBadge } from '../components/ui'
 import { PageLoadingSkeleton } from '../components/PageLoadingSkeleton'
 import { ServiceRequiredState } from '../components/ServiceRequiredState'
+import { useProjectReadiness } from '../store/ProjectReadinessContext'
 import { useStudio } from '../store/StudioContext'
 import type {
   BriefVersionRecord,
@@ -216,13 +218,15 @@ function fitStoryIdeaTextarea(textarea: HTMLTextAreaElement): void {
 
   textarea.style.height = 'auto'
   const contentHeight = textarea.scrollHeight
-  textarea.style.height = `${Math.min(Math.max(contentHeight, minHeight), maxAutoHeight)}px`
+  const targetHeight = Math.min(Math.max(contentHeight, minHeight), maxAutoHeight)
+  textarea.style.height = `${targetHeight}px`
   textarea.style.overflowY = contentHeight > maxAutoHeight ? 'auto' : 'hidden'
 }
 
 export function ProjectBriefPage() {
   const { projectId } = useParams()
   const { apiStatus, project: activeProject, activateProject, refreshProjects } = useStudio()
+  const { readiness } = useProjectReadiness()
   const navigate = useNavigate()
   const [project, setProject] = useState<ProjectRecord | null>(null)
   const [form, setForm] = useState<BriefForm | null>(null)
@@ -257,6 +261,7 @@ export function ProjectBriefPage() {
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [briefWizardStep, setBriefWizardStep] = useState<BriefWizardStep>('core')
+  const [storyIdeaReaderOpen, setStoryIdeaReaderOpen] = useState(false)
   const storyIdeaRef = useRef<HTMLTextAreaElement>(null)
   const emotionalRewardSuggestionProjectRef = useRef<string | null>(null)
 
@@ -897,6 +902,11 @@ export function ProjectBriefPage() {
   const hasNextStepCta = Boolean(runningJobType)
     || project.status === 'RELATIONSHIP_READY'
     || project.status === 'CHARACTER_VISUAL_READY'
+  const workflowNextAction = readiness?.projectId === project.id
+    && readiness.nextActionHref !== `/projects/${project.id}`
+    && !hasNextStepCta
+    ? readiness
+    : null
   const headerActions = (
     <>
       {runningJobType ? (
@@ -928,6 +938,11 @@ export function ProjectBriefPage() {
           ) : null}
         </>
       )}
+      {workflowNextAction ? (
+        <Link className="button button--primary button--md" to={workflowNextAction.nextActionHref}>
+          {workflowNextAction.nextActionLabel}<ArrowRight size={16} />
+        </Link>
+      ) : null}
       <Link className="button button--secondary button--md" to="/projects"><ArrowLeft size={16} />项目列表</Link>
       {isActiveWorkspace ? (
         <Link
@@ -1015,10 +1030,52 @@ export function ProjectBriefPage() {
               />
               {nameSuggestionNote ? <small aria-live="polite" className="brief-field__note">{nameSuggestionNote}</small> : null}
             </div>
+            <div className="brief-field">
+              <div className="brief-field__heading brief-field__heading--recommendation">
+                <label htmlFor="brief-genre">题材</label>
+                <span className="brief-field__recommendation" title="根据当前故事想法推荐">
+                  <span>建议</span>{recommendedGenreLabel}
+                </span>
+              </div>
+              <SelectControl aria-label="题材" disabled={!editable} id="brief-genre" onChange={(event) => updateGenre(event.target.value)} value={form.genre}>
+                {!hasKnownGenre ? <option value={form.genre}>{form.genre}（旧数据）</option> : null}
+                {GENRE_OPTION_GROUPS.map((group) => (
+                  <optgroup key={group.label} label={group.label}>
+                    {group.options.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                  </optgroup>
+                ))}
+              </SelectControl>
+            </div>
+            <div className="brief-field">
+              <div className="brief-field__heading brief-field__heading--recommendation">
+                <label htmlFor="brief-visual-style">视觉风格</label>
+                <span className="brief-field__recommendation" title="根据当前故事想法与题材推荐">
+                  <span>建议</span>{recommendedVisualStyleLabel}
+                </span>
+              </div>
+              <SelectControl aria-label="视觉风格" disabled={!editable} id="brief-visual-style" onChange={(event) => updateField('style', event.target.value)} value={form.style}>
+                {!hasKnownVisualStyle ? <option value={form.style}>{form.style}（旧数据）</option> : null}
+                {VISUAL_STYLE_OPTIONS.map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </SelectControl>
+            </div>
+            <label className="brief-field"><span>目标时长</span><SelectControl aria-label="目标时长" disabled={!editable} onChange={(event) => updateField('targetDurationSec', Number(event.target.value))} value={form.targetDurationSec}><option value={45}>45 秒</option><option value={60}>60 秒</option><option value={90}>90 秒</option></SelectControl></label>
+            <label className="brief-field"><span>画幅</span><SelectControl aria-label="画幅" disabled={!editable} onChange={(event) => updateField('aspectRatio', event.target.value as BriefForm['aspectRatio'])} value={form.aspectRatio}><option value="9:16">9:16 竖屏</option><option value="16:9">16:9 横屏</option></SelectControl></label>
+            <label className="brief-field"><span>内容形态</span><SelectControl aria-label="内容形态" disabled={!editable} onChange={(event) => updateField('productionFormat', event.target.value as ProductionFormat)} value={form.productionFormat}>{PRODUCTION_FORMAT_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
             <div className="brief-field brief-field--wide">
               <div className="brief-field__heading">
                 <label htmlFor="brief-story-idea">故事想法</label>
                 <span className="brief-field__actions">
+                  <button
+                    aria-haspopup="dialog"
+                    onClick={() => setStoryIdeaReaderOpen(true)}
+                    type="button"
+                  >
+                    <Maximize2 size={12} />展开全文
+                  </button>
                   <button
                     disabled={!editable || apiStatus !== 'connected' || rewritingIdea || form.idea.trim().length < 10}
                     onClick={() => void intelligentlyRewriteIdea()}
@@ -1081,41 +1138,15 @@ export function ProjectBriefPage() {
               </div>
               {ideaRewriteNote ? <small aria-live="polite" className="brief-field__note">{ideaRewriteNote}</small> : null}
             </div>
-            <div className="brief-field">
-              <div className="brief-field__heading brief-field__heading--recommendation">
-                <label htmlFor="brief-genre">题材</label>
-                <span className="brief-field__recommendation" title="根据当前故事想法推荐">
-                  <span>建议</span>{recommendedGenreLabel}
-                </span>
-              </div>
-              <SelectControl aria-label="题材" disabled={!editable} id="brief-genre" onChange={(event) => updateGenre(event.target.value)} value={form.genre}>
-                {!hasKnownGenre ? <option value={form.genre}>{form.genre}（旧数据）</option> : null}
-                {GENRE_OPTION_GROUPS.map((group) => (
-                  <optgroup key={group.label} label={group.label}>
-                    {group.options.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-                  </optgroup>
-                ))}
-              </SelectControl>
-            </div>
-            <div className="brief-field">
-              <div className="brief-field__heading brief-field__heading--recommendation">
-                <label htmlFor="brief-visual-style">视觉风格</label>
-                <span className="brief-field__recommendation" title="根据当前故事想法与题材推荐">
-                  <span>建议</span>{recommendedVisualStyleLabel}
-                </span>
-              </div>
-              <SelectControl aria-label="视觉风格" disabled={!editable} id="brief-visual-style" onChange={(event) => updateField('style', event.target.value)} value={form.style}>
-                {!hasKnownVisualStyle ? <option value={form.style}>{form.style}（旧数据）</option> : null}
-                {VISUAL_STYLE_OPTIONS.map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </SelectControl>
-            </div>
-            <label className="brief-field"><span>目标时长</span><SelectControl aria-label="目标时长" disabled={!editable} onChange={(event) => updateField('targetDurationSec', Number(event.target.value))} value={form.targetDurationSec}><option value={45}>45 秒</option><option value={60}>60 秒</option><option value={90}>90 秒</option></SelectControl></label>
-            <label className="brief-field"><span>画幅</span><SelectControl aria-label="画幅" disabled={!editable} onChange={(event) => updateField('aspectRatio', event.target.value as BriefForm['aspectRatio'])} value={form.aspectRatio}><option value="9:16">9:16 竖屏</option><option value="16:9">16:9 横屏</option></SelectControl></label>
-            <label className="brief-field"><span>内容形态</span><SelectControl aria-label="内容形态" disabled={!editable} onChange={(event) => updateField('productionFormat', event.target.value as ProductionFormat)} value={form.productionFormat}>{PRODUCTION_FORMAT_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
+            <Modal
+              className="modal--story-idea-reader"
+              description="在浮窗中阅读完整故事想法。"
+              onClose={() => setStoryIdeaReaderOpen(false)}
+              open={storyIdeaReaderOpen}
+              title="故事想法"
+            >
+              <div className="story-idea-reader">{form.idea || '暂未填写故事想法。'}</div>
+            </Modal>
             </> : null}
 
             {briefWizardStep === 'audience' ? <>

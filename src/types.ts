@@ -200,6 +200,7 @@ export interface ProjectRecord {
   timelineVersion: number
   previewApproved: boolean
   exportReady: boolean
+  thumbnailUrl?: string | null
   createdAt: string
   updatedAt: string
 }

@@ -73,6 +73,7 @@
   --font-family-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
     "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
   --font-family-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --font-size-micro: 0.625rem;
   --font-size-caption: 0.75rem;
   --font-size-control: 0.8125rem;
   --font-size-body: 0.875rem;

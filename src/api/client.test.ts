@@ -101,8 +101,11 @@ const apiCanvasProjection = {
     canonical_status: 'ACTIVE',
     approval_status: 'DRAFT',
     label: '便利店停电',
+    content_summary: null,
     group_key: 'episode:1',
     detail_route: `/projects/${apiProject.id}/episodes/episode-1`,
+    thumbnail_url: null,
+    operation_context: { scene_id: 'scene-1' },
     read_only: true,
   }],
   edges: [],
@@ -341,6 +344,8 @@ describe('canvas projection client', () => {
     expect(canvas.nodes[0]).toMatchObject({
       ref: { type: 'Scene', id: 'scene-1', versionId: 'scene-v2' },
       approvalStatus: 'DRAFT',
+      thumbnailUrl: null,
+      operationContext: { scene_id: 'scene-1' },
       readOnly: true,
     })
     expect(canvas.viewStateContract).toEqual({

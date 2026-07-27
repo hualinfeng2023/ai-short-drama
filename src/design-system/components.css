@@ -188,10 +188,13 @@
 }
 
 .tab[aria-selected="true"] {
-  color: var(--color-text-primary);
-  background: var(--color-surface);
-  border-color: var(--color-border);
-  box-shadow: var(--shadow-control);
+  color: var(--color-action-primary);
+  background: var(--color-action-primary-soft);
+}
+
+.tab:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--color-action-primary) 24%, transparent);
+  outline-offset: 2px;
 }
 
 .tab:disabled { cursor: not-allowed; color: var(--color-text-tertiary); }

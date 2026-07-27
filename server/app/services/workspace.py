@@ -49,6 +49,18 @@ def project_or_404(session: Session, project_id: str) -> Project:
     return project
 
 
+def project_to_read(project: Project) -> ProjectRead:
+    return ProjectRead.model_validate(project).model_copy(
+        update={
+            "thumbnail_url": (
+                f"/api/v1/assets/{project.thumbnail_asset_id}/content"
+                if project.thumbnail_asset_id
+                else None
+            )
+        }
+    )
+
+
 def episode_or_404(session: Session, episode_id: str) -> Episode:
     episode = session.get(Episode, episode_id)
     if episode is None:
@@ -300,7 +312,7 @@ def list_projects(session: Session) -> list[ProjectSummary]:
         )
         result.append(
             ProjectSummary(
-                **ProjectRead.model_validate(project).model_dump(),
+                **project_to_read(project).model_dump(),
                 episode_count=episode_count,
                 scene_count=scene_count,
                 shot_count=shot_count,
@@ -331,7 +343,7 @@ def get_workspace(session: Session, project_id: str) -> WorkspaceRead:
         select(Job).where(Job.project_id == project_id).order_by(Job.created_at.desc())
     ).all()
     return WorkspaceRead(
-        project=ProjectRead.model_validate(project),
+        project=project_to_read(project),
         episode=EpisodeRead.model_validate(episode),
         scenes=[SceneRead.model_validate(scene) for scene in scenes],
         shots=[shot_to_read(session, shot) for shot in shots],

@@ -7,7 +7,7 @@ from dataclasses import replace
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
-from app.db.models import Job
+from app.db.models import Job, Project
 from app.jobs.contracts import JobExecutionContext, JobExecutionError
 from app.jobs.registry import register_job_handler
 from app.services.creative_story import (
@@ -17,6 +17,7 @@ from app.services.creative_story import (
     materialize_story_structure,
     script_package_generation_context,
 )
+from app.services.project_thumbnails import enqueue_project_thumbnail
 from app.services.proposals import materialize_mock_proposal
 from app.services.text_provider import (
     EpisodeScriptDraft,
@@ -552,10 +553,25 @@ async def generate_script_package(
     await context.checkpoint(session, job, 78, "校验关系重排与认证变化强引用")
     await context.checkpoint(session, job, 90, "写入分集大纲与剧本版本事实")
     script = materialize_script_package(session, job, result)
+    project = session.get(Project, job.project_id)
+    if project is None:
+        raise JobExecutionError(
+            "PROJECT_NOT_FOUND",
+            "项目不存在，无法生成剧本缩略图",
+            retryable=False,
+        )
+    thumbnail_job, thumbnail_replayed = enqueue_project_thumbnail(
+        session,
+        project=project,
+        script=script,
+        trace_id=job.trace_id,
+    )
     return {
         "script_id": script.id,
         "episode_ordinal": script.episode_ordinal,
         "relationship_graph_id": script.relationship_graph_version_id,
         "provider": result.provider,
         "model": result.model,
+        "thumbnail_job_id": thumbnail_job.id,
+        "thumbnail_replayed": thumbnail_replayed,
     }

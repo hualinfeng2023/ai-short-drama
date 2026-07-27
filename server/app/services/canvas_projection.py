@@ -69,6 +69,42 @@ def _detail_route(project_id: str, item: FilmIRObject) -> str:
     return routes[item.type]
 
 
+def _thumbnail_url(item: FilmIRObject) -> str | None:
+    if item.type != "Character":
+        return None
+    asset_id = item.attributes.get("thumbnail_asset_id")
+    return f"/api/v1/assets/{asset_id}/content" if isinstance(asset_id, str) and asset_id else None
+
+
+def _content_summary(item: FilmIRObject) -> str | None:
+    if item.type not in {"Beat", "DirectorProposal", "Script", "ScriptScene", "Shot"}:
+        return None
+    for field in ("summary", "description", "purpose"):
+        value = item.attributes.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _operation_context(item: FilmIRObject) -> dict[str, object]:
+    allowed_fields = {
+        "Character": {"character_key", "role"},
+        "Shot": {
+            "camera_movement",
+            "description",
+            "dialogue",
+            "shot_lock_version",
+            "shot_size",
+        },
+        "Storyboard": {"episode_ordinal", "version"},
+    }.get(item.type, set())
+    return {
+        field: item.attributes[field]
+        for field in allowed_fields
+        if item.attributes.get(field) is not None
+    }
+
+
 def get_canvas_projection(film_ir: FilmIRProjection) -> CanvasProjection:
     visible = {(item.type, item.id): item for item in film_ir.objects if item.type in VISIBLE_TYPES}
     nodes = [
@@ -78,8 +114,11 @@ def get_canvas_projection(film_ir: FilmIRProjection) -> CanvasProjection:
             canonical_status=item.canonical_status,
             approval_status=item.approval_status,
             label=_label(item),
+            content_summary=_content_summary(item),
             group_key=_group_key(item),
             detail_route=_detail_route(film_ir.project_id, item),
+            thumbnail_url=_thumbnail_url(item),
+            operation_context=_operation_context(item),
             read_only=True,
         )
         for item in visible.values()

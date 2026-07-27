@@ -1,27 +1,26 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Bell,
-  BookOpenText,
-  Boxes,
   ChevronDown,
-  CircleUserRound,
   CloudOff,
   Coins,
+  Database,
+  Eye,
   Film,
   FolderKanban,
-  Images,
   ListChecks,
   LockKeyhole,
   Menu,
   Moon,
+  MonitorCog,
   Network,
   PanelLeftClose,
   PanelLeftOpen,
-  Rocket,
+  PlugZap,
   Settings,
   ShieldCheck,
   Sun,
-  Users,
+  UserRound,
 } from 'lucide-react'
 import { Link, NavLink, Outlet, useLocation } from 'react-router'
 import { fetchJobs, fetchProjectReadiness } from '../api/client'
@@ -64,12 +63,19 @@ const navigation = [
   { to: '/settings', label: '设置', hint: '外观模式与演示数据管理', icon: Settings },
 ]
 
+const settingsSubnavItems = [
+  { id: 'appearance', label: '外观与模式', icon: Eye },
+  { id: 'runtime', label: '运行环境', icon: MonitorCog },
+  { id: 'providers', label: '服务与凭证', icon: PlugZap },
+  { id: 'data', label: '数据与恢复', icon: Database },
+] as const
+
 interface Crumb {
   label: string
   to?: string
 }
 
-function breadcrumb(pathname: string, projectName: string, projectHref: string): Crumb[] {
+export function breadcrumb(pathname: string, projectName: string, projectHref: string): Crumb[] {
   if (pathname === '/projects/new') return [{ label: '短剧库', to: '/projects' }, { label: '新建项目' }]
   if (pathname.includes('/scenes/')) return [{ label: projectName, to: projectHref }, { label: '第 1 集', to: projectHref }, { label: '场景工作台' }]
   if (pathname.endsWith('/preview')) return [{ label: projectName, to: projectHref }, { label: '第 1 集', to: projectHref }, { label: '完整小样' }]
@@ -83,6 +89,11 @@ function breadcrumb(pathname: string, projectName: string, projectHref: string):
   if (pathname === '/tasks') return [{ label: '生成任务' }]
   if (pathname === '/reviews') return [{ label: '审核中心' }]
   if (pathname === '/settings') return [{ label: '系统设置' }]
+  if (/^\/projects\/[^/]+$/.test(pathname)) return [
+    { label: '短剧库', to: '/projects' },
+    { label: projectName, to: projectHref },
+    { label: '故事设定' },
+  ]
   return [{ label: '短剧库' }]
 }
 
@@ -93,20 +104,15 @@ function projectSubnavItems(
 ) {
   return ([
     { label: '样片工作台', to: currentProjectLink, icon: Film, offlineReady: true },
-    { label: '创作画布', to: `/projects/${routeProjectId}/canvas`, icon: Network, offlineReady: false },
-    { label: '故事剧本', to: `/projects/${routeProjectId}/story`, icon: BookOpenText, offlineReady: false },
-    { label: '角色视觉', to: `/projects/${routeProjectId}/characters`, icon: Users, offlineReady: false },
-    { label: '前期资产', to: `/projects/${routeProjectId}/preproduction`, icon: Boxes, offlineReady: false },
-    { label: '动态分镜', to: `/projects/${routeProjectId}/storyboard`, icon: Images, offlineReady: false },
-    { label: '正式制作', to: `/projects/${routeProjectId}/production`, icon: Rocket, offlineReady: false },
+    { label: '项目画布', to: `/projects/${routeProjectId}/canvas`, icon: Network, offlineReady: false },
   ] as const).map((item) => ({
     ...item,
     locked: apiStatus !== 'connected' && !item.offlineReady,
   }))
 }
 
-export function shouldShowProjectWorkflow(pathname: string, projectId: string | null | undefined) {
-  return Boolean(projectId && projectId !== 'new' && !pathname.endsWith('/story'))
+export function shouldShowProjectWorkflow(_pathname: string, projectId: string | null | undefined) {
+  return Boolean(projectId && projectId !== 'new')
 }
 
 export function AppShell() {
@@ -146,12 +152,14 @@ export function AppShell() {
   const location = useLocation()
   const pathProjectId = location.pathname.match(/^\/projects\/([^/]+)/)?.[1]
   const queryProjectId = new URLSearchParams(location.search).get('project')
+  const settingsSection = new URLSearchParams(location.search).get('section') ?? 'appearance'
   const routeProjectId = queryProjectId ?? (pathProjectId && pathProjectId !== 'new' ? pathProjectId : null)
   const contextualProject = projectSummaries.find(
     (item) => item.id === routeProjectId,
   )
   const taskHref = routeProjectId ? `/tasks?project=${routeProjectId}` : '/tasks'
   const currentProjectName = contextualProject?.name ?? project.name
+  const currentProjectThumbnail = contextualProject?.thumbnailUrl ?? null
   const currentProjectLink = contextualProject && contextualProject.id !== project.id
     ? `/projects/${contextualProject.id}`
     : `/projects/${project.id}/episodes/${project.episodeId}`
@@ -341,7 +349,7 @@ export function AppShell() {
           </span>
           <span className="brand__text">
             <strong>剧创 AI</strong>
-            <small>创作工作台</small>
+            <small>短剧创作与制作</small>
           </span>
           <span className="beta">测试版</span>
         </Link>
@@ -350,17 +358,33 @@ export function AppShell() {
           <p className="sidebar__label">工作区</p>
           {navigation.map(({ to, label, hint, icon: Icon }) => {
             const href = label === '生成任务' ? taskHref : to
+            const isSettings = label === '设置'
             return (
-            <NavLink
-              className={({ isActive }) => `nav-item ${isActive ? 'nav-item--active' : ''}`}
-              key={to}
-              title={hint}
-              to={href}
-            >
-              <Icon size={18} strokeWidth={1.8} />
-              <span>{label}</span>
-              {label === '生成任务' && activeJobCount > 0 ? <em>{activeJobCount}</em> : null}
-            </NavLink>
+              <div className="sidebar__nav-group" key={to}>
+                <NavLink
+                  className={({ isActive }) => `nav-item ${isActive ? 'nav-item--active' : ''}`}
+                  title={hint}
+                  to={href}
+                >
+                  <Icon size={18} strokeWidth={1.8} />
+                  <span>{label}</span>
+                  {label === '生成任务' && activeJobCount > 0 ? <em>{activeJobCount}</em> : null}
+                </NavLink>
+                {isSettings && location.pathname === '/settings' ? (
+                  <nav aria-label="设置分类" className="sidebar__subnav sidebar__settings-subnav">
+                    {settingsSubnavItems.map(({ id, label: sectionLabel, icon: SectionIcon }) => (
+                      <NavLink
+                        className={`sidebar__subnav-item ${settingsSection === id ? 'sidebar__subnav-item--active' : ''}`}
+                        key={id}
+                        to={`/settings?section=${id}`}
+                      >
+                        <SectionIcon size={15} strokeWidth={1.8} />
+                        <span>{sectionLabel}</span>
+                      </NavLink>
+                    ))}
+                  </nav>
+                ) : null}
+              </div>
             )
           })}
         </nav>
@@ -368,14 +392,18 @@ export function AppShell() {
         <div className="sidebar__project">
           <p className="sidebar__label">当前项目</p>
           <Link to={currentProjectLink}>
-            <span className="project-monogram">{currentProjectName.slice(0, 1)}</span>
+            {currentProjectThumbnail ? (
+              <img alt="" className="project-thumbnail" src={currentProjectThumbnail} />
+            ) : (
+              <span className="project-monogram">{currentProjectName.slice(0, 1)}</span>
+            )}
             <span>
               <strong>{currentProjectName}</strong>
               <small>{currentProjectMeta}</small>
             </span>
           </Link>
           {routeProjectId ? (
-            <nav aria-label="项目内导航" className="sidebar__subnav">
+            <nav aria-label="项目工具" className="sidebar__subnav">
               {projectSubnavItems(routeProjectId, currentProjectLink, apiStatus).map(({ label, to, icon: Icon, locked }) => (
                 <NavLink
                   className={({ isActive }) => `sidebar__subnav-item ${isActive ? 'sidebar__subnav-item--active' : ''}`}
@@ -511,7 +539,7 @@ export function AppShell() {
                 }}
                 type="button"
               >
-                <CircleUserRound size={22} />
+                <UserRound size={18} strokeWidth={1.8} />
                 <span>演示用户</span>
                 <ChevronDown className="account-button__chevron" size={15} />
               </button>
@@ -572,13 +600,17 @@ export function AppShell() {
             type="button"
           />
           <aside
-            aria-label="项目内导航"
+            aria-label="项目工具"
             className="mobile-project-nav"
             id="mobile-project-nav"
           >
             <header className="mobile-project-nav__header">
               <Link className="mobile-project-nav__project" onClick={() => setMobileProjectNavOpen(false)} to={currentProjectLink}>
-                <span className="project-monogram">{currentProjectName.slice(0, 1)}</span>
+                {currentProjectThumbnail ? (
+                  <img alt="" className="project-thumbnail" src={currentProjectThumbnail} />
+                ) : (
+                  <span className="project-monogram">{currentProjectName.slice(0, 1)}</span>
+                )}
                 <span>
                   <strong>{currentProjectName}</strong>
                   <small>{currentProjectMeta}</small>

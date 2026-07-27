@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useSearchParams } from 'react-router'
 import {
   AlertTriangle,
   Check,
@@ -48,6 +49,44 @@ const themes: Array<{ id: ThemeMode; title: string }> = [
   { id: 'dark', title: '暗黑模式' },
   { id: 'system', title: '跟随系统' },
 ]
+
+type SettingsSection = 'appearance' | 'runtime' | 'providers' | 'data'
+
+function getSettingsSection(value: string | null): SettingsSection {
+  return value === 'runtime' || value === 'providers' || value === 'data' ? value : 'appearance'
+}
+
+function SettingsDetailHeader({
+  actions,
+  description,
+  eyebrow,
+  title,
+  titleId,
+}: {
+  actions?: ReactNode
+  description: string
+  eyebrow: string
+  title: string
+  titleId: string
+}) {
+  return <header className="settings-detail-header">
+    <div className="settings-detail-header__copy">
+      <p className="eyebrow">{eyebrow}</p>
+      <h2 id={titleId}>{title}</h2>
+      <p>{description}</p>
+    </div>
+    {actions ? <div className="settings-detail-header__actions">{actions}</div> : null}
+  </header>
+}
+
+function RuntimeModelValue({ value }: { value: string }) {
+  const [model, provider] = value.split(' · ')
+
+  return <p className="settings-runtime-item__value">
+    <code>{model}</code>
+    {provider ? <span className="settings-runtime-item__provider">{provider}</span> : null}
+  </p>
+}
 
 const PROMPT_MODEL_OPTIONS = [
   { id: 'doubao-seed-2-0-lite-260215', label: '豆包 Seed 2.0 Lite' },
@@ -142,7 +181,8 @@ function ConnectionResult({ result }: { result: ProviderConnectionResult | null 
 export function SettingsPage() {
   const { apiStatus, project, visualMode, setVisualMode, themeMode, setThemeMode, resetDemo, resyncCurrentProject } = useStudio()
   const { notify } = useToast()
-  const [settingsSection, setSettingsSection] = useState<'appearance' | 'runtime' | 'providers' | 'data'>('appearance')
+  const [searchParams] = useSearchParams()
+  const settingsSection = getSettingsSection(searchParams.get('section'))
   const [runtime, setRuntime] = useState<RuntimeConfig | null>(null)
   const [providerSettings, setProviderSettings] = useState<ProviderSettings | null>(null)
   const [draft, setDraft] = useState<ProviderSettings | null>(null)
@@ -332,78 +372,92 @@ export function SettingsPage() {
       description="外观、运行环境、服务凭证与数据恢复，分门别类管理。"
       title="系统设置"
     />
-    <div className="settings-shell">
-      <nav aria-label="设置分类" className="settings-nav">
-        {([
-          { id: 'appearance', label: '外观与模式', icon: Eye },
-          { id: 'runtime', label: '运行环境', icon: MonitorCog },
-          { id: 'providers', label: '服务与凭证', icon: PlugZap },
-          { id: 'data', label: '数据与恢复', icon: Database },
-        ] as const).map(({ id, label, icon: Icon }) => (
-          <button
-            aria-current={settingsSection === id ? 'page' : undefined}
-            className={settingsSection === id ? 'active' : ''}
-            key={id}
-            onClick={() => setSettingsSection(id)}
-            type="button"
-          >
-            <span className="settings-nav__icon"><Icon size={16} /></span>
-            <span className="settings-nav__text">
-              <strong>{label}</strong>
-            </span>
-            <ChevronRight className="settings-nav__chevron" size={14} />
-          </button>
-        ))}
-      </nav>
-
-      <div className="settings-content" key={settingsSection}>
+    <div className="settings-content" key={settingsSection}>
         {settingsSection === 'appearance' ? (
-          <section>
-            <div className="section-heading"><div><h2>颜色模式</h2></div></div>
-            <div className="theme-grid">{themes.map((theme) => <button aria-pressed={themeMode === theme.id} className={themeMode === theme.id ? 'active' : ''} key={theme.id} onClick={() => { if (themeMode !== theme.id) { setThemeMode(theme.id); notify(`已切换到「${theme.title}」。`, 'info') } }} type="button"><span aria-hidden="true" className={`theme-option-icon theme-option-icon--${theme.id}`}>{theme.id === 'light' ? <Sun size={18} /> : theme.id === 'dark' ? <Moon size={18} /> : <Monitor size={18} />}</span><strong>{theme.title}</strong>{themeMode === theme.id ? <Check aria-label="当前选择" size={16} /> : null}</button>)}</div>
-
-            <div className="section-heading settings-section-heading"><div><h2>工作台布局</h2></div></div>
-            <p className="settings-copy">三种布局共享同一信息架构与交互规则，切换只影响信息密度和画面层级，不会改变颜色模式。</p>
-            <div className="mode-grid">{modes.map((mode) => <button className={visualMode === mode.id ? 'active' : ''} key={mode.id} onClick={() => { if (visualMode !== mode.id) { setVisualMode(mode.id); notify(`已切换到「${mode.title}」，界面密度与层级已更新。`, 'info') } }}><span className={`mode-preview mode-preview--${mode.id}`} aria-hidden="true"><i /><i /><i /><span className="mode-preview__hint">{mode.previewHint}</span></span><div><strong>{mode.title}</strong><p>{mode.description}</p><small>{mode.tone}</small></div>{visualMode === mode.id ? <em><Check size={14} />当前</em> : null}</button>)}</div>
-          </section>
+          <Surface aria-labelledby="settings-appearance-title" className="settings-detail-panel" padding="none">
+            <SettingsDetailHeader
+              description="统一调整工作台的颜色偏好和内容密度，选择会立即应用并保存在当前浏览器。"
+              eyebrow="外观与模式"
+              title="界面显示"
+              titleId="settings-appearance-title"
+            />
+            <div className="settings-detail-body">
+              <section className="settings-group" aria-labelledby="settings-theme-title">
+                <header className="settings-group__header">
+                  <h3 id="settings-theme-title">颜色模式</h3>
+                  <p>选择亮色、暗黑或跟随系统外观。</p>
+                </header>
+                <div className="theme-grid">{themes.map((theme) => <button aria-pressed={themeMode === theme.id} className={themeMode === theme.id ? 'active' : ''} key={theme.id} onClick={() => { if (themeMode !== theme.id) { setThemeMode(theme.id); notify(`已切换到「${theme.title}」。`, 'info') } }} type="button"><span aria-hidden="true" className={`theme-option-icon theme-option-icon--${theme.id}`}>{theme.id === 'light' ? <Sun size={18} /> : theme.id === 'dark' ? <Moon size={18} /> : <Monitor size={18} />}</span><strong>{theme.title}</strong>{themeMode === theme.id ? <Check aria-label="当前选择" size={16} /> : null}</button>)}</div>
+              </section>
+              <section className="settings-group" aria-labelledby="settings-layout-title">
+                <header className="settings-group__header">
+                  <h3 id="settings-layout-title">工作台布局</h3>
+                  <p>切换信息密度和画面层级，不会改变颜色模式或业务流程。</p>
+                </header>
+                <div className="mode-grid">{modes.map((mode) => <button className={visualMode === mode.id ? 'active' : ''} key={mode.id} onClick={() => { if (visualMode !== mode.id) { setVisualMode(mode.id); notify(`已切换到「${mode.title}」，界面密度与层级已更新。`, 'info') } }} type="button"><span className={`mode-preview mode-preview--${mode.id}`} aria-hidden="true"><i /><i /><i /><span className="mode-preview__hint">{mode.previewHint}</span></span><div><strong>{mode.title}</strong><p>{mode.description}</p><small>{mode.tone}</small></div>{visualMode === mode.id ? <em><Check size={14} />当前</em> : null}</button>)}</div>
+              </section>
+            </div>
+          </Surface>
         ) : null}
 
         {settingsSection === 'runtime' ? (
-          <Surface className="runtime-card">
-            <div className="section-heading"><div><h2>本地工作台</h2></div><StatusBadge label={apiConnected ? 'API 已连接' : apiStatus === 'loading' ? '连接中' : '离线回退'} status={apiConnected ? 'APPROVED' : apiStatus === 'loading' ? 'GENERATING' : 'READY'} /></div>
-            <dl><div><dt><MonitorCog size={15} />图片模型</dt><dd>{imageLabel}</dd></div><div><dt><MonitorCog size={15} />视频模型</dt><dd>{videoLabel}</dd></div><div><dt><Database size={15} />数据来源</dt><dd>{apiConnected ? 'FastAPI + SQLite' : '浏览器本地存储'}</dd></div><div><dt><ShieldCheck size={15} />持久化流程</dt><dd>{capabilities?.mediaPipeline ? '任务 + 媒体 + 版本 + 导出' : apiConnected ? '读取能力中' : '不可用'}</dd></div></dl>
-            <small>未配置真实服务商时仍可走通确定性的模拟流程。保存方舟 API Key 后，文本、图片和视频任务会由后端 Worker 调用真实服务。</small>
+          <Surface aria-labelledby="settings-runtime-title" className="settings-detail-panel runtime-card" padding="none">
+            <SettingsDetailHeader
+              actions={<StatusBadge label={apiConnected ? 'API 已连接' : apiStatus === 'loading' ? '连接中' : '离线回退'} status={apiConnected ? 'APPROVED' : apiStatus === 'loading' ? 'GENERATING' : 'READY'} />}
+              description="查看当前模型、数据来源和持久化能力；这里仅展示运行状态，不修改服务配置。"
+              eyebrow="运行环境"
+              title="本地工作台"
+              titleId="settings-runtime-title"
+            />
+            <div className="settings-detail-body settings-stack">
+              <section className="settings-action-card settings-runtime-item">
+                <div className="settings-action-card__copy"><h3><MonitorCog size={16} />图片模型</h3><RuntimeModelValue value={imageLabel} /></div>
+              </section>
+              <section className="settings-action-card settings-runtime-item">
+                <div className="settings-action-card__copy"><h3><MonitorCog size={16} />视频模型</h3><RuntimeModelValue value={videoLabel} /></div>
+              </section>
+              <section className="settings-action-card settings-runtime-item">
+                <div className="settings-action-card__copy"><h3><Database size={16} />数据来源</h3><p className="settings-runtime-item__value">{apiConnected ? 'FastAPI + SQLite' : '浏览器本地存储'}</p></div>
+              </section>
+              <section className="settings-action-card settings-runtime-item">
+                <div className="settings-action-card__copy"><h3><ShieldCheck size={16} />持久化流程</h3><p className="settings-runtime-item__value">{capabilities?.mediaPipeline ? '任务 + 媒体 + 版本 + 导出' : apiConnected ? '读取能力中' : '不可用'}</p></div>
+              </section>
+              <p className="settings-detail-note">未配置真实服务商时仍可走通确定性的模拟流程。保存方舟 API Key 后，文本、图片和视频任务会由后端 Worker 调用真实服务。</p>
+            </div>
           </Surface>
         ) : null}
 
         {settingsSection === 'data' ? (
-          <div className="settings-stack">
-            {apiConnected ? <Surface className="reset-card">
-              <p className="eyebrow">故障恢复</p>
-              <h2>重新同步当前项目</h2>
-              <p>清除当前项目的浏览器缓存，再从 SQLite 重新读取项目、镜头与任务；不会删除服务端数据。</p>
-              <Button onClick={() => { setRecoveryNotice(null); setRecoveryOpen(true) }} variant="secondary"><RotateCcw size={16} />清除本地缓存并重新同步</Button>
-              {recoveryNotice ? <small className={`settings-recovery-notice settings-recovery-notice--${recoveryNotice.tone}`} role={recoveryNotice.tone === 'error' ? 'alert' : 'status'}>{recoveryNotice.message}</small> : null}
-            </Surface> : apiStatus === 'mock_fallback' ? <Surface className="reset-card">
-              <p className="eyebrow">离线演示</p>
-              <h2>恢复演示项目</h2>
-              <p>恢复浏览器中的内置演示场景；此模式没有连接 SQLite。</p>
-              <Button onClick={() => setPendingResetDemo(true)} variant="secondary"><RotateCcw size={16} />恢复演示项目</Button>
-            </Surface> : null}
-            <Surface className="reset-card">
-              <p className="eyebrow">浏览器本地数据</p>
-              <h2>本机保存的内容</h2>
-              <p>故事草稿、界面模式偏好、演示项目副本与新手引导标记都只保存在当前浏览器中，不会上传。</p>
-              <Button onClick={() => window.dispatchEvent(new Event('studio:show-onboarding'))} variant="secondary"><Eye size={16} />重新观看新手引导</Button>
-            </Surface>
-          </div>
+          <Surface aria-labelledby="settings-data-title" className="settings-detail-panel" padding="none">
+            <SettingsDetailHeader
+              description="管理当前项目的同步恢复，以及只保存在本机浏览器中的偏好和演示数据。"
+              eyebrow="数据与恢复"
+              title="本地数据管理"
+              titleId="settings-data-title"
+            />
+            <div className="settings-detail-body settings-stack">
+              {apiConnected ? <section className="settings-action-card">
+                <div className="settings-action-card__copy"><h3>重新同步当前项目</h3><p>清除当前项目的浏览器缓存，再从 SQLite 重新读取项目、镜头与任务；不会删除服务端数据。</p></div>
+                <div className="settings-action-card__actions">
+                  <Button onClick={() => { setRecoveryNotice(null); setRecoveryOpen(true) }} variant="secondary"><RotateCcw size={16} />清除本地缓存并重新同步</Button>
+                  {recoveryNotice ? <small className={`settings-recovery-notice settings-recovery-notice--${recoveryNotice.tone}`} role={recoveryNotice.tone === 'error' ? 'alert' : 'status'}>{recoveryNotice.message}</small> : null}
+                </div>
+              </section> : apiStatus === 'mock_fallback' ? <section className="settings-action-card">
+                <div className="settings-action-card__copy"><p className="eyebrow">离线演示</p><h3>恢复演示项目</h3><p>恢复浏览器中的内置演示场景；此模式没有连接 SQLite。</p></div>
+                <div className="settings-action-card__actions"><Button onClick={() => setPendingResetDemo(true)} variant="secondary"><RotateCcw size={16} />恢复演示项目</Button></div>
+              </section> : null}
+              <section className="settings-action-card">
+                <div className="settings-action-card__copy"><h3>本机保存的内容</h3><p>故事草稿、界面模式偏好、演示项目副本与新手引导标记都只保存在当前浏览器中，不会上传。</p></div>
+                <div className="settings-action-card__actions"><Button onClick={() => window.dispatchEvent(new Event('studio:show-onboarding'))} variant="secondary"><Eye size={16} />重新观看新手引导</Button></div>
+              </section>
+            </div>
+          </Surface>
         ) : null}
 
         {settingsSection === 'providers' ? (
-          <section className="provider-settings-panel">
-            <header className="provider-settings-header">
-              <div><h2>服务与凭证</h2><p>集中管理创作模型和媒体存储。设置只保存在本机服务端。</p></div>
-              <div className="provider-settings-header__actions">
+          <section aria-labelledby="settings-providers-title" className="settings-detail-panel provider-settings-panel">
+            <SettingsDetailHeader
+              actions={<>
                 <span className={hasProviderChanges ? 'settings-sync-state settings-sync-state--dirty' : 'settings-sync-state'}>
                   <i />{hasProviderChanges ? '有未保存更改' : providerSettings?.storage.updatedAt ? '配置已同步' : '使用环境配置'}
                 </span>
@@ -411,8 +465,12 @@ export function SettingsPage() {
                   {saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}
                   {saving ? '正在保存' : '保存更改'}
                 </Button>
-              </div>
-            </header>
+              </>}
+              description="集中管理创作模型和媒体存储；凭证只保存在本机服务端，不会进入浏览器。"
+              eyebrow="服务与凭证"
+              title="生成服务配置"
+              titleId="settings-providers-title"
+            />
             {notice ? <div className={`brief-save-message brief-save-message--${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'}>{notice.message}</div> : null}
             {!draft ? (apiConnected
               ? <div className="provider-settings-loading"><LoaderCircle className="spin" size={20} />正在读取服务端 API 设置…</div>
@@ -433,13 +491,13 @@ export function SettingsPage() {
                 <p className="provider-sidebar__label">服务商</p>
                 <button aria-pressed={activeProvider === 'ark'} className={activeProvider === 'ark' ? 'active' : ''} onClick={() => setActiveProvider('ark')} type="button">
                   <span className="provider-nav-icon"><PlugZap size={18} /></span>
-                  <span><strong>火山方舟</strong><small>文本 · 图片 · 视频</small></span>
+                  <span><strong>火山方舟</strong></span>
                   <span className={arkConfigured ? 'provider-nav-status provider-nav-status--ready' : 'provider-nav-status'}>{arkConfigured ? '已连接' : '未配置'}</span>
                   <ChevronRight size={15} />
                 </button>
                 <button aria-pressed={activeProvider === 'tos'} className={activeProvider === 'tos' ? 'active' : ''} onClick={() => setActiveProvider('tos')} type="button">
                   <span className="provider-nav-icon"><Cloud size={18} /></span>
-                  <span><strong>火山 TOS</strong><small>私有媒体中转</small></span>
+                  <span><strong>火山 TOS</strong></span>
                   <span className={tosConfigured && draft.tos.enabled ? 'provider-nav-status provider-nav-status--ready' : 'provider-nav-status'}>{draft.tos.enabled ? tosConfigured ? '已启用' : '待补全' : '未启用'}</span>
                   <ChevronRight size={15} />
                 </button>
@@ -525,7 +583,6 @@ export function SettingsPage() {
       </div>}
     </section>
         ) : null}
-      </div>
     </div>
     <Modal
       description="这会放弃尚未写入服务端的浏览器缓存，然后从 SQLite 重新读取当前项目。服务端项目和版本记录不会被删除。"

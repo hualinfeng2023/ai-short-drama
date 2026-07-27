@@ -29,7 +29,7 @@ describe('getCompletedJobCta', () => {
       jobType: 'GENERATE_SCRIPT_PACKAGE',
     }, 'project-id')).toEqual({
       href: '/projects/project-id/story',
-      label: '查看分集大纲与剧本',
+      label: '查看',
     })
   })
 

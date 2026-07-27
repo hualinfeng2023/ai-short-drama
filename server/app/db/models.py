@@ -36,6 +36,7 @@ class Project(Base):
     export_ready: Mapped[bool] = mapped_column(Boolean, default=False)
     current_story_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     current_timeline_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    thumbnail_asset_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 

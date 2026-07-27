@@ -1,6 +1,5 @@
 import {
   AlertTriangle,
-  ArrowRight,
   Check,
   Circle,
   LoaderCircle,
@@ -13,15 +12,10 @@ import type { ProjectStage, ProjectStageStatus } from '../types'
 
 const STAGE_STATUS_LABELS: Record<ProjectStageStatus, string> = {
   COMPLETE: '已完成',
-  CURRENT: '当前阶段',
+  CURRENT: '项目当前阶段',
   IN_PROGRESS: '进行中',
   BLOCKED: '受阻',
   LOCKED: '未解锁',
-}
-
-function normalizeRoutePath(path: string) {
-  const pathname = path.split(/[?#]/)[0] || '/'
-  return pathname.length > 1 ? pathname.replace(/\/+$/, '') : pathname
 }
 
 function StageIcon({ stage }: { stage: ProjectStage }) {
@@ -88,33 +82,9 @@ export function ProjectWorkflowBar() {
 
   const activeStage = readiness.stages.find((stage) => stage.key === readiness.activeStageKey)
   const activeStageIndex = readiness.stages.findIndex((stage) => stage.key === readiness.activeStageKey)
-  const stagePosition = activeStageIndex >= 0
-    ? `第 ${activeStageIndex + 1}/${readiness.stages.length} 阶段`
-    : '项目阶段'
-  const stageSummary = readiness.summaryStatus === 'IN_PROGRESS' && readiness.activeJobCount > 0
-    ? `${stagePosition} · ${readiness.activeJobCount} 个任务进行中`
-    : `${stagePosition} · ${activeStage?.label ?? '项目概览'}`
-  const nextActionIsCurrentRoute = normalizeRoutePath(location.pathname)
-    === normalizeRoutePath(readiness.nextActionHref)
 
   return (
     <section className="project-workflow" aria-label="项目制作阶段">
-      <header>
-        <div>
-          <strong>
-            {readiness.summaryStatus === 'IN_PROGRESS' && readiness.activeJobCount > 0
-              ? <LoaderCircle aria-hidden="true" className="spin project-workflow__jobs-icon" size={12} />
-              : null}
-            {stageSummary}
-          </strong>
-        </div>
-        {nextActionIsCurrentRoute ? null : (
-          <Link to={readiness.nextActionHref}>
-            {readiness.nextActionLabel}
-            <ArrowRight aria-hidden="true" size={13} />
-          </Link>
-        )}
-      </header>
       <div
         aria-label={`制作进度：第 ${activeStageIndex + 1}/${readiness.stages.length} 阶段`}
         className="project-workflow__mobile-progress"
