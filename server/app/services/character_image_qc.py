@@ -1,9 +1,11 @@
+import base64
 import json
+import math
 from dataclasses import dataclass
 from io import BytesIO
 
 import httpx
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageChops, ImageOps, ImageStat, UnidentifiedImageError
 
 from app.config import Settings
 from app.services.identity_consistency import _output_text, image_data_url
@@ -14,6 +16,20 @@ CHARACTER_IMAGE_CHECK_TYPES = (
     "FOREGROUND_CLEAR",
     "BODY_CONTINUITY",
     "PURE_WHITE_BACKGROUND",
+)
+DISTINCT_IDENTITY_COPY_THRESHOLD = 0.94
+CONTACT_SHADOW_LOCATIONS = ("脚下", "脚部下方", "身体下方", "主体下方", "襁褓下方")
+CONTACT_SHADOW_DISALLOWED = (
+    "大面积",
+    "明显阴影",
+    "浓重",
+    "深色",
+    "拖长",
+    "渐变",
+    "纹理",
+    "环境",
+    "灰白背景",
+    "有色背景",
 )
 
 
@@ -55,6 +71,100 @@ def _open_rgb(content: bytes) -> Image.Image | None:
             return ImageOps.exif_transpose(source).convert("RGB")
     except (OSError, UnidentifiedImageError):
         return None
+
+
+def _decode_image_data_url(value: str) -> bytes | None:
+    if not value.startswith("data:image/") or ";base64," not in value:
+        return None
+    try:
+        return base64.b64decode(value.split(";base64,", 1)[1], validate=True)
+    except (ValueError, TypeError):
+        return None
+
+
+def _near_duplicate_similarity(left: bytes, right: bytes) -> float | None:
+    left_image = _open_rgb(left)
+    right_image = _open_rgb(right)
+    if left_image is None or right_image is None:
+        return None
+    size = (256, 256)
+    left_image = ImageOps.fit(left_image, size, Image.Resampling.LANCZOS)
+    right_image = ImageOps.fit(right_image, size, Image.Resampling.LANCZOS)
+    difference = ImageChops.difference(left_image, right_image)
+    channel_rms = ImageStat.Stat(difference).rms
+    normalized_rmse = (
+        math.sqrt(sum(value * value for value in channel_rms) / len(channel_rms)) / 255
+    )
+    return max(0.0, min(1.0, 1.0 - normalized_rmse))
+
+
+def _append_distinct_identity_check(
+    report: CharacterImageQualityReport,
+    image: GeneratedImage,
+    reference_images: list[str] | None,
+) -> CharacterImageQualityReport:
+    if not reference_images:
+        return report
+    scores = [
+        score
+        for value in reference_images
+        if (content := _decode_image_data_url(value)) is not None
+        if (score := _near_duplicate_similarity(image.content, content)) is not None
+    ]
+    if not scores:
+        return report
+    similarity = max(scores)
+    copied = similarity >= DISTINCT_IDENTITY_COPY_THRESHOLD
+    check = CharacterImageCheck(
+        "DISTINCT_IDENTITY",
+        "FAILED" if copied else "PASSED",
+        similarity,
+        (
+            "生成结果与亲属证据图近似复制，已阻止进入可选候选"
+            if copied
+            else "生成结果未近似复制亲属证据图"
+        ),
+    )
+    return CharacterImageQualityReport(
+        status="FAILED" if copied else report.status,
+        provider=report.provider,
+        model=report.model,
+        checks=(*report.checks, check),
+    )
+
+
+def _is_permitted_contact_shadow(reason: str) -> bool:
+    return (
+        "阴影" in reason
+        and any(item in reason for item in CONTACT_SHADOW_LOCATIONS)
+        and not any(item in reason for item in CONTACT_SHADOW_DISALLOWED)
+    )
+
+
+def apply_character_image_quality_policy(
+    report: CharacterImageQualityReport,
+) -> CharacterImageQualityReport:
+    checks = tuple(
+        CharacterImageCheck(
+            check.check_type,
+            "PASSED",
+            check.score,
+            "仅存在紧贴主体的低对比度自然接触阴影，按当前纯白背景规则允许",
+        )
+        if (
+            check.check_type == "PURE_WHITE_BACKGROUND"
+            and check.status == "FAILED"
+            and _is_permitted_contact_shadow(check.message)
+        )
+        else check
+        for check in report.checks
+    )
+    return CharacterImageQualityReport(
+        status="PASSED" if all(check.status == "PASSED" for check in checks) else report.status,
+        provider=report.provider,
+        model=report.model,
+        checks=checks,
+    )
 
 
 def detect_lower_right_watermark(content: bytes, mime: str) -> bool:
@@ -105,9 +215,7 @@ def _white_background_ratio(content: bytes) -> float | None:
     samples: list[tuple[int, int, int]] = []
     samples.extend(image.crop((0, 0, image.width, border_width)).get_flattened_data())
     samples.extend(
-        image.crop(
-            (0, image.height - border_width, image.width, image.height)
-        ).get_flattened_data()
+        image.crop((0, image.height - border_width, image.width, image.height)).get_flattened_data()
     )
     samples.extend(
         image.crop(
@@ -149,11 +257,7 @@ def _manual_report(image: GeneratedImage) -> CharacterImageQualityReport:
         ),
         CharacterImageCheck(
             "PURE_WHITE_BACKGROUND",
-            (
-                "PASSED"
-                if white_ratio is not None and white_ratio >= 0.98
-                else "REVIEW_REQUIRED"
-            ),
+            ("PASSED" if white_ratio is not None and white_ratio >= 0.98 else "REVIEW_REQUIRED"),
             white_ratio,
             (
                 "画面边缘符合纯白背景要求"
@@ -199,6 +303,8 @@ async def evaluate_character_image_quality(
     settings: Settings,
     image: GeneratedImage,
     *,
+    distinct_identity_reference_images: list[str] | None = None,
+    quality_context: str | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> CharacterImageQualityReport:
     if image.model == "deterministic-image-v1":
@@ -206,14 +312,22 @@ async def evaluate_character_image_quality(
             CharacterImageCheck(item, "PASSED", 1.0, "确定性模拟资产通过测试规则")
             for item in CHARACTER_IMAGE_CHECK_TYPES
         )
-        return CharacterImageQualityReport(
-            status="PASSED",
-            provider="deterministic-rules",
-            model=image.model,
-            checks=checks,
+        return _append_distinct_identity_check(
+            CharacterImageQualityReport(
+                status="PASSED",
+                provider="deterministic-rules",
+                model=image.model,
+                checks=checks,
+            ),
+            image,
+            distinct_identity_reference_images,
         )
     if not settings.ark_api_key:
-        return _manual_report(image)
+        return _append_distinct_identity_check(
+            _manual_report(image),
+            image,
+            distinct_identity_reference_images,
+        )
 
     instruction = (
         "你是角色设定图生成后质检员。只审核这张图片，并分别判断："
@@ -223,13 +337,22 @@ async def evaluate_character_image_quality(
         "没有断裂、融合、重复或异常缺失；若主体本来没有人体，改为检查其视觉结构连续，"
         "不得仅因没有人体而判失败；"
         "4. pure_white_background：人物轮廓外是否为均匀 #FFFFFF 纯白背景，"
-        "没有渐变、纹理、阴影、环境或反射。"
+        "没有渐变、纹理、环境或反射。允许脚底、身体或襁褓正下方紧贴主体、"
+        "范围小且低对比度的自然接触阴影，不得仅因此判失败；"
+        "大面积、明显或拖长的投影仍应判失败。"
         "每项 passed=true 表示符合要求。只输出 JSON，不要 Markdown："
         '{"watermark":{"passed":true,"confidence":0.0,"reason":"中文理由"},'
         '"foreground_occlusion":{"passed":true,"confidence":0.0,"reason":"中文理由"},'
         '"body_continuity":{"passed":true,"confidence":0.0,"reason":"中文理由"},'
         '"pure_white_background":{"passed":true,"confidence":0.0,"reason":"中文理由"}}'
     )
+    if (quality_context or "").upper().startswith("INFANT_"):
+        instruction += (
+            "当前主体是新生儿或婴儿。婴儿可以自然平躺或被襁褓包裹；"
+            "躯干、腿和脚被襁褓合理遮蔽属于正常情况，不得仅因腿脚未露出而将 "
+            "body_continuity 判为失败。应检查可见身体部位和襁褓外轮廓是否符合生理结构，"
+            "只有出现肢体从襁褓外异常突出、重复、融合、断裂或不可能的轮廓时才判失败。"
+        )
     content = [
         {"type": "input_text", "text": instruction},
         {"type": "input_image", "image_url": image_data_url(image.content, image.mime)},
@@ -257,7 +380,11 @@ async def evaluate_character_image_quality(
                 raise ValueError("quality response text missing")
             parsed = _parse_visual_report(output)
     except (httpx.HTTPError, ValueError, json.JSONDecodeError):
-        return _manual_report(image)
+        return _append_distinct_identity_check(
+            _manual_report(image),
+            image,
+            distinct_identity_reference_images,
+        )
 
     mapping = (
         ("WATERMARK_FREE", "watermark"),
@@ -274,9 +401,15 @@ async def evaluate_character_image_quality(
         )
         for check_type, key in mapping
     )
-    return CharacterImageQualityReport(
-        status="PASSED" if all(item.status == "PASSED" for item in checks) else "FAILED",
-        provider="volcengine-ark",
-        model=settings.ark_prompt_model,
-        checks=checks,
+    return _append_distinct_identity_check(
+        apply_character_image_quality_policy(
+            CharacterImageQualityReport(
+                status="PASSED" if all(item.status == "PASSED" for item in checks) else "FAILED",
+                provider="volcengine-ark",
+                model=settings.ark_prompt_model,
+                checks=checks,
+            )
+        ),
+        image,
+        distinct_identity_reference_images,
     )

@@ -633,6 +633,12 @@ export interface CharacterVisualRecord {
     seed: string
     status: string
     reviewStatus: string
+    qualityIssues: Array<{
+      type: string
+      status: string
+      score?: number
+      message: string
+    }>
     selected: boolean
     deletable: boolean
     deleteBlockReason?: string
@@ -658,6 +664,12 @@ export interface CharacterVisualRecord {
       assetId: string
       assetUrl: string
       status: string
+      qualityIssues: Array<{
+        type: string
+        status: string
+        score?: number
+        message: string
+      }>
     }>
     viewJobs: Array<{
       id: string
@@ -926,6 +938,19 @@ export interface BriefRequirementsSuggestionInput {
 
 export interface BriefRequirementsSuggestion {
   items: string[]
+  provider: string
+  model: string
+  warning?: string
+}
+
+export interface BriefEmotionalRewardSuggestionInput {
+  idea: string
+  genre: string
+}
+
+export interface BriefEmotionalRewardSuggestion {
+  reward: EmotionalReward
+  rationale: string
   provider: string
   model: string
   warning?: string
@@ -1819,6 +1844,30 @@ export async function suggestBriefRequirements(
   })
   return {
     items: result.items,
+    provider: result.provider,
+    model: result.model,
+    warning: result.warning ?? undefined,
+  }
+}
+
+export async function suggestBriefEmotionalReward(
+  projectId: string,
+  input: BriefEmotionalRewardSuggestionInput,
+): Promise<BriefEmotionalRewardSuggestion> {
+  const result = await requestJson<{
+    reward: EmotionalReward
+    rationale: string
+    provider: string
+    model: string
+    warning: string | null
+  }>(`/api/v1/projects/${projectId}/brief-emotional-reward-suggestions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  return {
+    reward: result.reward,
+    rationale: result.rationale,
     provider: result.provider,
     model: result.model,
     warning: result.warning ?? undefined,
@@ -4015,6 +4064,14 @@ export async function fetchCharacterVisuals(
           seed: String(item.seed),
           status: String(item.status),
           reviewStatus: String(item.review_status),
+          qualityIssues: (
+            (item.quality_issues ?? []) as Array<Record<string, unknown>>
+          ).map((issue) => ({
+            type: String(issue.type ?? 'UNKNOWN'),
+            status: String(issue.status ?? 'FAILED'),
+            ...(typeof issue.score === 'number' ? { score: issue.score } : {}),
+            message: String(issue.message ?? '该项质量检查未通过'),
+          })),
           selected: Boolean(item.selected),
           deletable: Boolean(item.deletable),
           ...(item.delete_block_reason == null
@@ -4050,6 +4107,14 @@ export async function fetchCharacterVisuals(
             assetId: String(asset.asset_id),
             assetUrl: String(asset.asset_url),
             status: String(asset.status),
+            qualityIssues: (
+              (asset.quality_issues ?? []) as Array<Record<string, unknown>>
+            ).map((issue) => ({
+              type: String(issue.type ?? 'UNKNOWN'),
+              status: String(issue.status ?? 'FAILED'),
+              ...(typeof issue.score === 'number' ? { score: issue.score } : {}),
+              message: String(issue.message ?? '该项质量检查未通过'),
+            })),
           })),
           viewJobs: ((item.view_jobs ?? []) as Array<Record<string, unknown>>).map((job) => ({
             id: String(job.id),

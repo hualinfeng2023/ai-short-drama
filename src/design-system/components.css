@@ -7,22 +7,34 @@
 .ds-surface {
   min-width: 0;
   color: var(--color-text-primary);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
+  background: var(--color-surface-section);
+  border: 1px solid var(--color-outline-static);
   border-radius: var(--radius-surface);
+  box-shadow: var(--shadow-static);
 }
 
 .ds-surface[data-tone="subtle"] { background: var(--color-surface-subtle); }
 .ds-surface[data-tone="muted"] { background: var(--color-surface-muted); }
+.ds-surface[data-tone="info"] { background: var(--color-surface-info-soft); }
+.ds-surface[data-tone="success"] { background: var(--color-surface-success-soft); }
+.ds-surface[data-tone="warning"] { background: var(--color-surface-warning-soft); }
+.ds-surface[data-tone="danger"] { background: var(--color-surface-danger-soft); }
 .ds-surface[data-tone="transparent"] { background: transparent; border-color: transparent; }
+.ds-surface[data-outline="interactive"] { border-color: var(--color-outline-interactive); }
+.ds-surface[data-outline="interactive"]:hover { border-color: var(--color-outline-interactive-hover); }
+.ds-surface[data-outline="selected"] { border-color: var(--color-outline-selected); box-shadow: var(--shadow-selected); }
+.ds-surface[data-outline="editing"] { border-color: var(--color-outline-editing); }
+.ds-surface[data-outline="warning"] { border-color: var(--color-outline-warning); }
+.ds-surface[data-outline="danger"] { border-color: var(--color-outline-danger); }
 .ds-surface[data-padding="none"] { padding: var(--space-0); }
 .ds-surface[data-padding="sm"] { padding: var(--space-3); }
 .ds-surface[data-padding="md"] { padding: var(--space-4); }
 .ds-surface[data-padding="lg"] { padding: var(--layout-panel-padding); }
 .ds-surface[data-radius="control"] { border-radius: var(--radius-control); }
 .ds-surface[data-radius="panel"] { border-radius: var(--radius-panel); }
+.ds-surface[data-elevation="none"] { box-shadow: var(--shadow-static); }
 .ds-surface[data-elevation="surface"] { box-shadow: var(--shadow-surface); }
-.ds-surface[data-elevation="floating"] { box-shadow: var(--shadow-floating); }
+.ds-surface[data-elevation="floating"] { box-shadow: var(--shadow-raised); }
 
 .ds-stack {
   display: flex;

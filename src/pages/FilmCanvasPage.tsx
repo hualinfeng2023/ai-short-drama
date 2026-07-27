@@ -384,12 +384,12 @@ export function FilmCanvasPage() {
       await Promise.all([load(undefined, true), loadDirectorProposals()])
       notify(
         action.type === 'EXECUTE'
-          ? '修改版剧本已创建；受影响下游对象已标记为需要复核。'
+          ? '修改版剧本已创建；相关内容已标记为待检查。'
           : action.decision === 'APPROVE'
-            ? 'Director 修改版已批准。'
+            ? '已确认使用这个修改版。'
             : action.decision === 'ROLLBACK'
-              ? '恢复版本已创建，全部版本均可追溯。'
-              : 'Director 建议已拒绝，剧本未发生变化。',
+              ? '已恢复原来的版本，之前的版本仍然保留。'
+              : '未采用这条建议，剧本没有变化。',
       )
     } catch (reason) {
       setDirectorError(
@@ -570,15 +570,15 @@ export function FilmCanvasPage() {
       ) : null}
 
       <ImpactConfirmModal
-        cancelLabel="暂不处理"
+        cancelLabel="先不处理"
         confirmLabel={
           directorAction?.type === 'EXECUTE'
-            ? '确认创建修改版'
+            ? '采用并生成修改版'
             : directorAction?.decision === 'APPROVE'
-              ? '批准修改版'
+              ? '确认使用这版'
               : directorAction?.decision === 'ROLLBACK'
-                ? '创建恢复版本'
-                : '拒绝建议'
+                ? '恢复原来的版本'
+                : '不采用'
         }
         confirmVariant={
           directorAction?.type === 'DECIDE' && directorAction.decision === 'REJECT'
@@ -592,28 +592,34 @@ export function FilmCanvasPage() {
         items={directorAction ? [
           {
             icon: <GitMerge size={16} />,
-            title: directorAction.type === 'EXECUTE' ? '创建新剧本版本' : '记录明确决策',
+            title: directorAction.type === 'EXECUTE' ? '保留原稿，另存修改版' : '保存这次选择',
             detail: directorAction.type === 'EXECUTE'
-              ? '原剧本不会被覆盖；所选修改将写入新的 ScriptVersion。'
-              : '本次批准、拒绝或回退会进入 Proposal 与 Command 审计记录。',
+              ? '原来的剧本不会变；这次调整会另存为一个新版本。'
+              : '系统会记下你是采用、不采用，还是恢复原稿，之后可以查到。',
           },
           {
             icon: <AlertTriangle size={16} />,
-            title: `影响 ${directorAction.proposal.affectedObjects.length} 项下游对象`,
+            title: directorAction.proposal.affectedObjects.length
+              ? `还需检查 ${directorAction.proposal.affectedObjects.length} 项相关内容`
+              : '没有其他内容受影响',
             detail: directorAction.proposal.affectedObjects.length
-              ? '作用域内镜头、Take 与时间线片段会标记为需要复核。'
-              : '当前尚无绑定的生产资产，不需要触发重生成。',
+              ? '与这次修改有关的镜头和时间安排会标记为待检查，不会自动重做。'
+              : '目前没有关联的镜头或成片素材，不需要重新生成。',
           },
           {
             icon: <LockKeyhole size={16} />,
-            title: `保护 ${directorAction.proposal.preservedObjects.length} 项范围外资产`,
-            detail: '范围外 Approved Take 将通过状态哈希校验保持不变。',
+            title: directorAction.proposal.preservedObjects.length
+              ? `其他 ${directorAction.proposal.preservedObjects.length} 项内容保持不变`
+              : '没有需要额外保护的内容',
+            detail: directorAction.proposal.preservedObjects.length
+              ? '这次修改范围之外的已确认内容不会改变。'
+              : '当前没有范围外的已确认内容。',
           },
           ...(directorApprovalRequiresOverride(directorAction)
             ? [{
                 icon: <AlertTriangle size={16} />,
-                title: '时长门禁需要人工覆盖',
-                detail: '批准不会触发昂贵生成，但必须记录接受当前时长风险的原因。',
+                title: '需要说明为什么仍要采用',
+                detail: '当前修改可能影响时长。请确认风险可以接受，并写下后续检查方式。',
               }]
             : []),
         ] : []}
@@ -626,21 +632,21 @@ export function FilmCanvasPage() {
         }}
         onConfirm={() => void confirmDirectorAction()}
         open={directorAction !== null}
-        subtitle="该操作只修改已展示的影响范围，不会触发正式视频、配音或音乐生成。"
+        subtitle="这次只改你刚才看到的内容，不会生成视频、配音或音乐。"
         title={
           directorAction?.type === 'EXECUTE'
-            ? '采用 Director 修复方案？'
+            ? '采用这个修改方案？'
             : directorAction?.decision === 'APPROVE'
-              ? '批准这次修改？'
+              ? '确认使用这个修改版？'
               : directorAction?.decision === 'ROLLBACK'
-                ? '回退到修改前内容？'
-                : '拒绝这条 Director 建议？'
+                ? '恢复到修改前？'
+                : '不采用这条建议？'
         }
       >
         {directorApprovalRequiresOverride(directorAction) ? (
           <label className="director-approval-override">
-            <strong>覆盖理由</strong>
-            <span>说明为什么当前时长风险仍可接受，以及后续如何复核。</span>
+            <strong>为什么仍要采用？</strong>
+            <span>系统已按当前时长问题填写了一版，你可以直接修改。</span>
             <textarea
               autoFocus
               maxLength={1000}

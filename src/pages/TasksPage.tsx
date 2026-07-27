@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ArrowRight, Ban, Clock3, LoaderCircle, RotateCcw, X } from 'lucide-react'
+import { ArrowRight, Ban, Clock3, Copy, LoaderCircle, RotateCcw, X } from 'lucide-react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import {
   cancelPersistedJob,
@@ -24,12 +24,23 @@ const ACTIVE_JOB_STATUSES = new Set<JobStatus>([
 ])
 
 /** 将后端 stage 拆成主说明与次要元信息，便于分行展示 */
-function splitJobStage(stage: string): { message: string; meta: string[] } {
+export function splitJobStage(stage: string): { message: string; meta: string[] } {
   const localized = localizeDisplayText(stage).trim()
   if (!localized) return { message: '', meta: [] }
   const parts = localized.split(' · ').map((part) => part.trim()).filter(Boolean)
   if (parts.length <= 1) return { message: localized, meta: [] }
-  return { message: parts[0], meta: parts.slice(1) }
+  return {
+    message: parts[0],
+    meta: parts.slice(1).filter((part) => !/^已等待\s*\d+\s*秒$/.test(part)),
+  }
+}
+
+/** 保留首尾识别信息，避免相同 UUID 前缀的任务在列表中看起来完全相同 */
+export function compactJobId(jobId: string) {
+  const normalized = jobId.trim()
+  return normalized.length <= 12
+    ? normalized
+    : `${normalized.slice(0, 4)}…${normalized.slice(-4)}`
 }
 
 const eventTypes = [
@@ -246,6 +257,15 @@ export function TasksPage() {
     }
   }
 
+  async function copyJobId(jobId: string) {
+    try {
+      await navigator.clipboard.writeText(jobId)
+      notify('任务追踪码已复制。', 'success')
+    } catch {
+      notify('复制失败，请稍后重试。', 'error')
+    }
+  }
+
   return <div className="page page--tasks">
     <PageHeader
       title="生成任务"
@@ -276,10 +296,10 @@ export function TasksPage() {
     {loading ? <div className="brief-page-state"><LoaderCircle className="spin" size={20} />正在读取持久化任务…</div> : null}
     <section className={`task-list${projectId ? ' task-list--project-scoped' : ''}`}>
       <div className="task-list__header" aria-hidden="true">
-        <span className="task-list__col-lead">任务</span>{projectId ? null : <span className="task-list__col-project">项目</span>}<span className="task-list__col-created">创建时间</span>
+        <span className="task-list__col-lead">任务</span><span className="task-list__col-id">任务 ID</span>{projectId ? null : <span className="task-list__col-project">项目</span>}<span className="task-list__col-created">创建时间</span>
         <span className="task-list__col-state">任务状态</span><span className="task-list__col-timing">用时</span><span className="task-list__col-actions">操作</span>
       </div>
-      {filtered.map((job, index) => {
+      {filtered.map((job) => {
       const active = ACTIVE_JOB_STATUSES.has(job.status)
       const elapsedSeconds = elapsedJobSeconds(job, nowMs)
       const completedCta = completedCtaFor(job)
@@ -291,9 +311,16 @@ export function TasksPage() {
         ? ` · 错误码：${job.errorCode}`
         : ''
       return <article data-active={active || undefined} data-focused={focusedJobType === job.jobType || undefined} key={job.id} title={`任务编号 ${job.id}`}>
-        <div className="task-list__lead"><span className={`activity-dot activity-dot--${job.status.toLowerCase()}`} /><div><strong>{taskDisplayLabel(job)}</strong><small>任务 #{String(filtered.length - index).padStart(2, '0')}</small></div></div>
+        <div className="task-list__lead"><span className={`activity-dot activity-dot--${job.status.toLowerCase()}`} /><div><strong>{taskDisplayLabel(job)}</strong></div></div>
+        <span className="task-list__id" title={job.id}>
+          <small>追踪码</small>
+          <code>{compactJobId(job.id)}</code>
+          <button aria-label={`复制任务追踪码 ${job.id}`} onClick={() => void copyJobId(job.id)} title="复制完整任务追踪码" type="button">
+            <Copy size={13} />
+          </button>
+        </span>
         {projectId ? null : <Link className="task-list__project" title={`打开项目：${job.projectName}`} to={`/projects/${job.projectId}`}>{job.projectName}</Link>}
-        <span className="task-list__created">{createdLabel(job.createdAt)}</span>
+        <span className="task-list__created"><small>创建</small>{createdLabel(job.createdAt)}</span>
         <div className="task-list__state">
           {job.status === 'FAILED' ? (
             <>
@@ -329,7 +356,7 @@ export function TasksPage() {
             <StatusBadge status={job.status} />
           )}
         </div>
-        <span className="task-list__timing"><span>{formatElapsedTime(elapsedSeconds)}</span></span>
+        <span className="task-list__timing"><span><small>用时</small>{formatElapsedTime(elapsedSeconds)}</span></span>
         <div className="task-list__actions">{active ? <Button className="task-list__cancel" disabled={actingJobId === job.id} onClick={() => void cancel(job.id)} size="sm" variant="ghost">{actingJobId === job.id ? <LoaderCircle className="spin" size={15} /> : <Ban size={15} />}取消</Button> : null}{failedGuidance?.secondaryCta ? <Link className="button button--secondary button--sm task-list__cta" to={failedGuidance.secondaryCta.href}>{failedGuidance.secondaryCta.label}<ArrowRight size={14} /></Link> : null}{completedCta ? <Link className="button button--secondary button--sm task-list__cta" to={completedCta.href}>{completedCta.label}<ArrowRight size={14} /></Link> : null}</div>
         <JobRecoveryPanel
           busy={actingJobId === job.id}

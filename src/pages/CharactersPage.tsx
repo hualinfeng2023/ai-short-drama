@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   AlertTriangle,
   ArrowLeft,
+  ArrowRight,
   Check,
   ChevronDown,
   Dna,
@@ -47,7 +48,14 @@ import { PageLoadingSkeleton } from '../components/PageLoadingSkeleton'
 import { Button, getStatusLabel, Modal, PageHeader, SelectControl, StatusBadge } from '../components/ui'
 import { ServiceRequiredState } from '../components/ServiceRequiredState'
 import { buildCandidateGenerationSlots, resolveBatchFirstOrdinal } from '../utils/candidateGenerationSlots'
+import { isSelectableCharacterCandidate } from '../utils/characterCandidateSelection'
+import {
+  identityIssueViewTypes,
+  isReviewableCharacterIdentityStatus,
+} from '../utils/characterIdentityReview'
+import { isIdentityViewPromptValid } from '../utils/identityViewPrompt'
 import { buildCharacterCardDescription } from '../utils/characterVisualSummary'
+import { resolveCharacterWorkflowNextStep } from '../utils/characterWorkflowNextStep'
 import { localizeCharacterRole, localizeDisplayText } from '../utils/localizeDisplayText'
 
 const STATUS_LABELS: Record<string, string> = {
@@ -106,7 +114,31 @@ const DOSSIER_VIEW_TYPES = [
 ] as const
 
 const ACTIVE_DOSSIER_JOB_STATUSES = new Set(['PENDING', 'RETRY_WAIT', 'RUNNING'])
-const FAILED_DOSSIER_JOB_STATUSES = new Set(['FAILED', 'CANCELLED'])
+
+const CHARACTER_QUALITY_CHECK_LABELS: Record<string, string> = {
+  WATERMARK_FREE: '水印与文字',
+  FOREGROUND_CLEAR: '主体遮挡',
+  BODY_CONTINUITY: '身体结构',
+  PURE_WHITE_BACKGROUND: '纯白背景',
+  DISTINCT_IDENTITY: '亲属身份独立性',
+}
+
+function qualityIssueSummary(
+  issues: CharacterVisualRecord['candidates'][number]['qualityIssues'],
+): string {
+  if (!issues.length) return '质量检查未通过，需重新生成'
+  return issues
+    .map((issue) => (
+      `${CHARACTER_QUALITY_CHECK_LABELS[issue.type] ?? issue.type}：${issue.message}`
+    ))
+    .join('；')
+}
+
+function candidateQualityIssueSummary(
+  candidate: CharacterVisualRecord['candidates'][number],
+): string {
+  return qualityIssueSummary(candidate.qualityIssues)
+}
 
 const FAMILY_SIMILARITY_META: Record<string, { label: string; strength: number }> = {
   LOW: { label: '低度相似', strength: 1 },
@@ -406,7 +438,6 @@ interface IdentityViewAction {
   viewType: string
   viewLabel: string
   assetUrl: string
-  mode: 'adjust' | 'regenerate'
   createsNewVersion?: boolean
 }
 
@@ -601,6 +632,7 @@ export function CharactersPage() {
   const [busy, setBusy] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [errorKey, setErrorKey] = useState<string | null>(null)
   const [activeCharacterId, setActiveCharacterId] = useState('')
   const [pendingDeleteCandidate, setPendingDeleteCandidate] = useState<{
     character: CharacterVisualRecord
@@ -620,11 +652,19 @@ export function CharactersPage() {
     ))
     setSelected((current) => Object.fromEntries(next.characters.map((character) => [
       character.id,
-      character.candidates.some((candidate) => candidate.id === current[character.id])
+      character.candidates.some((candidate) => (
+        candidate.id === current[character.id]
+        && candidate.status === 'READY'
+        && candidate.reviewStatus !== 'QC_FAILED'
+      ))
         ? current[character.id]
         : (
           character.identities.at(-1)?.sourceCandidateId
-          ?? character.candidates.find((candidate) => candidate.selected)?.id
+          ?? character.candidates.find((candidate) => (
+            candidate.selected
+            && candidate.status === 'READY'
+            && candidate.reviewStatus !== 'QC_FAILED'
+          ))?.id
           ?? ''
         ),
     ])))
@@ -737,11 +777,13 @@ export function CharactersPage() {
   async function run(key: string, action: () => Promise<unknown>) {
     setBusy(key)
     setError(null)
+    setErrorKey(null)
     try {
       await action()
       await refresh()
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '操作失败，请稍后重试')
+      setErrorKey(key)
     } finally {
       setBusy(null)
     }
@@ -774,7 +816,6 @@ export function CharactersPage() {
         viewType: viewer.viewType,
         viewLabel: viewer.viewLabel,
         assetUrl: viewer.assetUrl,
-        mode: 'regenerate',
         createsNewVersion: viewer.createsNewVersion,
       })
     }, 0)
@@ -813,7 +854,6 @@ export function CharactersPage() {
         viewType: asset.viewType,
         viewLabel: dossierViewLabel(asset.viewType, gallery.entityKind),
         assetUrl: asset.assetUrl,
-        mode: 'regenerate',
         createsNewVersion: true,
       })
     }, 0)
@@ -933,7 +973,7 @@ export function CharactersPage() {
       (item) => item.id === identityViewAction.characterId,
     )
     if (!character) return
-    const note = identityViewAction.mode === 'adjust' ? identityViewNote.trim() : undefined
+    const note = identityViewNote.trim() || undefined
     await run(`identity-view-${identityViewAction.viewType}`, async () => {
       await generateCharacterIdentityView(
         projectId,
@@ -1213,10 +1253,20 @@ export function CharactersPage() {
     })
   }
 
-  const allLocked = Boolean(
-    workspace?.characters.length
-    && workspace.characters.every((character) => character.status === 'LOCKED'),
+  const lockedCharacterCount = workspace?.characters.filter(
+    (character) => character.status === 'LOCKED',
+  ).length ?? 0
+  const nextUnlockedCharacter = workspace?.characters.find(
+    (character) => character.status !== 'LOCKED',
   )
+  const nextStep = workspace
+    ? resolveCharacterWorkflowNextStep({
+        projectStatus: workspace.projectStatus,
+        lockedCount: lockedCharacterCount,
+        totalCount: workspace.characters.length,
+        nextCharacterName: nextUnlockedCharacter?.name,
+      })
+    : null
 
   if (!loading && (!projectId || !workspace)) {
     return <ServiceRequiredState feature="角色形象生成与锁定" projectId={projectId} />
@@ -1237,11 +1287,26 @@ export function CharactersPage() {
   return <div className="page page--characters page--character-visuals">
     <PageHeader
       title="确定角色形象基准"
-      description="从设定到候选、基准检查再到人工锁定。只有完成锁定的角色形象，才会进入后续分镜与画面生成。"
+      description="从设定到候选、基准检查再到人工锁定。全部角色锁定后，系统会先生成分集大纲和剧本；剧本确认后再进入前期资产与分镜。"
       actions={<><Link className="button button--secondary button--md" to={`/projects/${projectId}/story`}><ArrowLeft size={16} />返回角色文字设定</Link><Button onClick={() => void refresh()} variant="secondary"><RefreshCw size={16} />刷新</Button></>}
     />
 
     {error ? <div className="brief-save-message brief-save-message--error" role="alert"><AlertTriangle size={16} />{error}</div> : null}
+
+    {nextStep ? <section aria-label="角色形象工作流下一步" className={`character-next-step is-${nextStep.destination.toLowerCase()}`}>
+      <div>
+        <span>下一步</span>
+        <strong>{nextStep.title}</strong>
+        <small>{nextStep.description}</small>
+      </div>
+      {nextStep.destination === 'CHARACTER' && nextUnlockedCharacter
+        ? <Button onClick={() => jumpToCharacter(nextUnlockedCharacter.id)}><ArrowRight size={16} />{nextStep.actionLabel}</Button>
+        : <Link className="button button--primary button--md" to={nextStep.destination === 'STORY'
+            ? `/projects/${projectId}/story`
+            : `/tasks?project=${projectId}&jobType=GENERATE_SCRIPT_PACKAGE`}>
+            {nextStep.actionLabel}<ArrowRight size={16} />
+          </Link>}
+    </section> : null}
 
     <div className="character-page-body">
       <aside aria-label="快速定位角色" className="character-locator">
@@ -1284,14 +1349,18 @@ export function CharactersPage() {
           .find((item) => item && item.status !== 'LOCKED')
         : undefined
       const selectedCandidateId = selected[character.id]
-      const selectedCandidate = character.candidates.find((item) => item.id === selectedCandidateId)
+      const selectedCandidate = character.candidates.find((item) => (
+        item.id === selectedCandidateId
+        && item.status === 'READY'
+        && item.reviewStatus !== 'QC_FAILED'
+      ))
       const latestPendingIdentity = [...character.identities].reverse().find(
-        (identity) => ['GENERATING_DOSSIER', 'READY_FOR_REVIEW'].includes(identity.status),
+        (identity) => isReviewableCharacterIdentityStatus(identity.status),
       )
       const selectedReviewIdentity = character.identities.find(
         (identity) => (
           identity.id === identityReviewSelection[character.id]
-          && ['GENERATING_DOSSIER', 'READY_FOR_REVIEW'].includes(identity.status)
+          && isReviewableCharacterIdentityStatus(identity.status)
         ),
       )
       const pendingIdentity = selectedReviewIdentity ?? latestPendingIdentity
@@ -1308,14 +1377,20 @@ export function CharactersPage() {
       const activeIdentityJobs = latestIdentityJobs.filter((job) => (
         ACTIVE_DOSSIER_JOB_STATUSES.has(job.status)
       ))
-      const failedIdentityJobs = latestIdentityJobs.filter((job) => (
-        FAILED_DOSSIER_JOB_STATUSES.has(job.status)
-      ))
+      const failedIdentityViewTypes = identityIssueViewTypes(
+        pendingIdentity?.assets ?? [],
+        pendingIdentity?.viewJobs ?? [],
+      )
+      const failedIdentityViewTypeSet = new Set(failedIdentityViewTypes)
       const generatingDossier = activeIdentityJobs.length > 0
         || (pendingIdentity?.status === 'GENERATING_DOSSIER' && !pendingIdentity?.viewJobs.length)
-      const selectedHasIdentity = character.identities.some(
+      const selectedIdentity = character.identities.find(
         (identity) => identity.sourceCandidateId === selectedCandidateId,
       )
+      const selectedIdentityIssueCount = selectedIdentity
+        ? identityIssueViewTypes(selectedIdentity.assets, selectedIdentity.viewJobs).length
+        : 0
+      const selectedHasIdentity = Boolean(selectedIdentity)
       const blockers = profile?.conflictReport.filter((item) => item.severity === 'BLOCKER') ?? []
       const candidateBatchVersions = new Map(character.batches.map((batch) => [batch.id, batch.version]))
       const newestCandidateBatch = [...character.batches]
@@ -1496,6 +1571,7 @@ export function CharactersPage() {
         {profile && character.status !== 'LOCKED' ? <section className="character-candidate-section">
           <header><div><h3>{character.candidates.length ? latestCandidates.length === 1 ? `查看最新生成的${digitalEntity ? '视觉方案' : '形象方向'}` : digitalEntity ? '比较三个方案，确定数字实体的视觉语言' : '比较三个方向，确定角色第一印象' : digitalEntity ? '生成有差异的数字实体视觉方案' : '生成有差异的形象方向'}</h3><p>{character.candidates.length ? digitalEntity ? '选择不会立即锁定，下一步还会生成运行状态与场景载体基准图。' : '选择不会立即锁定，下一步还会生成多角度基准图供你检查。' : digitalEntity ? '系统会遵循角色功能与呈现载体；默认生成三个方案，也可以只生成一个。' : '系统会遵循角色设定与家族约束；默认生成三个方向，也可以只生成一张。'}</p></div><div>{character.candidates.length ? <Button onClick={() => setCompare((current) => ({ ...current, [character.id]: !current[character.id] }))} size="sm" variant="secondary"><GitCompare size={14} />{compare[character.id] ? '退出比较' : '专注比较'}</Button> : null}<CandidateGenerationControl disabled={character.sourceStale || blockers.length > 0 || generating || busy !== null} generating={busy === `generate-${character.id}` || generating} hasCandidates={character.candidates.length > 0} menuId={`candidate-generation-menu-${character.id}`} onGenerate={(count) => { setCandidateGenerationCounts((current) => ({ ...current, [character.id]: count })); void run(`generate-${character.id}`, () => generateCharacterVisualCandidates(projectId, character.id, character.lockVersion, profile.id, { count })) }} visualScheme={digitalEntity} /></div></header>
           {blockers.length ? <div className="character-candidate-blocked"><AlertTriangle size={15} />请先调整 {blockers.length} 个阻断问题，再生成形象。</div> : null}
+          {error && errorKey === `select-${character.id}` ? <div className="character-candidate-action-error" role="alert"><AlertTriangle size={16} /><span><strong>未能进入基准检查</strong><small>{error}</small></span></div> : null}
           {character.candidates.length && !generating ? <div aria-live="polite" className={`character-candidate-decision ${selectedCandidate ? 'has-selection' : ''}`}>
             <div className="character-candidate-decision__summary">
               <span>{selectedCandidate ? <Check size={17} /> : <UserRound size={17} />}</span>
@@ -1505,7 +1581,13 @@ export function CharactersPage() {
               </div>
             </div>
             {selectedCandidate ? selectedHasIdentity
-              ? <Button onClick={() => jumpToCharacter(character.id, '.character-identity-dossier')} variant="secondary"><Eye size={15} />查看基准检查</Button>
+              ? <Button onClick={() => jumpToCharacter(character.id, '.character-identity-dossier')} variant="secondary">
+                  {selectedIdentity?.status === 'QC_REVIEW_REQUIRED'
+                    ? <><AlertTriangle size={15} />处理 {selectedIdentityIssueCount} 个未通过视角</>
+                    : selectedIdentity?.status === 'READY_FOR_REVIEW'
+                      ? <><Eye size={15} />检查多角度并锁定</>
+                      : <><Eye size={15} />查看基准检查</>}
+                </Button>
               : <Button disabled={busy !== null} onClick={() => void run(`select-${character.id}`, () => selectCharacterVisualCandidate(projectId, character.id, character.lockVersion, selectedCandidate.id))}>{busy === `select-${character.id}` ? <LoaderCircle className="spin" size={15} /> : <UserRoundCheck size={15} />}确认此形象并生成基准图</Button>
               : null}
           </div> : null}
@@ -1526,12 +1608,15 @@ export function CharactersPage() {
                 </article>
               }
               const batchVersion = candidateBatchVersions.get(candidate.batchId ?? '')
-              const selectable = !generating && candidate.profileVersionId === profile.id
+              const selectable = isSelectableCharacterCandidate(candidate, profile.id, generating)
+              const qualityFailed = candidate.status === 'QC_FAILED'
+                || candidate.reviewStatus === 'QC_FAILED'
+              const qualityIssueSummary = candidateQualityIssueSummary(candidate)
               const variantLabel = candidate.variantLabel ?? `候选 ${directionNumber}`
-              return <div className={`character-candidate ${selectedCandidateId === candidate.id ? 'character-candidate--selected' : ''}`} data-disabled={!selectable || undefined} key={candidate.id}>
+              return <div className={`character-candidate ${qualityFailed ? 'has-qc-error' : ''} ${selectedCandidateId === candidate.id ? 'character-candidate--selected' : ''}`} data-disabled={!selectable || undefined} key={candidate.id}>
                 <button aria-pressed={selectedCandidateId === candidate.id} className="character-candidate__select" disabled={!selectable} onClick={() => setSelected((current) => ({ ...current, [character.id]: candidate.id }))} type="button">
                   <img alt={`${character.name} 形象候选 ${directionNumber}`} src={candidate.assetUrl} />
-                  <span><strong>{variantLabel}</strong><small>第 {batchVersion ?? 1} 批生成</small></span>
+                  <span><strong>{variantLabel}</strong><small title={qualityFailed ? qualityIssueSummary : undefined}>{qualityFailed ? `不可选择 · ${qualityIssueSummary}` : `第 ${batchVersion ?? 1} 批生成`}</small></span>
                 </button>
                 <button aria-label={`查看${character.name}${variantLabel}完整图片`} className="character-candidate__open" onClick={() => openCandidateImageViewer({ characterId: character.id, candidateId: candidate.id, characterName: character.name, variantLabel, assetUrl: candidate.assetUrl, selectable, generationPrompt: candidate.generationPrompt })} type="button"><Maximize2 size={15} /></button>
                 {selectedCandidateId === candidate.id ? refinementControl : null}
@@ -1540,10 +1625,13 @@ export function CharactersPage() {
             {generatingCandidates ? <p className="character-candidate-progress"><span aria-hidden="true" className="character-generation-dots"><i /><i /><i /></span><span>已完成 {completedCandidateCount}/{displayedCandidateCount}，其余形象方向仍在生成。</span></p> : null}
             {historicalCandidates.length ? <section className="character-candidate-history"><header><strong>历史候选</strong><small>{historicalCandidates.length} 张</small></header><div className="character-candidate-history__grid">{historicalCandidates.map((candidate) => {
               const batchVersion = candidateBatchVersions.get(candidate.batchId ?? '')
-              const selectable = !generating && candidate.profileVersionId === profile.id
+              const selectable = isSelectableCharacterCandidate(candidate, profile.id, generating)
+              const qualityFailed = candidate.status === 'QC_FAILED'
+                || candidate.reviewStatus === 'QC_FAILED'
+              const qualityIssueSummary = candidateQualityIssueSummary(candidate)
               const variantLabel = candidate.variantLabel ?? `候选 ${candidate.ordinal}`
-              return <div className={`character-candidate character-candidate--compact ${selectedCandidateId === candidate.id ? 'character-candidate--selected' : ''}`} data-disabled={!selectable || undefined} key={candidate.id}>
-                <button aria-pressed={selectedCandidateId === candidate.id} className="character-candidate__select" disabled={!selectable} onClick={() => setSelected((current) => ({ ...current, [character.id]: candidate.id }))} type="button"><img alt={`${character.name} 历史形象候选 ${candidate.ordinal}`} src={candidate.assetUrl} /><span><strong>{variantLabel}</strong><small>第 {batchVersion ?? 1} 批 · 候选 {candidate.ordinal}</small></span></button>
+              return <div className={`character-candidate character-candidate--compact ${qualityFailed ? 'has-qc-error' : ''} ${selectedCandidateId === candidate.id ? 'character-candidate--selected' : ''}`} data-disabled={!selectable || undefined} key={candidate.id}>
+                <button aria-pressed={selectedCandidateId === candidate.id} className="character-candidate__select" disabled={!selectable} onClick={() => setSelected((current) => ({ ...current, [character.id]: candidate.id }))} type="button"><img alt={`${character.name} 历史形象候选 ${candidate.ordinal}`} src={candidate.assetUrl} /><span><strong>{variantLabel}</strong><small title={qualityFailed ? qualityIssueSummary : undefined}>{qualityFailed ? qualityIssueSummary : `第 ${batchVersion ?? 1} 批 · 候选 ${candidate.ordinal}`}</small></span></button>
                 <button aria-label={`查看${character.name}${variantLabel}完整图片`} className="character-candidate__open" onClick={() => openCandidateImageViewer({ characterId: character.id, candidateId: candidate.id, characterName: character.name, variantLabel, assetUrl: candidate.assetUrl, selectable, generationPrompt: candidate.generationPrompt })} type="button"><Maximize2 size={14} /></button>
                 <button aria-label={candidate.deletable ? `删除${character.name}${variantLabel}` : candidate.deleteBlockReason ?? '该历史候选不能删除'} className="character-candidate__delete" disabled={!candidate.deletable || busy !== null} onClick={() => void deleteHistoricalCandidate(character, candidate)} title={candidate.deletable ? '删除历史候选' : candidate.deleteBlockReason} type="button">{busy === `delete-candidate-${candidate.id}` ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}</button>
                 {selectedCandidateId === candidate.id ? refinementControl : null}
@@ -1564,13 +1652,17 @@ export function CharactersPage() {
         </section> : null}
 
         {pendingIdentity ? <section className="character-identity-dossier" data-identity-version-id={pendingIdentity.id}>
-          <header><div><span>{viewingReplacedIdentity ? '历史版本 · 仅供查看' : '第二步 · 基准检查'}</span><h3>角色身份 · 第 {pendingIdentity.version} 版</h3></div><StatusBadge description={viewingReplacedIdentity ? `当前以第 ${latestPendingIdentity?.version ?? pendingIdentity.version} 版为审核目标` : failedIdentityJobs.length ? `${failedIdentityJobs.length} 个角色身份视角生成失败，可以单独重新生成` : generatingDossier ? '正在生成多角度角色身份基准检查图' : '角色身份基准检查图已生成，等待确认'} label={viewingReplacedIdentity ? '已被新版本替代' : failedIdentityJobs.length ? `${failedIdentityJobs.length} 个视角生成失败` : undefined} status={viewingReplacedIdentity ? 'SUPERSEDED' : failedIdentityJobs.length ? 'GENERATION_FAILED' : pendingIdentity.status} /></header>
+          <header><div><span>{viewingReplacedIdentity ? '历史版本 · 仅供查看' : '第二步 · 基准检查'}</span><h3>角色身份 · 第 {pendingIdentity.version} 版</h3></div><StatusBadge description={viewingReplacedIdentity ? `当前以第 ${latestPendingIdentity?.version ?? pendingIdentity.version} 版为审核目标` : failedIdentityViewTypes.length ? `${failedIdentityViewTypes.length} 个角色身份视角未通过检查，可以单独调整或重新生成` : generatingDossier ? '正在生成多角度角色身份基准检查图' : '角色身份基准检查图已生成，等待确认'} label={viewingReplacedIdentity ? '已被新版本替代' : failedIdentityViewTypes.length ? `${failedIdentityViewTypes.length} 个视角需处理` : undefined} status={viewingReplacedIdentity ? 'SUPERSEDED' : failedIdentityViewTypes.length ? 'QC_REVIEW_REQUIRED' : pendingIdentity.status} /></header>
           <div aria-busy={generatingDossier} aria-live="polite">
             {DOSSIER_VIEW_TYPES.map((viewType) => {
               const asset = pendingIdentityAssets.get(viewType)
               const viewJob = pendingIdentityJobs.get(viewType)
               const label = dossierViewLabel(viewType, entityKind)
-              const failed = Boolean(viewJob && FAILED_DOSSIER_JOB_STATUSES.has(viewJob.status))
+              const qualityFailed = asset?.status === 'QC_FAILED'
+              const qualityFailureReason = asset && qualityFailed
+                ? qualityIssueSummary(asset.qualityIssues)
+                : null
+              const failed = failedIdentityViewTypeSet.has(viewType)
               const active = Boolean(viewJob && ACTIVE_DOSSIER_JOB_STATUSES.has(viewJob.status))
               const retrying = viewJob ? busy === `retry-dossier-${viewJob.id}` : false
               return asset
@@ -1584,13 +1676,13 @@ export function CharactersPage() {
                         <DossierGenerationMark />
                         <strong>正在生成新版本</strong>
                         <small>旧图会保留到新版本完成</small>
-                      </div> : failed ? <span className="character-dossier-asset__status is-error"><AlertTriangle size={14} />上次生成失败</span> : null}
+                      </div> : failed ? <span className="character-dossier-asset__status is-error"><AlertTriangle size={14} />{qualityFailed ? '质量检查未通过' : '上次生成失败'}</span> : null}
                       {!viewingReplacedIdentity ? <>
-                        <Button aria-label={`调整${character.name}${label}的细节`} className="character-dossier-asset__action character-dossier-asset__action--adjust" disabled={busy !== null || active} onClick={() => openIdentityViewAction({ characterId: character.id, characterName: character.name, identityVersionId: pendingIdentity.id, viewType, viewLabel: label, assetUrl: asset.assetUrl, mode: 'adjust' })} size="sm" variant="secondary">调整细节</Button>
-                        <Button aria-label={`重新生成${character.name}${label}`} className="character-dossier-asset__action character-dossier-asset__action--regenerate" disabled={busy !== null || active} onClick={() => openIdentityViewAction({ characterId: character.id, characterName: character.name, identityVersionId: pendingIdentity.id, viewType, viewLabel: label, assetUrl: asset.assetUrl, mode: 'regenerate' })} size="sm" variant="secondary">重新生成</Button>
+                        <Button aria-label={`重新生成${character.name}${label}`} className="character-dossier-asset__action character-dossier-asset__action--regenerate" disabled={busy !== null || active} onClick={() => openIdentityViewAction({ characterId: character.id, characterName: character.name, identityVersionId: pendingIdentity.id, viewType, viewLabel: label, assetUrl: asset.assetUrl })} size="sm" variant="secondary">重新生成</Button>
                       </> : null}
                     </div>
                     <figcaption>{label}</figcaption>
+                    {qualityFailureReason ? <small className="character-dossier-asset__issue">{qualityFailureReason}</small> : null}
                   </figure>
                 : <figure aria-busy={active} aria-label={`${label}图片${failed ? '生成失败' : active ? '正在生成' : '等待生成'}`} className={`character-dossier-placeholder ${active ? 'is-generating' : ''} ${failed ? 'is-failed' : ''}`} key={viewType}>
                     <div className={`character-dossier-placeholder__visual ${active ? 'is-generating' : ''}`}>
@@ -1601,10 +1693,10 @@ export function CharactersPage() {
                     <figcaption>{label}</figcaption>
                   </figure>
             })}
-            {failedIdentityJobs.length ? <div className="character-dossier-error-summary"><AlertTriangle size={18} />{failedIdentityJobs.length} 个视角未完成，可在对应卡片重新生成。</div> : null}
+            {failedIdentityViewTypes.length ? <div className="character-dossier-error-summary"><AlertTriangle size={18} />{failedIdentityViewTypes.length} 个视角需处理，可在对应卡片重新生成并填写修改提示词。</div> : null}
           </div>
           {!viewingReplacedIdentity ? <footer className={`character-identity-decision ${pendingIdentity.status === 'READY_FOR_REVIEW' ? 'is-ready' : ''}`}>
-            <div><span>{pendingIdentity.status === 'READY_FOR_REVIEW' ? <ShieldCheck size={18} /> : <LoaderCircle className="spin" size={18} />}</span><div><strong>{pendingIdentity.status === 'READY_FOR_REVIEW' ? digitalEntity ? '数字实体状态基准已就绪' : '多角度基准图已就绪' : digitalEntity ? '正在完成数字实体状态基准' : '正在完成多角度基准检查'}</strong><small>{pendingIdentity.status === 'READY_FOR_REVIEW' ? digitalEntity ? '确认界面结构、配色、识别符号与不同运行状态一致后，再锁定为后续生成基准。' : '确认五官、年龄感、发型与体型一致后，再锁定为后续生成基准。' : '全部视角生成完成后，才能人工确认并锁定。'}</small></div></div>
+            <div><span>{pendingIdentity.status === 'READY_FOR_REVIEW' ? <ShieldCheck size={18} /> : failedIdentityViewTypes.length ? <AlertTriangle size={18} /> : <LoaderCircle className="spin" size={18} />}</span><div><strong>{pendingIdentity.status === 'READY_FOR_REVIEW' ? digitalEntity ? '数字实体状态基准已就绪' : '多角度基准图已就绪' : failedIdentityViewTypes.length ? `${failedIdentityViewTypes.length} 个视角需要处理` : digitalEntity ? '正在完成数字实体状态基准' : '正在完成多角度基准检查'}</strong><small>{pendingIdentity.status === 'READY_FOR_REVIEW' ? digitalEntity ? '确认界面结构、配色、识别符号与不同运行状态一致后，再锁定为后续生成基准。' : '确认五官、年龄感、发型与体型一致后，再锁定为后续生成基准。' : failedIdentityViewTypes.length ? '请在对应卡片调整或重新生成；全部通过后即可锁定。' : '全部视角生成完成后，才能人工确认并锁定。'}</small></div></div>
             {pendingIdentity.status === 'READY_FOR_REVIEW' ? <Button data-character-lock-action="true" disabled={busy !== null} onClick={() => void confirmIdentityBaseline(character, pendingIdentity.id)}>{busy === `lock-${character.id}` ? <LoaderCircle className="spin" size={15} /> : <LockKeyhole size={15} />}确认并锁定为角色基准</Button> : null}
           </footer> : null}
         </section> : null}
@@ -1617,7 +1709,7 @@ export function CharactersPage() {
             const replacedPending = !isActive
               && !reviewable
               && !identity.lockedAt
-              && ['GENERATING_DOSSIER', 'READY_FOR_REVIEW'].includes(identity.status)
+              && isReviewableCharacterIdentityStatus(identity.status)
             const viewingThisVersion = identity.id === pendingIdentity?.id
             const readyToLock = reviewable
               && viewingThisVersion
@@ -1661,19 +1753,6 @@ export function CharactersPage() {
     })}</div>
     </div>
 
-    {allLocked ? <section className="character-lock-bar">
-      <div>
-        <Check size={18} />
-        <span>
-          <strong>全部角色身份已锁定</strong>
-          <small>后续剧本与分镜将引用这些固定版本。</small>
-        </span>
-      </div>
-      <Link className="button button--primary button--md" to={`/projects/${projectId}/story`}>
-        查看剧本进度
-      </Link>
-    </section> : null}
-
     <Modal
       className="modal--character-visual-editor"
       description={editingCharacter ? `${editingCharacter.name} · 生成前可调整 · 保存后会创建新版本并重新运行一致性审核` : undefined}
@@ -1690,23 +1769,23 @@ export function CharactersPage() {
 
     <Modal
       className="modal--identity-view"
-      description={identityViewAction?.mode === 'adjust' ? '以当前图片为参考生成调整版；新图成功前，当前图片会继续保留。' : '重新生成同一视角；新图成功前，当前图片会继续保留。'}
+      description="重新生成同一视角；可填写修改提示词，新图成功前当前图片会继续保留。"
       footer={<>
         <Button disabled={busy !== null} onClick={() => { setIdentityViewAction(null); setIdentityViewNote('') }} variant="secondary">取消</Button>
-        <Button disabled={busy !== null || (identityViewAction?.mode === 'adjust' && identityViewNote.trim().length < 4)} onClick={() => void submitIdentityViewAction()}>
-          {busy?.startsWith('identity-view-') ? <LoaderCircle className="spin" size={15} /> : identityViewAction?.mode === 'adjust' ? <Sparkles size={15} /> : <RefreshCw size={15} />}
-          {identityViewAction?.mode === 'adjust' ? '生成调整版' : '确认重新生成'}
+        <Button disabled={busy !== null || !isIdentityViewPromptValid(identityViewNote)} onClick={() => void submitIdentityViewAction()}>
+          {busy?.startsWith('identity-view-') ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}
+          确认重新生成
         </Button>
       </>}
       onClose={() => { setIdentityViewAction(null); setIdentityViewNote('') }}
       open={identityViewAction !== null}
-      title={identityViewAction ? `${identityViewAction.mode === 'adjust' ? '调整细节' : '重新生成'} · ${identityViewAction.characterName} ${identityViewAction.viewLabel}` : '调整角色身份图'}
+      title={identityViewAction ? `重新生成 · ${identityViewAction.characterName} ${identityViewAction.viewLabel}` : '重新生成角色身份图'}
     >
       {identityViewAction ? <div className="identity-view-dialog">
         <img alt={`${identityViewAction.characterName} ${identityViewAction.viewLabel} 当前版本`} src={identityViewAction.assetUrl} />
         <div>
-          <div className="identity-view-dialog__summary"><span>{identityViewAction.viewLabel}</span><strong>{identityViewAction.mode === 'adjust' ? '只调整你指定的细节' : '生成一个身份一致的替代版本'}</strong><p>{identityViewAction.mode === 'adjust' ? '脸型、五官、年龄感、体型、发型和服装默认保持不变。' : '沿用已选角色身份与当前视角要求，画面细节会自然变化。'}</p></div>
-          {identityViewAction.mode === 'adjust' ? <label className="identity-view-dialog__field" htmlFor="identity-view-refinement-note"><span>希望调整什么？</span><textarea autoFocus id="identity-view-refinement-note" maxLength={300} onChange={(event) => setIdentityViewNote(event.target.value)} placeholder="例如：保留五官和发型，让视线更坚定，减少笑意" rows={4} value={identityViewNote} /><small>{identityViewNote.trim().length}/300 · 至少输入 4 个字</small></label> : null}
+          <div className="identity-view-dialog__summary"><span>{identityViewAction.viewLabel}</span><strong>生成一个身份一致的替代版本</strong><p>沿用已选角色身份与当前视角要求；填写修改提示词后，只调整你指定的内容。</p></div>
+          <label className="identity-view-dialog__field" htmlFor="identity-view-refinement-note"><span>本次修改提示词（可选）</span><textarea autoFocus id="identity-view-refinement-note" maxLength={300} onChange={(event) => setIdentityViewNote(event.target.value)} placeholder="例如：保持人物身份和服装不变，双脚完整入镜，减少脚下阴影" rows={4} value={identityViewNote} /><small>{identityViewNote.trim().length}/300 · 可留空；填写后至少输入 4 个字</small></label>
           <div className="identity-view-dialog__notice" role="note"><ShieldCheck size={16} /><span><strong>{identityViewAction.createsNewVersion ? '当前角色基准不会被修改' : '当前图片不会立即被覆盖'}</strong><small>{identityViewAction.createsNewVersion ? '系统会复制为新的待确认版本并重新生成这个视角；确认锁定前，现有基准和已绑定镜头保持不变。' : '生成成功后才替换这个待确认视角；失败时仍保留现在的图片。'}</small></span></div>
         </div>
       </div> : null}
@@ -1728,15 +1807,13 @@ export function CharactersPage() {
           .map((asset) => {
             const label = dossierViewLabel(asset.viewType, identityVersionGallery.entityKind)
             return <article key={asset.id}>
-              <button aria-label={`查看${identityVersionGallery.characterName}${label}完整原图`} className="identity-version-gallery__preview" onClick={() => openIdentityGalleryAsset(asset)} type="button">
+              <div className="identity-version-gallery__media">
                 <img alt={`${identityVersionGallery.characterName} ${label}`} src={asset.assetUrl} />
-              </button>
+                <button aria-label={`查看${identityVersionGallery.characterName}${label}完整原图`} className="identity-version-gallery__open" onClick={() => openIdentityGalleryAsset(asset)} title="查看完整原图" type="button"><Maximize2 size={14} /></button>
+              </div>
               <footer>
                 <strong>{label}</strong>
-                <div>
-                  <button aria-label={`查看${identityVersionGallery.characterName}${label}完整原图`} onClick={() => openIdentityGalleryAsset(asset)} type="button"><Maximize2 size={14} />查看原图</button>
-                  <button aria-label={`重新生成${identityVersionGallery.characterName}${label}`} disabled={busy !== null} onClick={() => regenerateIdentityGalleryAsset(asset)} type="button"><RefreshCw size={14} />重新生成</button>
-                </div>
+                <button aria-label={`重新生成${identityVersionGallery.characterName}${label}`} disabled={busy !== null} onClick={() => regenerateIdentityGalleryAsset(asset)} type="button"><RefreshCw size={14} />重新生成</button>
               </footer>
             </article>
           })}

@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   Check,
   LoaderCircle,
   RefreshCw,
@@ -27,9 +28,37 @@ export function directorApprovalRequiresOverride(
     && action.proposal.comparison?.timelinePreview?.validationStatus === 'REVIEW_REQUIRED'
 }
 
+function formatOverrideDuration(milliseconds: number): string {
+  const seconds = milliseconds / 1000
+  return `${seconds.toFixed(Number.isInteger(seconds) ? 0 : 1)} 秒`
+}
+
+export function directorConfidenceLabel(confidence: number): string {
+  if (confidence >= 0.85) return '高置信度'
+  if (confidence >= 0.65) return '中等置信度'
+  return '低置信度'
+}
+
+export function directorApprovalOverrideSuggestion(
+  action: DirectorReviewAction | null,
+): string {
+  if (!directorApprovalRequiresOverride(action) || action?.type !== 'DECIDE') return ''
+  const preview = action.proposal.comparison?.timelinePreview
+  if (!preview) return ''
+  if (preview.risk === 'DURATION_BUDGET_EXCEEDED') {
+    return `接受修改后超出场景预算 ${formatOverrideDuration(preview.after.overflowMs)} 的风险；批准后将在分镜阶段调整停顿并复核总时长。`
+  }
+  if (preview.risk === 'DOWNSTREAM_TIMING_SHIFT') {
+    const direction = preview.downstreamShiftMs >= 0 ? '顺延' : '提前'
+    return `接受后续时间线${direction} ${formatOverrideDuration(Math.abs(preview.downstreamShiftMs))} 的风险；批准后将在分镜阶段复核相邻场景衔接。`
+  }
+  return '接受当前时长质检提醒；批准后将在分镜阶段复核对白节奏与场景总时长。'
+}
+
 interface DirectorReviewCardProps {
   proposal: DirectorReviewProposal | null
   busy: boolean
+  error?: string
   selectedOptionId?: string
   targetLabel?: string
   onReview: () => void
@@ -66,6 +95,7 @@ function directorValues(value: Record<string, unknown>): string {
 export function DirectorReviewCard({
   proposal,
   busy,
+  error,
   selectedOptionId,
   targetLabel = '这一场',
   onReview,
@@ -79,10 +109,15 @@ export function DirectorReviewCard({
           <span><WandSparkles size={14} />AI Director</span>
           <strong>审查{targetLabel}的逻辑、动机、对白与节奏</strong>
           <p>先给出导演判断和 2–3 个方案，不会自动修改剧本或触发媒体生成。</p>
+          {error ? (
+            <div className="director-review-error director-review-error--inline" role="alert">
+              <AlertTriangle size={14} />{error}
+            </div>
+          ) : null}
         </div>
         <Button disabled={busy} onClick={onReview} size="sm" variant="secondary">
           {busy ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}
-          开始审查
+          {busy ? '审查中…' : '开始审查'}
         </Button>
       </section>
     )
@@ -107,16 +142,25 @@ export function DirectorReviewCard({
         <StatusBadge status={proposal.status} />
       </header>
       <p>{proposal.rationale}</p>
+      {error ? (
+        <div className="director-review-error director-review-error--inline" role="alert">
+          <AlertTriangle size={14} />{error}
+        </div>
+      ) : null}
       <div className="director-review__meta">
-        <span>判断置信度 {Math.round(proposal.confidence * 100)}%</span>
-        <span>
+        <span className="director-review__tag director-review__tag--scope">
           {proposal.estimatedCostUsd === 0
-            ? '不触发媒体生成'
+            ? '仅修改文本'
             : `预计成本 $${proposal.estimatedCostUsd}`}
         </span>
-        <span>
-          影响 {proposal.affectedObjects.length} 项 · 保留 {proposal.preservedObjects.length} 项
+        <span className="director-review__tag director-review__tag--confidence">
+          {directorConfidenceLabel(proposal.confidence)}
         </span>
+        {proposal.affectedObjects.length > 0 ? (
+          <span className="director-review__tag director-review__tag--impact">
+            影响 {proposal.affectedObjects.length} 项
+          </span>
+        ) : null}
       </div>
 
       {proposal.status === 'PROPOSED' ? (

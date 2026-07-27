@@ -286,6 +286,21 @@ class ProjectNameSuggestionRead(BaseModel):
     warning: str | None = None
 
 
+class BriefEmotionalRewardSuggestionRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    idea: str = Field(min_length=10, max_length=4000)
+    genre: str = Field(min_length=1, max_length=80)
+
+
+class BriefEmotionalRewardSuggestionRead(BaseModel):
+    reward: EmotionalReward
+    rationale: str = Field(min_length=2, max_length=80)
+    provider: str
+    model: str
+    warning: str | None = None
+
+
 class BriefRequirementsSuggestionRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 

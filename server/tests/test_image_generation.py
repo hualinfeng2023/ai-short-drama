@@ -1,10 +1,13 @@
 import asyncio
+import base64
 import json
 from dataclasses import replace
+from io import BytesIO
 
 import httpx
 import pytest
 from httpx import AsyncClient
+from PIL import Image
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -15,7 +18,12 @@ from app.jobs.contracts import JobExecutionContext, JobExecutionError
 from app.jobs.handlers.production import _generate_character_image
 from app.jobs.worker import PersistentJobWorker
 from app.seed import PROJECT_ID, SHOT_IDS
-from app.services.character_image_qc import evaluate_character_image_quality
+from app.services.character_image_qc import (
+    CharacterImageCheck,
+    CharacterImageQualityReport,
+    apply_character_image_quality_policy,
+    evaluate_character_image_quality,
+)
 from app.services.character_visuals import CHARACTER_CLEAN_FRAME_CONSTRAINT
 from app.services.identity_consistency import evaluate_identity_consistency
 from app.services.image_provider import GeneratedImage, generate_image
@@ -636,6 +644,8 @@ async def test_character_generation_qc_records_four_independent_visual_checks() 
         assert payload["model"] == "doubao-seed-2-0-lite-260215"
         content = payload["input"][0]["content"]
         assert [item["type"] for item in content] == ["input_text", "input_image"]
+        assert "不得仅因腿脚未露出" in content[0]["text"]
+        assert "肢体从襁褓外异常突出、重复、融合、断裂" in content[0]["text"]
         return httpx.Response(
             200,
             json={
@@ -692,6 +702,7 @@ async def test_character_generation_qc_records_four_independent_visual_checks() 
             model="seedream-test",
             request_id=None,
         ),
+        quality_context="INFANT_FULL_BODY",
         transport=httpx.MockTransport(handler),
     )
 
@@ -708,6 +719,76 @@ async def test_character_generation_qc_records_four_independent_visual_checks() 
         "PASSED",
         "FAILED",
     ]
+
+
+def test_character_quality_policy_allows_subtle_contact_shadow() -> None:
+    report = apply_character_image_quality_policy(
+        CharacterImageQualityReport(
+            status="FAILED",
+            provider="volcengine-ark",
+            model="test-model",
+            checks=(
+                CharacterImageCheck(
+                    "PURE_WHITE_BACKGROUND",
+                    "FAILED",
+                    0.9,
+                    "人物脚下存在鞋子投射的阴影，背景并非完全均匀的纯白背景",
+                ),
+            ),
+        )
+    )
+
+    assert report.status == "PASSED"
+    assert report.checks[0].status == "PASSED"
+    assert "自然接触阴影" in report.checks[0].message
+
+
+def test_character_quality_policy_still_rejects_large_background_shadow() -> None:
+    report = apply_character_image_quality_policy(
+        CharacterImageQualityReport(
+            status="FAILED",
+            provider="volcengine-ark",
+            model="test-model",
+            checks=(
+                CharacterImageCheck(
+                    "PURE_WHITE_BACKGROUND",
+                    "FAILED",
+                    0.95,
+                    "人物脚部下方存在大面积明显阴影，并延伸为灰色渐变",
+                ),
+            ),
+        )
+    )
+
+    assert report.status == "FAILED"
+    assert report.checks[0].status == "FAILED"
+
+
+async def test_character_generation_qc_blocks_near_duplicate_family_reference() -> None:
+    buffer = BytesIO()
+    Image.new("RGB", (128, 128), (210, 180, 160)).save(buffer, format="PNG")
+    content = buffer.getvalue()
+    reference = f"data:image/png;base64,{base64.b64encode(content).decode()}"
+
+    result = await evaluate_character_image_quality(
+        replace(get_settings(), ark_api_key=""),
+        GeneratedImage(
+            content=content,
+            mime="image/png",
+            width=128,
+            height=128,
+            model="seedream-test",
+            request_id=None,
+        ),
+        distinct_identity_reference_images=[reference],
+    )
+
+    assert result.status == "FAILED"
+    distinct_identity = next(
+        item for item in result.checks if item.check_type == "DISTINCT_IDENTITY"
+    )
+    assert distinct_identity.status == "FAILED"
+    assert distinct_identity.score == 1.0
 
 
 async def test_shot_generation_job_persists_and_applies_take(

@@ -1,4 +1,4 @@
-import { type MouseEvent as ReactMouseEvent, useCallback, useEffect, useMemo, useState } from 'react'
+import { type MouseEvent as ReactMouseEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle,
   ArrowLeft,
@@ -62,6 +62,7 @@ import { RelationshipGraphSection, type RelationshipCharacter } from '../compone
 import { ImpactConfirmModal } from '../components/ConfirmModal'
 import {
   DirectorReviewCard,
+  directorApprovalOverrideSuggestion,
   directorApprovalRequiresOverride,
   type DirectorReviewAction,
 } from '../components/director-review/DirectorReviewCard'
@@ -211,6 +212,36 @@ interface ScriptTextSelection {
 }
 
 type ScriptRewriteMenuMode = 'ACTIONS' | 'TONE' | 'CUSTOM'
+
+export type StoryWorkbenchView = 'overview' | 'bible' | 'relationships' | 'structure' | 'script'
+
+export const STORY_WORKBENCH_VIEWS: Array<{
+  id: StoryWorkbenchView
+  label: string
+  description: string
+}> = [
+  { id: 'overview', label: '方向与基准', description: '创作约束和已确认方向' },
+  { id: 'bible', label: '世界与角色', description: '世界规则和角色事实' },
+  { id: 'relationships', label: '角色关系', description: '关系图、属性和变化时间线' },
+  { id: 'structure', label: '分集与引擎', description: '分集大纲和叙事结构' },
+  { id: 'script', label: '本集剧本', description: '按场审查结构化剧本' },
+]
+
+export function resolveStoryWorkbenchView(
+  requested: StoryWorkbenchView,
+  available: Partial<Record<StoryWorkbenchView, boolean>>,
+): StoryWorkbenchView {
+  if (available[requested]) return requested
+  return STORY_WORKBENCH_VIEWS.find((item) => available[item.id])?.id ?? 'overview'
+}
+
+export function resolveScriptSceneId<T extends { id: string }>(
+  scenes: T[],
+  requestedId: string | null,
+): string | null {
+  if (requestedId && scenes.some((scene) => scene.id === requestedId)) return requestedId
+  return scenes[0]?.id ?? null
+}
 
 const SCRIPT_REWRITE_ACTION_LABELS: Record<ScriptExcerptRewriteAction, string> = {
   REWRITE: '改写',
@@ -393,7 +424,7 @@ function durationEstimateLabel(seconds: number): string {
 }
 
 const DEFAULT_PACKAGE_ESTIMATE: StoryPackageEstimate = {
-  assets: ['故事设定', '角色文字设定', '分集大纲', '结构化首集剧本'],
+  assets: ['故事设定', '角色文字设定', '分集大纲', '结构化本集剧本'],
   estimatedSeconds: 240,
   estimatedPoints: 0,
   directionLock: 'ON_SUCCESS',
@@ -486,10 +517,16 @@ export function StoryPage() {
   const [scriptRewriteVersionsOpen, setScriptRewriteVersionsOpen] = useState(false)
   const [directorReviewProposals, setDirectorReviewProposals] = useState<DirectorReviewProposal[]>([])
   const [directorReviewBusyScene, setDirectorReviewBusyScene] = useState<number | null>(null)
-  const [directorReviewError, setDirectorReviewError] = useState<string | null>(null)
+  const [directorReviewError, setDirectorReviewError] = useState<{
+    sceneOrdinal: number
+    message: string
+  } | null>(null)
   const [directorOptionSelections, setDirectorOptionSelections] = useState<Record<string, string>>({})
   const [directorReviewAction, setDirectorReviewAction] = useState<DirectorReviewAction | null>(null)
   const [directorApprovalOverrideReason, setDirectorApprovalOverrideReason] = useState('')
+  const [activeWorkbenchView, setActiveWorkbenchView] = useState<StoryWorkbenchView>('overview')
+  const [selectedSceneId, setSelectedSceneId] = useState<string | null>(null)
+  const workbenchContentRef = useRef<HTMLElement | null>(null)
   const [relationshipFocus, setRelationshipFocus] = useState<{
     graphId: string
     relationshipKey: string
@@ -533,6 +570,7 @@ export function StoryPage() {
 
   useEffect(() => {
     if (loading || !workspace?.relationshipGraphVersions.length || window.location.hash !== '#relationship-review') return
+    setActiveWorkbenchView('relationships')
     window.requestAnimationFrame(() => {
       document.getElementById('relationship-review')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     })
@@ -542,6 +580,18 @@ export function StoryPage() {
   const latestScript = workspace?.scriptVersions[0]
   const latestBible = workspace?.storyBibleVersions[0]
   const latestOutline = workspace?.episodeOutlineVersions[0]
+  const selectedScene = latestScript?.scenes.find((scene) => scene.id === selectedSceneId)
+    ?? latestScript?.scenes[0]
+    ?? null
+
+  useEffect(() => {
+    const nextSceneId = resolveScriptSceneId(latestScript?.scenes ?? [], selectedSceneId)
+    if (nextSceneId !== selectedSceneId) setSelectedSceneId(nextSceneId)
+  }, [latestScript?.scenes, selectedSceneId])
+
+  useEffect(() => {
+    if (workbenchContentRef.current) workbenchContentRef.current.scrollTop = 0
+  }, [activeWorkbenchView, selectedSceneId])
   const activeDirection = useMemo(
     () => directions.find((direction) => selected.includes(direction.id)) ?? null,
     [directions, selected],
@@ -639,13 +689,13 @@ export function StoryPage() {
       upsertDirectorProposal(proposal)
       setNotice(`Director 已完成第 ${scene.ordinal} 场审查，请选择修复方案。`)
     } catch (reason) {
-      setDirectorReviewError(
-        reason instanceof ApiError && reason.code === 'VERSION_CONFLICT'
+      const message = reason instanceof ApiError && reason.code === 'VERSION_CONFLICT'
           ? '项目版本已经变化，请刷新后重新审查。'
           : reason instanceof Error
             ? reason.message
-            : 'Director 审查失败',
-      )
+            : 'Director 审查失败'
+      setDirectorReviewError({ sceneOrdinal: scene.ordinal, message })
+      notify(message, 'error')
     } finally {
       setDirectorReviewBusyScene(null)
     }
@@ -676,31 +726,34 @@ export function StoryPage() {
       await refreshProjects()
       setNotice(
         action.type === 'EXECUTE'
-          ? '修改版剧本已创建；受影响下游对象已标记为需要复核。'
+          ? '修改版剧本已创建；相关内容已标记为待检查。'
           : action.decision === 'APPROVE'
-            ? 'Director 修改版已批准。'
+            ? '已确认使用这个修改版。'
             : action.decision === 'ROLLBACK'
-              ? '已创建恢复版本，旧版本和修改版均保留。'
-              : 'Director 建议已拒绝，剧本未发生变化。',
+              ? '已恢复原来的版本，之前的版本仍然保留。'
+              : '未采用这条建议，剧本没有变化。',
       )
     } catch (reason) {
-      setDirectorReviewError(
-        reason instanceof ApiError && reason.code === 'VERSION_CONFLICT'
+      const message = reason instanceof ApiError && reason.code === 'VERSION_CONFLICT'
           ? '项目版本已经变化，请刷新后重新确认。'
           : reason instanceof ApiError
             && reason.code === 'DIRECTOR_APPROVAL_OVERRIDE_REASON_REQUIRED'
             ? '低成本时间线预览仍需调整；请填写至少 8 个字的覆盖理由。'
           : reason instanceof Error
             ? reason.message
-            : 'Director 操作失败',
-      )
+            : 'Director 操作失败'
+      setDirectorReviewError({
+        sceneOrdinal: action.proposal.sceneOrdinal,
+        message,
+      })
+      notify(message, 'error')
     } finally {
       setDirectorReviewBusyScene(null)
     }
   }
 
   function openDirectorReviewAction(action: DirectorReviewAction) {
-    setDirectorApprovalOverrideReason('')
+    setDirectorApprovalOverrideReason(directorApprovalOverrideSuggestion(action))
     setDirectorReviewAction(action)
   }
 
@@ -710,7 +763,7 @@ export function StoryPage() {
       const job = await approveScriptVersion(latestScript.id, project.lockVersion)
       await refreshProjects()
       setApproveScriptOpen(false)
-      notify('首集剧本已批准，角色任务已入队。')
+      notify('本集剧本已批准，角色任务已入队。')
       setNotice(`剧本已批准，角色任务已入队：${job.stage}`)
       navigate(`/tasks?project=${project.id}`)
     })
@@ -1003,7 +1056,6 @@ export function StoryPage() {
     occupation: characterOccupation(character),
     personality: characterPersonality(character),
   }))
-  const criticStatus = stringValue(latestScript?.critic.status, '待检查')
   const enginePayload = isRecord(latestScript?.payload.short_drama_engine)
     ? latestScript.payload.short_drama_engine
     : {}
@@ -1022,11 +1074,30 @@ export function StoryPage() {
   const scriptRelationshipGraph = workspace.relationshipGraphVersions.find(
     (graph) => graph.id === latestScript?.relationshipGraphVersionId,
   )
+  const workbenchAvailability: Record<StoryWorkbenchView, boolean> = {
+    overview: true,
+    bible: Boolean(latestBible),
+    relationships: workspace.relationshipGraphVersions.length > 0,
+    structure: Boolean(latestOutline && latestScript),
+    script: Boolean(latestScript),
+  }
+  const visibleWorkbenchView = resolveStoryWorkbenchView(activeWorkbenchView, workbenchAvailability)
+  const activeWorkbenchMeta = STORY_WORKBENCH_VIEWS.find((item) => item.id === visibleWorkbenchView)
+    ?? STORY_WORKBENCH_VIEWS[0]
+
   function relationshipBeatForScene(sceneOrdinal: number) {
     return scriptRelationshipGraph?.graph.beats.find(
       (beat) => beat.episodeOrdinal === latestScript?.episodeOrdinal
         && beat.sceneOrdinal === sceneOrdinal,
     )
+  }
+
+  function workbenchIcon(view: StoryWorkbenchView) {
+    if (view === 'overview') return <BookOpenCheck size={17} />
+    if (view === 'bible') return <UsersRound size={17} />
+    if (view === 'relationships') return <Workflow size={17} />
+    if (view === 'structure') return <Layers3 size={17} />
+    return <FileStack size={17} />
   }
 
   function renderDirectorReview(
@@ -1036,6 +1107,11 @@ export function StoryPage() {
     return (
       <DirectorReviewCard
         busy={directorReviewBusyScene === scene.ordinal}
+        error={
+          directorReviewError?.sceneOrdinal === scene.ordinal
+            ? directorReviewError.message
+            : undefined
+        }
         onAction={openDirectorReviewAction}
         onReview={() => void reviewScriptScene(scene)}
         onSelectOption={(proposalId, optionId) => {
@@ -1128,21 +1204,68 @@ export function StoryPage() {
   return (
     <div className="page page--story">
       <PageHeader
+        eyebrow="阶段 2/5 · 故事剧本"
         title="故事方向与剧本"
-        description="比较故事方向，先审核故事设定与角色关系，再生成分集大纲和结构化首集剧本。"
+        description="比较故事方向，先审核故事设定与角色关系，再生成分集大纲和结构化本集剧本。"
         actions={<><Link className="button button--secondary button--md" to={`/projects/${project.id}`}><ArrowLeft size={16} />返回项目简报</Link><Button onClick={() => void runAction(async () => { await load(); setNotice('已载入最新版本。') })} variant="secondary"><RefreshCw size={16} />刷新</Button></>}
       />
 
       {error ? <div className="brief-save-message brief-save-message--error" role="alert">{error}</div> : null}
       {notice ? <div className="brief-save-message brief-save-message--success">{notice}</div> : null}
 
+      <div className="story-workbench">
+        <nav aria-label="故事内容" className="story-workbench__navigation">
+          <div className="story-workbench__tabs">
+            {STORY_WORKBENCH_VIEWS.map((item) => {
+              const active = visibleWorkbenchView === item.id
+              return <button
+                aria-label={`${item.label}：${item.description}`}
+                aria-current={active ? 'page' : undefined}
+                className={active ? 'is-active' : ''}
+                disabled={!workbenchAvailability[item.id]}
+                key={item.id}
+                onClick={() => setActiveWorkbenchView(item.id)}
+                title={item.description}
+                type="button"
+              >
+                <span className="story-workbench__tab-icon">{workbenchIcon(item.id)}</span>
+                <strong>{item.label}</strong>
+                {item.id === 'script' && latestScript ? <small>{latestScript.scenes.length} 场</small> : null}
+              </button>
+            })}
+          </div>
+          {visibleWorkbenchView === 'script' && latestScript ? <div className="story-workbench__scene-nav" aria-label="本集场景">
+            <span>场景目录</span>
+            <div className="story-workbench__scene-list">
+              {latestScript.scenes.map((scene) => {
+                const active = selectedScene?.id === scene.id
+                return <button
+                  aria-current={active ? 'true' : undefined}
+                  className={active ? 'is-active' : ''}
+                  key={scene.id}
+                  onClick={() => setSelectedSceneId(scene.id)}
+                  title={`${localizeDisplayText(scene.heading)} · ${(scene.durationMs / 1000).toFixed(1)} 秒`}
+                  type="button"
+                >
+                  <span>{scene.ordinal.toString().padStart(2, '0')}</span>
+                  <strong>{localizeDisplayText(scene.heading)}</strong>
+                  <small>{(scene.durationMs / 1000).toFixed(1)} 秒</small>
+                </button>
+              })}
+            </div>
+          </div> : null}
+        </nav>
+
+        <main aria-label={activeWorkbenchMeta.label} className="story-workbench__content" ref={workbenchContentRef}>
+          <div className="story-workbench__panel" hidden={visibleWorkbenchView !== 'overview'}>
       {brief ? <section className="story-brief-baseline" aria-labelledby="story-brief-baseline-title">
         <header><div><p className="eyebrow">方向评审依据</p><h2 id="story-brief-baseline-title">本次创作基准</h2></div><span>所有方向均应符合以下条件</span></header>
         <dl className="story-brief-baseline__facts">
           <div><dt>平台</dt><dd>{labelValues(brief.platformTargets.map((item) => item.platform), PLATFORM_LABELS)}</dd></div>
           <div><dt>市场</dt><dd><MarketValues markets={[brief.primaryMarket, ...brief.secondaryMarkets]} /></dd></div>
           <div><dt>核心观众</dt><dd>{labelValues([brief.primaryAudience, ...brief.secondaryAudiences], AUDIENCE_LABELS)}</dd></div>
-          <div><dt>目标时长</dt><dd>{brief.targetDurationSec} 秒 · {brief.aspectRatio} {brief.aspectRatio === '9:16' ? '竖屏' : '横屏'}</dd></div>
+          <div><dt>目标时长</dt><dd>{brief.targetDurationSec} 秒</dd></div>
+          <div><dt>画面规格</dt><dd>{brief.aspectRatio} · {brief.aspectRatio === '9:16' ? '竖屏' : '横屏'}</dd></div>
         </dl>
         <div className="story-brief-baseline__constraints">
           <article><h3><Check size={15} />必须满足 <span>{brief.contentRequirements.length}</span></h3>{brief.contentRequirements.length ? <ul>{brief.contentRequirements.map((item) => <li key={item}>{item}</li>)}</ul> : <p>未设置额外必须满足项。</p>}</article>
@@ -1302,7 +1425,9 @@ export function StoryPage() {
           </div>
         </div> : null}
       </section>
+          </div>
 
+          <div className="story-workbench__panel" hidden={visibleWorkbenchView !== 'bible'}>
       {latestBible ? <section aria-labelledby="story-bible-title" className="story-section story-bible-grid">
         <header className="story-bible-grid__header">
           <div><p className="eyebrow">故事设定集 · 第 {latestBible.version} 版</p><h2 id="story-bible-title">故事世界与角色事实</h2><p>集中查看后续分集大纲和剧本必须遵循的世界观、连续性规则与角色动机。</p></div>
@@ -1374,7 +1499,9 @@ export function StoryPage() {
           {characterRevisionReview ? <section className={`character-revision-review is-${characterRevisionReview.review.verdict.toLowerCase()}`}><header><div><span>{characterRevisionReview.review.verdict === 'CONFLICT' ? '发现逻辑冲突' : '审核通过'}</span><h3>{characterRevisionReview.review.summary}</h3></div><small>{characterRevisionReview.provider}/{characterRevisionReview.model}</small></header>{characterRevisionReview.review.issues.length ? <ul>{characterRevisionReview.review.issues.map((issue) => <li data-severity={issue.severity.toLowerCase()} key={issue.code}><strong>{issue.severity === 'BLOCKER' ? '冲突' : issue.severity === 'WARNING' ? '提醒' : '信息'}</strong><div><p>{issue.message}</p><small>{issue.suggestion}</small></div></li>)}</ul> : <p>未发现需要阻止修改的故事逻辑问题。</p>}<div className="character-revision-impact"><div><span>人物关系</span><strong>{characterRevisionReview.affected.relationshipCount} 条</strong></div><div><span>分集大纲</span><strong>{characterRevisionReview.affected.outlineCount} 版</strong></div><div><span>剧本</span><strong>{characterRevisionReview.affected.scriptCount} 版</strong></div></div><p>确认后将创建新的故事设定和关系草稿；旧版本继续保留。重新确认关系后，系统才会生成同步后的故事线与剧本。</p></section> : null}
         </div> : null}
       </Modal>
+          </div>
 
+          <div className="story-workbench__panel story-workbench__panel--relationships" hidden={visibleWorkbenchView !== 'relationships'}>
       {workspace.relationshipGraphVersions.length ? <RelationshipGraphSection
         characters={relationshipCharacters}
         focusTarget={relationshipFocus}
@@ -1387,8 +1514,10 @@ export function StoryPage() {
       /> : null}
 
       {workspace.relationshipGraphStale ? <div className="story-relationship-stale" role="alert"><AlertTriangle size={18} /><div><strong>当前剧本使用的是旧关系版本</strong><p>新的关系修改版尚未批准。当前剧本可以查看，但不能批准；请先完成关系修改并重新生成剧本。</p></div></div> : null}
+          </div>
 
       {latestOutline && latestScript ? <>
+          <div className="story-workbench__panel" hidden={visibleWorkbenchView !== 'structure'}>
         <section className="story-section story-outline-section"><article><p className="eyebrow">分集大纲 · 第 {latestOutline.episodeOrdinal} 集</p><h2>{stringValue(outlinePayload.title)}</h2><dl className="story-outline"><div><dt>开场钩子</dt><dd>{stringValue(outlinePayload.hook)}</dd></div><div><dt>目标</dt><dd>{stringValue(outlinePayload.objective)}</dd></div><div><dt>冲突</dt><dd>{stringValue(outlinePayload.conflict)}</dd></div><div><dt>反转</dt><dd>{stringValue(outlinePayload.turn)}</dd></div><div><dt>悬念</dt><dd>{stringValue(outlinePayload.cliffhanger)}</dd></div></dl></article></section>
 
         <section className="story-section">
@@ -1405,7 +1534,6 @@ export function StoryPage() {
             <article><h3>节拍表</h3><ol>{engineBeats.map((beat) => <li key={String(beat.sequence)}><strong>{localizeDisplayText(stringValue(beat.beat_type))}</strong><span>{(Number(beat.at_ms) / 1000).toFixed(1)} 秒 · {stringValue(beat.description)}</span><small>{stringValue(beat.story_state_change)}</small></li>)}</ol></article>
           </div>
         </section>
-
         <section className="story-section">
           <div className="section-heading"><div><p className="eyebrow">爆款叙事引擎 · {stringValue(breakoutPayload.formula_version, '待生成')}</p><h2>从持续误判到情感秩序重建</h2><p>{stringValue(breakoutPayload.formula, '弱势外壳 × 顶级内核 × 持续误判 × 分段认证 × 关系重排 × 情感秩序重建 × 可续作单元')}</p></div></div>
           <div className="breakout-contract-grid">
@@ -1420,11 +1548,23 @@ export function StoryPage() {
             <article><h3>关系重排</h3><ol>{relationshipReorders.map((relationship) => <li key={stringValue(relationship.relationship_key)}><strong>{stringValue(relationship.relationship_key)}</strong><span>{stringValue(relationship.before)} → {stringValue(relationship.after)}</span><small>{stringValue(relationship.emotional_consequence)}</small></li>)}</ol></article>
           </div>
         </section>
+          </div>
 
+          <div className="story-workbench__panel" hidden={visibleWorkbenchView !== 'script'}>
         <section className="story-section">
-          <div className="section-heading"><div><p className="eyebrow">剧本 · 第 {latestScript.episodeOrdinal} 集 · 第 {latestScript.version} 版</p><h2>结构化首集剧本</h2><p>{Math.round(latestScript.estimatedDurationMs / 1000)} 秒 · 内容评审：{criticStatus} · {latestScript.provider}/{latestScript.model}</p></div><StatusBadge status={latestScript.status} /></div>
+          <div className="section-heading story-script-heading">
+            <div><p className="eyebrow">剧本 · 第 {latestScript.episodeOrdinal} 集 · 第 {latestScript.version} 版</p><h2>结构化本集剧本</h2><p>总时长 {Math.round(latestScript.estimatedDurationMs / 1000)} 秒 · {latestScript.scenes.length} 个场景</p></div>
+            <div className="story-script-heading__actions">
+              <StatusBadge status={latestScript.status} />
+              <Button disabled={acting || workspace.relationshipGraphStale || latestScript.status !== 'READY_FOR_REVIEW' || project.status !== 'SCRIPT_READY'} onClick={() => setApproveScriptOpen(true)}><Check size={16} />{workspace.relationshipGraphStale ? '关系更新后才能批准' : '批准本集剧本'}</Button>
+            </div>
+          </div>
+          <p className={workspace.relationshipGraphStale ? 'story-script-approval-note is-stale' : 'story-script-approval-note'}>
+            {workspace.relationshipGraphStale ? '关系修改版尚未批准，当前剧本已过期。' : '批准后锁定第 2 阶段，并让全部剧本角色进入前期制作。'}
+          </p>
           <div className="script-scene-list">
-            {latestScript.scenes.map((scene) => {
+            {selectedScene ? (() => {
+              const scene = selectedScene
               const relationshipBeat = relationshipBeatForScene(scene.ordinal)
               return (
                 <article key={scene.id}>
@@ -1459,12 +1599,15 @@ export function StoryPage() {
                     {relationshipBeat && scriptRelationshipGraph ? (
                       <button
                         className="script-relationship-link"
-                        onClick={() => setRelationshipFocus({
-                          graphId: scriptRelationshipGraph.id,
-                          relationshipKey: relationshipBeat.relationshipKey,
-                          beatOrdinal: relationshipBeat.ordinal,
-                          requestId: Date.now(),
-                        })}
+                        onClick={() => {
+                          setRelationshipFocus({
+                            graphId: scriptRelationshipGraph.id,
+                            relationshipKey: relationshipBeat.relationshipKey,
+                            beatOrdinal: relationshipBeat.ordinal,
+                            requestId: Date.now(),
+                          })
+                          setActiveWorkbenchView('relationships')
+                        }}
                         type="button"
                       >
                         <Workflow size={13} />查看对应关系变化
@@ -1473,19 +1616,17 @@ export function StoryPage() {
                   </footer>
                 </article>
               )
-            })}
+            })() : <div className="story-workbench__empty">当前剧本还没有可审查的场景。</div>}
           </div>
-          {directorReviewError ? (
-            <div className="director-review-error" role="alert">
-              <AlertTriangle size={14} />{directorReviewError}
-            </div>
-          ) : null}
-          <div className="story-direction-actions"><span>{workspace.relationshipGraphStale ? '关系修改版尚未批准，当前剧本已过期。' : '批准后锁定第 2 阶段，并让全部剧本角色进入前期制作。'}</span><Button disabled={acting || workspace.relationshipGraphStale || latestScript.status !== 'READY_FOR_REVIEW' || project.status !== 'SCRIPT_READY'} onClick={() => setApproveScriptOpen(true)}><Check size={16} />{workspace.relationshipGraphStale ? '关系更新后才能批准' : '批准首集剧本'}</Button></div>
         </section>
+          </div>
       </> : null}
+        </main>
+
+      </div>
 
       <ImpactConfirmModal
-        confirmLabel="批准首集剧本"
+        confirmLabel="批准本集剧本"
         description="批准后剧本版本将冻结，修改需创建修改版。"
         items={[
           { icon: <LockKeyhole size={16} />, title: '锁定第 2 阶段', detail: `剧本第 ${latestScript?.version ?? 1} 版将成为后续制作的文本基线。` },
@@ -1497,19 +1638,19 @@ export function StoryPage() {
         onConfirm={() => void confirmApproveScript()}
         open={approveScriptOpen}
         subtitle="确认剧本、关系基线与角色设定无误后再继续。"
-        title="批准首集剧本？"
+        title="批准本集剧本？"
       />
 
       <ImpactConfirmModal
-        cancelLabel="暂不处理"
+        cancelLabel="先不处理"
         confirmLabel={
           directorReviewAction?.type === 'EXECUTE'
-            ? '确认创建修改版'
+            ? '采用并生成修改版'
             : directorReviewAction?.decision === 'APPROVE'
-              ? '批准修改版'
+              ? '确认使用这版'
               : directorReviewAction?.decision === 'ROLLBACK'
-                ? '创建恢复版本'
-                : '拒绝建议'
+                ? '恢复原来的版本'
+                : '不采用'
         }
         confirmVariant={
           directorReviewAction?.type === 'DECIDE'
@@ -1524,28 +1665,34 @@ export function StoryPage() {
         items={directorReviewAction ? [
           {
             icon: <GitMerge size={16} />,
-            title: directorReviewAction.type === 'EXECUTE' ? '创建新剧本版本' : '记录明确决策',
+            title: directorReviewAction.type === 'EXECUTE' ? '保留原稿，另存修改版' : '保存这次选择',
             detail: directorReviewAction.type === 'EXECUTE'
-              ? '原剧本不会被覆盖；所选修改将写入新的 ScriptVersion。'
-              : '本次批准、拒绝或回退会进入 Proposal 与 Command 审计记录。',
+              ? '原来的剧本不会变；这次调整会另存为一个新版本。'
+              : '系统会记下你是采用、不采用，还是恢复原稿，之后可以查到。',
           },
           {
             icon: <AlertTriangle size={16} />,
-            title: `影响 ${directorReviewAction.proposal.affectedObjects.length} 项下游对象`,
+            title: directorReviewAction.proposal.affectedObjects.length
+              ? `还需检查 ${directorReviewAction.proposal.affectedObjects.length} 项相关内容`
+              : '没有其他内容受影响',
             detail: directorReviewAction.proposal.affectedObjects.length
-              ? '作用域内镜头、Take 与时间线片段会标记为需要复核。'
-              : '当前尚无绑定的生产资产，不需要触发重生成。',
+              ? '与这次修改有关的镜头和时间安排会标记为待检查，不会自动重做。'
+              : '目前没有关联的镜头或成片素材，不需要重新生成。',
           },
           {
             icon: <LockKeyhole size={16} />,
-            title: `保护 ${directorReviewAction.proposal.preservedObjects.length} 项范围外资产`,
-            detail: '范围外 Approved Take 将通过状态哈希校验保持不变。',
+            title: directorReviewAction.proposal.preservedObjects.length
+              ? `其他 ${directorReviewAction.proposal.preservedObjects.length} 项内容保持不变`
+              : '没有需要额外保护的内容',
+            detail: directorReviewAction.proposal.preservedObjects.length
+              ? '这次修改范围之外的已确认内容不会改变。'
+              : '当前没有范围外的已确认内容。',
           },
           ...(directorApprovalRequiresOverride(directorReviewAction)
             ? [{
                 icon: <AlertTriangle size={16} />,
-                title: '时长门禁需要人工覆盖',
-                detail: '批准不会触发昂贵生成，但必须记录接受当前时长风险的原因。',
+                title: '需要说明为什么仍要采用',
+                detail: '当前修改可能影响时长。请确认风险可以接受，并写下后续检查方式。',
               }]
             : []),
         ] : []}
@@ -1558,21 +1705,21 @@ export function StoryPage() {
         }}
         onConfirm={() => void confirmDirectorReviewAction()}
         open={directorReviewAction !== null}
-        subtitle="该操作只修改已展示的影响范围，不会触发正式视频、配音或音乐生成。"
+        subtitle="这次只改你刚才看到的内容，不会生成视频、配音或音乐。"
         title={
           directorReviewAction?.type === 'EXECUTE'
-            ? '采用 Director 修复方案？'
+            ? '采用这个修改方案？'
             : directorReviewAction?.decision === 'APPROVE'
-              ? '批准这次修改？'
+              ? '确认使用这个修改版？'
               : directorReviewAction?.decision === 'ROLLBACK'
-                ? '回退到修改前内容？'
-                : '拒绝这条 Director 建议？'
+                ? '恢复到修改前？'
+                : '不采用这条建议？'
         }
       >
         {directorApprovalRequiresOverride(directorReviewAction) ? (
           <label className="director-approval-override">
-            <strong>覆盖理由</strong>
-            <span>说明为什么当前时长风险仍可接受，以及后续如何复核。</span>
+            <strong>为什么仍要采用？</strong>
+            <span>系统已按当前时长问题填写了一版，你可以直接修改。</span>
             <textarea
               autoFocus
               maxLength={1000}

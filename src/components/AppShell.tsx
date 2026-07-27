@@ -6,20 +6,22 @@ import {
   ChevronDown,
   CircleUserRound,
   CloudOff,
+  Coins,
   Film,
   FolderKanban,
   Images,
   ListChecks,
   LockKeyhole,
   Menu,
+  Moon,
   Network,
   PanelLeftClose,
   PanelLeftOpen,
   Rocket,
   Settings,
   ShieldCheck,
+  Sun,
   Users,
-  Wifi,
 } from 'lucide-react'
 import { Link, NavLink, Outlet, useLocation } from 'react-router'
 import { fetchJobs, fetchProjectReadiness } from '../api/client'
@@ -54,7 +56,6 @@ async function requestWithTimeout<T>(
 }
 
 const SIDEBAR_COLLAPSED_KEY = 'studio-sidebar-collapsed'
-const MOBILE_NAV_HINTS_KEY = 'studio-mobile-nav-hints-v1'
 
 const navigation = [
   { to: '/projects', label: '短剧库', hint: '浏览、创建与管理短剧项目', icon: FolderKanban },
@@ -74,7 +75,7 @@ function breadcrumb(pathname: string, projectName: string, projectHref: string):
   if (pathname.endsWith('/preview')) return [{ label: projectName, to: projectHref }, { label: '第 1 集', to: projectHref }, { label: '完整小样' }]
   if (pathname.endsWith('/canvas')) return [{ label: projectName, to: projectHref }, { label: '创作画布' }]
   if (pathname.endsWith('/story')) return [{ label: projectName, to: projectHref }, { label: '故事剧本' }]
-  if (pathname.endsWith('/characters')) return [{ label: projectName, to: projectHref }, { label: '角色形象生成与锁定' }]
+  if (pathname.endsWith('/characters')) return [{ label: projectName, to: projectHref }, { label: '角色视觉' }]
   if (pathname.endsWith('/preproduction')) return [{ label: projectName, to: projectHref }, { label: '前期资产' }]
   if (pathname.endsWith('/storyboard')) return [{ label: projectName, to: projectHref }, { label: '动态分镜' }]
   if (pathname.endsWith('/production')) return [{ label: projectName, to: projectHref }, { label: '正式制作与交付' }]
@@ -94,7 +95,7 @@ function projectSubnavItems(
     { label: '样片工作台', to: currentProjectLink, icon: Film, offlineReady: true },
     { label: '创作画布', to: `/projects/${routeProjectId}/canvas`, icon: Network, offlineReady: false },
     { label: '故事剧本', to: `/projects/${routeProjectId}/story`, icon: BookOpenText, offlineReady: false },
-    { label: '角色', to: `/projects/${routeProjectId}/characters`, icon: Users, offlineReady: false },
+    { label: '角色视觉', to: `/projects/${routeProjectId}/characters`, icon: Users, offlineReady: false },
     { label: '前期资产', to: `/projects/${routeProjectId}/preproduction`, icon: Boxes, offlineReady: false },
     { label: '动态分镜', to: `/projects/${routeProjectId}/storyboard`, icon: Images, offlineReady: false },
     { label: '正式制作', to: `/projects/${routeProjectId}/production`, icon: Rocket, offlineReady: false },
@@ -102,6 +103,10 @@ function projectSubnavItems(
     ...item,
     locked: apiStatus !== 'connected' && !item.offlineReady,
   }))
+}
+
+export function shouldShowProjectWorkflow(pathname: string, projectId: string | null | undefined) {
+  return Boolean(projectId && projectId !== 'new' && !pathname.endsWith('/story'))
 }
 
 export function AppShell() {
@@ -116,22 +121,6 @@ export function AppShell() {
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [onboardingOpen, setOnboardingOpen] = useState(false)
   const [mobileProjectNavOpen, setMobileProjectNavOpen] = useState(false)
-  const [showMobileNavHints, setShowMobileNavHints] = useState(() => {
-    try {
-      return window.localStorage.getItem(MOBILE_NAV_HINTS_KEY) !== 'done'
-    } catch {
-      return true
-    }
-  })
-
-  const dismissMobileNavHints = () => {
-    setShowMobileNavHints(false)
-    try {
-      window.localStorage.setItem(MOBILE_NAV_HINTS_KEY, 'done')
-    } catch {
-      // 本地存储不可用时仅在本次会话内生效。
-    }
-  }
 
   useEffect(() => {
     if (!shouldShowOnboarding()) return
@@ -153,7 +142,7 @@ export function AppShell() {
   const [readiness, setReadiness] = useState<ProjectReadiness | null>(null)
   const [readinessErrorProjectId, setReadinessErrorProjectId] = useState<string | null>(null)
   const [readinessLoading, setReadinessLoading] = useState(false)
-  const { apiStatus, jobs: contextJobs, project, projectSummaries } = useStudio()
+  const { apiStatus, jobs: contextJobs, project, projectSummaries, themeMode, resolvedTheme, setThemeMode } = useStudio()
   const location = useLocation()
   const pathProjectId = location.pathname.match(/^\/projects\/([^/]+)/)?.[1]
   const queryProjectId = new URLSearchParams(location.search).get('project')
@@ -169,6 +158,11 @@ export function AppShell() {
   const currentProjectMeta = contextualProject && contextualProject.id !== project.id
     ? getStatusLabel(contextualProject.status)
     : '第 1 集 · 验证样片'
+  const themeToggleTarget = resolvedTheme === 'dark' ? 'light' : 'dark'
+  const themeToggleLabel = themeToggleTarget === 'dark' ? '暗黑模式' : '亮色模式'
+  const currentThemeLabel = themeMode === 'system'
+    ? `跟随系统（当前${resolvedTheme === 'dark' ? '暗黑' : '亮色'}）`
+    : resolvedTheme === 'dark' ? '暗黑模式' : '亮色模式'
   const { notify } = useToast()
   const visibleJobs = apiStatus === 'connected'
     ? (routeProjectId
@@ -353,12 +347,6 @@ export function AppShell() {
         </Link>
 
         <nav className="sidebar__nav">
-          {showMobileNavHints ? (
-            <div className="mobile-nav-hints">
-              <p>底部导航可快速切换工作区</p>
-              <button onClick={dismissMobileNavHints} type="button">知道了</button>
-            </div>
-          ) : null}
           <p className="sidebar__label">工作区</p>
           {navigation.map(({ to, label, hint, icon: Icon }) => {
             const href = label === '生成任务' ? taskHref : to
@@ -366,13 +354,11 @@ export function AppShell() {
             <NavLink
               className={({ isActive }) => `nav-item ${isActive ? 'nav-item--active' : ''}`}
               key={to}
-              onClick={dismissMobileNavHints}
               title={hint}
               to={href}
             >
               <Icon size={18} strokeWidth={1.8} />
               <span>{label}</span>
-              {showMobileNavHints ? <span className="nav-item__hint">{hint}</span> : null}
               {label === '生成任务' && activeJobCount > 0 ? <em>{activeJobCount}</em> : null}
             </NavLink>
             )
@@ -456,11 +442,13 @@ export function AppShell() {
           </div>
           <div className="topbar__actions">
             <span
-              className={`system-status system-status--${apiStatus}`}
-              title={apiStatus === 'loading' ? '正在连接后端服务' : undefined}
+              aria-label={apiStatus === 'connected' ? '项目服务已连接' : undefined}
+              className={`system-status system-status--${apiStatus}${apiStatus === 'connected' ? ' system-status--compact' : ''}`}
+              role={apiStatus === 'connected' ? 'status' : undefined}
+              title={apiStatus === 'connected' ? '项目服务已连接' : apiStatus === 'loading' ? '正在连接后端服务' : undefined}
             >
-              {apiStatus === 'connected' ? <Wifi size={14} /> : <CloudOff size={14} />}
-              {apiStatus === 'connected' ? <span>已连接</span> : apiStatus === 'loading' ? <span>连接中</span> : (
+              {apiStatus === 'connected' ? <span aria-hidden="true" className="system-status__indicator" /> : <CloudOff size={14} />}
+              {apiStatus === 'connected' ? null : apiStatus === 'loading' ? <span>连接中</span> : (
                 <GlossaryTip
                   focusable
                   align="end"
@@ -470,10 +458,22 @@ export function AppShell() {
               )}
             </span>
             <div className="credit-balance" title="演示积分，不对应真实货币">
-              <span />
+              <Coins aria-hidden="true" size={15} strokeWidth={1.9} />
               <strong>{project.availablePoints.toLocaleString('zh-CN')}</strong>
-              <small>可用积分</small>
+              <small>积分</small>
             </div>
+            <Button
+              aria-label={`${currentThemeLabel}，切换到${themeToggleLabel}`}
+              onClick={() => {
+                setThemeMode(themeToggleTarget)
+                notify(`已切换到「${themeToggleLabel}」。`, 'info')
+              }}
+              size="sm"
+              title={`切换到${themeToggleLabel}`}
+              variant="ghost"
+            >
+              {themeToggleTarget === 'dark' ? <Moon size={18} /> : <Sun size={18} />}
+            </Button>
             <div className="popover-wrap">
               <Button
                 aria-controls="notification-popover"
@@ -551,7 +551,7 @@ export function AppShell() {
           readiness: contextReadiness,
         }}>
           <main className="content-area" id="main-content" tabIndex={-1}>
-            {pathProjectId && pathProjectId !== 'new' ? <ProjectWorkflowBar /> : null}
+            {shouldShowProjectWorkflow(location.pathname, pathProjectId) ? <ProjectWorkflowBar /> : null}
             <ErrorBoundary
               key={`${location.pathname}:${ROUTE_ERROR_BOUNDARY_VERSION}`}
               resetKey={`${location.pathname}${location.search}`}

@@ -1,4 +1,5 @@
 export type VisualMode = 'standard' | 'focus' | 'cinema'
+export type ThemeMode = 'light' | 'dark' | 'system'
 export type ApiStatus = 'loading' | 'connected' | 'mock_fallback'
 export type NarrativeProtagonist = 'unspecified' | 'male' | 'female' | 'dual' | 'ensemble'
 export type TargetAudience = 'male_frequency' | 'female_frequency' | 'general'

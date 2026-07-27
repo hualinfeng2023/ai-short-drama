@@ -387,6 +387,11 @@ class ShortDramaEngine(BaseModel):
     continuation_hook: str = Field(min_length=1)
     beats: list[ShortDramaBeat] = Field(min_length=7, max_length=16)
 
+    @field_validator("continuation_hook")
+    @classmethod
+    def validate_continuation_hook(cls, value: str) -> str:
+        return _reject_question_hook(value)
+
     @model_validator(mode="after")
     def validate_short_drama_contract(self) -> "ShortDramaEngine":
         sequences = [item.sequence for item in self.beats]
@@ -1891,13 +1896,74 @@ def _relationship_context_indexes(
     return edges, beats
 
 
+def validate_narrative_review_relationship_context(
+    review: NarrativeReview,
+    relationship_graph: dict[str, Any],
+) -> None:
+    edges, beats = _relationship_context_indexes(relationship_graph)
+    valid_auth_sequences = {
+        item.sequence for item in review.breakout_engine.authentication_ladder
+    }
+    approved_pairs: set[tuple[str, int]] = set()
+    for beat in beats.values():
+        relationship_key = str(beat.get("relationship_key") or "")
+        trigger_ref = str(beat.get("trigger_ref") or "")
+        if relationship_key not in edges or not trigger_ref.startswith("authentication:"):
+            continue
+        try:
+            sequence = int(trigger_ref.split(":", 1)[1])
+        except ValueError:
+            continue
+        if sequence in valid_auth_sequences:
+            approved_pairs.add((relationship_key, sequence))
+
+    invalid_reorders = [
+        {
+            "relationship_key": reorder.relationship_key,
+            "trigger_auth_sequence": reorder.trigger_auth_sequence,
+        }
+        for reorder in review.breakout_engine.relationship_reorders
+        if (reorder.relationship_key, reorder.trigger_auth_sequence) not in approved_pairs
+    ]
+    if not invalid_reorders:
+        return
+
+    available_pairs = [
+        {
+            "relationship_key": relationship_key,
+            "trigger_auth_sequence": sequence,
+        }
+        for relationship_key, sequence in sorted(approved_pairs)
+    ]
+    raise ModelOutputSemanticError(
+        "RELATIONSHIP_REORDER_AUTH_MISMATCH",
+        "关系重排与本集认证阶梯、批准关系网不一致",
+        repair_message=(
+            "breakout_engine.relationship_reorders 中每一项必须从以下批准且本集可用的"
+            f"关系—认证组合中选择：{json.dumps(available_pairs, ensure_ascii=False)}。"
+            "修改 relationship_key 或 trigger_auth_sequence 使其完全匹配；"
+            "不得继续引用列表之外的组合。"
+        ),
+        details={
+            "invalid_reorders": invalid_reorders,
+            "available_pairs": available_pairs,
+        },
+    )
+
+
 def apply_relationship_context_to_script_package(
     package_payload: dict[str, Any], relationship_graph: dict[str, Any]
 ) -> ScriptPackageOutput:
     payload = json.loads(json.dumps(package_payload, ensure_ascii=False))
     edges, beats = _relationship_context_indexes(relationship_graph)
     for script in payload.get("scripts", []):
-        reorders = script.get("breakout_engine", {}).get("relationship_reorders", [])
+        breakout_engine = script.get("breakout_engine", {})
+        reorders = breakout_engine.get("relationship_reorders", [])
+        valid_auth_sequences = {
+            int(item["sequence"])
+            for item in breakout_engine.get("authentication_ladder", [])
+            if isinstance(item, dict) and isinstance(item.get("sequence"), int)
+        }
         for reorder in reorders:
             relationship_key = str(reorder.get("relationship_key", ""))
             edge = edges.get(relationship_key)
@@ -1908,9 +1974,48 @@ def apply_relationship_context_to_script_package(
             ]
             if not matching_beats:
                 continue
-            beat = matching_beats[0]
+            trigger_auth_sequence = reorder.get("trigger_auth_sequence")
+            auth_beats: list[tuple[dict[str, Any], int]] = []
+            for beat in matching_beats:
+                trigger_ref = str(beat.get("trigger_ref") or "")
+                if not trigger_ref.startswith("authentication:"):
+                    continue
+                try:
+                    sequence = int(trigger_ref.split(":", 1)[1])
+                except ValueError:
+                    continue
+                if sequence in valid_auth_sequences:
+                    auth_beats.append((beat, sequence))
+            if not auth_beats:
+                raise ValueError(
+                    f"关系 {relationship_key} 没有可用于当前剧本认证阶梯的变化节点"
+                )
+            requested_beat_id = str(reorder.get("relationship_beat_id", ""))
+            selected = next(
+                (
+                    item
+                    for item in auth_beats
+                    if str(item[0].get("relationship_beat_id", "")) == requested_beat_id
+                ),
+                None,
+            )
+            if selected is None:
+                selected = next(
+                    (item for item in auth_beats if item[1] == trigger_auth_sequence),
+                    None,
+                )
+            if selected is None:
+                selected = min(
+                    auth_beats,
+                    key=lambda item: (
+                        int(item[0].get("ordinal") or 0),
+                        str(item[0].get("relationship_beat_id", "")),
+                    ),
+                )
+            beat, selected_auth_sequence = selected
             reorder.update(
                 {
+                    "trigger_auth_sequence": selected_auth_sequence,
                     "source_character_key": edge["source_character_key"],
                     "target_character_key": edge["target_character_key"],
                     "before_state": beat["before_state"],
@@ -2247,11 +2352,24 @@ async def _ark_json(
             if on_validation_failure is not None:
                 await on_validation_failure(attempt + 1, diagnostic)
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            diagnostic = {
+                "attempt": attempt + 1,
+                "request_id": request_id,
+                "error_type": type(exc).__name__,
+            }
+            attempt_diagnostics.append(diagnostic)
+            if attempt < 2:
+                await asyncio.sleep(0.25 * (2**attempt))
+                continue
             raise TextProviderError(
                 "ARK_TEXT_NETWORK_ERROR",
                 "火山方舟文本服务暂时不可达",
                 retryable=True,
-                details={"request_id": request_id, "exception_type": type(exc).__name__},
+                details={
+                    "request_id": request_id,
+                    "exception_type": type(exc).__name__,
+                    "attempts": attempt_diagnostics,
+                },
             ) from exc
         except httpx.HTTPStatusError as exc:
             retryable = (
@@ -3021,7 +3139,8 @@ class RoutedTextProvider:
             f"{relationship_guard}"
             f"短剧引擎必须落实：{SHORT_DRAMA_FORMULA}；至少两级递进式因果反转，"
             "节拍必须包含 HOOK、ESCALATION、PAYOFF、CLOSURE、CONTINUATION_HOOK，"
-            "最后一个节拍必须是续作悬念。"
+            "最后一个节拍必须是续作悬念。continuation_hook 必须是下一单元将发生的具体人物行动、"
+            "事实揭示或新威胁，禁止问号、观众提问、互动 CTA 和只有主题没有事件的口号。"
             f"爆款引擎必须落实：{BREAKOUT_FORMULA}；误判、认证与关系重排必须有因果关系。"
             "服务端会统一时长、节拍时间、场景引用，以及两个引擎间重复的闭环和续作字段。"
             "严格返回 JSON，不要 Markdown。输出必须符合此 JSON Schema：\n"
@@ -3031,10 +3150,22 @@ class RoutedTextProvider:
             f"{json.dumps(script, ensure_ascii=False)}"
             f"{relationship_block}"
         )
+
+        def validate_relationship_reorders(candidate: BaseModel) -> None:
+            if relationship_graph is None:
+                return
+            review = (
+                candidate
+                if isinstance(candidate, NarrativeReview)
+                else NarrativeReview.model_validate(candidate.model_dump(mode="json"))
+            )
+            validate_narrative_review_relationship_context(review, relationship_graph)
+
         result = await _ark_json(
             settings,
             prompt=prompt,
             validator=NarrativeReview,
+            semantic_validator=validate_relationship_reorders,
             thinking_type="enabled",
         )
         _enforce_generated_targeting(result.payload, brief, require_contract=False)

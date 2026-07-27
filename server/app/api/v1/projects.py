@@ -13,6 +13,8 @@ from app.schemas import (
     BriefAvoidancesSuggestionRequest,
     BriefBlockingQuestionsSuggestionRead,
     BriefBlockingQuestionsSuggestionRequest,
+    BriefEmotionalRewardSuggestionRead,
+    BriefEmotionalRewardSuggestionRequest,
     BriefRequirementsSuggestionRead,
     BriefRequirementsSuggestionRequest,
     BriefStoryRewriteRead,
@@ -39,6 +41,7 @@ from app.services.domain_commands import (
     dispatch_project_create_command,
     dispatch_project_delete_command,
 )
+from app.services.emotional_reward_suggestion import suggest_emotional_reward
 from app.services.project_naming import ProjectNamingError, suggest_project_name
 from app.services.project_readiness import get_project_readiness
 from app.services.projects import (
@@ -133,6 +136,19 @@ async def brief_requirement_suggestion(
 ) -> dict[str, object]:
     project_or_404(session, project_id)
     result: BriefRequirementsSuggestionRead = await suggest_brief_requirements(
+        payload.model_dump(mode="json")
+    )
+    return success(result)
+
+
+@router.post("/projects/{project_id}/brief-emotional-reward-suggestions")
+async def brief_emotional_reward_suggestion(
+    project_id: str,
+    payload: BriefEmotionalRewardSuggestionRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    project_or_404(session, project_id)
+    result: BriefEmotionalRewardSuggestionRead = await suggest_emotional_reward(
         payload.model_dump(mode="json")
     )
     return success(result)

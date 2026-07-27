@@ -42,15 +42,17 @@ export function Button({
 type SurfaceProps = HTMLAttributes<HTMLElement> & {
   as?: 'article' | 'aside' | 'div' | 'section'
   elevation?: 'none' | 'surface' | 'floating'
+  outline?: 'none' | 'interactive' | 'selected' | 'editing' | 'warning' | 'danger'
   padding?: 'none' | 'sm' | 'md' | 'lg'
   radius?: 'control' | 'surface' | 'panel'
-  tone?: 'default' | 'subtle' | 'muted' | 'transparent'
+  tone?: 'default' | 'subtle' | 'muted' | 'info' | 'success' | 'warning' | 'danger' | 'transparent'
 }
 
 export function Surface({
   as = 'section',
   className = '',
-  elevation = 'surface',
+  elevation = 'none',
+  outline = 'none',
   padding = 'lg',
   radius = 'surface',
   tone = 'default',
@@ -60,6 +62,7 @@ export function Surface({
     ...props,
     className: `ds-surface ${className}`.trim(),
     'data-elevation': elevation,
+    'data-outline': outline,
     'data-padding': padding,
     'data-radius': radius,
     'data-tone': tone,
@@ -763,6 +766,8 @@ const statusMeta: Record<string, { label: string; tone: string; icon: ReactNode 
   PARSING: { label: '解析中', tone: 'info', icon: <LoaderCircle size={12} className="spin" /> },
   PASSED_WITH_DEGRADATION: { label: '降级后通过', tone: 'warning', icon: <AlertTriangle size={12} /> },
   QC_PASSED: { label: '质量检查通过', tone: 'success', icon: <Check size={12} /> },
+  QC_FAILED: { label: '质量检查未通过', tone: 'danger', icon: <X size={12} /> },
+  QC_REVIEW_REQUIRED: { label: '质量检查需处理', tone: 'warning', icon: <AlertTriangle size={12} /> },
   READY_FOR_G5: { label: '可进入第 5 阶段', tone: 'success', icon: <Check size={12} /> },
   READY_FOR_REVIEW: { label: '待审核', tone: 'warning', icon: <AlertTriangle size={12} /> },
   RESTRICTED_DEMO: { label: '仅限演示', tone: 'warning', icon: <AlertTriangle size={12} /> },

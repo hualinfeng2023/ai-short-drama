@@ -28,6 +28,7 @@ import {
   rewriteBriefStory,
   suggestBriefAvoidances,
   suggestBriefBlockingQuestions,
+  suggestBriefEmotionalReward,
   suggestBriefRequirements,
   suggestProjectName,
   updateProjectDraft,
@@ -240,6 +241,8 @@ export function ProjectBriefPage() {
   const [ideaGenerationStage, setIdeaGenerationStage] = useState(0)
   const [ideaGenerationProgress, setIdeaGenerationProgress] = useState(0)
   const [draftingRequirements, setDraftingRequirements] = useState(false)
+  const [suggestingEmotionalReward, setSuggestingEmotionalReward] = useState(false)
+  const [emotionalRewardSuggestionNote, setEmotionalRewardSuggestionNote] = useState<string | null>(null)
   const [requirementsBeforeDraft, setRequirementsBeforeDraft] = useState<string | null>(null)
   const [requirementsDraftNote, setRequirementsDraftNote] = useState<string | null>(null)
   const [draftingAvoidances, setDraftingAvoidances] = useState(false)
@@ -255,6 +258,7 @@ export function ProjectBriefPage() {
   const [error, setError] = useState<string | null>(null)
   const [briefWizardStep, setBriefWizardStep] = useState<BriefWizardStep>('core')
   const storyIdeaRef = useRef<HTMLTextAreaElement>(null)
+  const emotionalRewardSuggestionProjectRef = useRef<string | null>(null)
 
   useLayoutEffect(() => {
     if (storyIdeaRef.current) fitStoryIdeaTextarea(storyIdeaRef.current)
@@ -266,6 +270,8 @@ export function ProjectBriefPage() {
     let active = true
     setLoading(true)
     setError(null)
+    setSuggestingEmotionalReward(false)
+    setEmotionalRewardSuggestionNote(null)
 
     const loadBriefData = async () => {
       const retryDelays = [0, 350, 900]
@@ -321,6 +327,39 @@ export function ProjectBriefPage() {
         setBaselineForm(persistedForm)
         setBriefVersion(briefs[0]?.version ?? null)
         setProposal(proposals[0] ?? null)
+        if (
+          canApplySmartDefaults
+          && persistedForm.emotionalRewards.length === 0
+          && emotionalRewardSuggestionProjectRef.current !== projectId
+        ) {
+          emotionalRewardSuggestionProjectRef.current = projectId
+          setSuggestingEmotionalReward(true)
+          void suggestBriefEmotionalReward(projectId, {
+            idea: persistedForm.idea,
+            genre: smartGenre,
+          })
+            .then((suggestion) => {
+              if (!active) return
+              setForm((current) => {
+                if (!current || current.emotionalRewards.length > 0) return current
+                return { ...current, emotionalRewards: [suggestion.reward] }
+              })
+              const label = EMOTIONAL_REWARD_OPTIONS.find(
+                ([value]) => value === suggestion.reward,
+              )?.[1] ?? suggestion.reward
+              setEmotionalRewardSuggestionNote(
+                `AI 已预选“${label}”：${suggestion.rationale}。可直接改选，保存后生效。`,
+              )
+            })
+            .catch(() => {
+              if (active) {
+                setEmotionalRewardSuggestionNote('AI 暂未给出建议，请手动选择至少一项。')
+              }
+            })
+            .finally(() => {
+              if (active) setSuggestingEmotionalReward(false)
+            })
+        }
       })
       .catch((reason: unknown) => {
         if (reason instanceof DOMException && reason.name === 'AbortError') return
@@ -1086,7 +1125,7 @@ export function ProjectBriefPage() {
 
             <BriefSection>
               <label className="brief-field brief-field--wide"><span>补充受众画像（可选）</span><input disabled={!editable} maxLength={240} onChange={(event) => updateField('audienceProfile', event.target.value)} placeholder="例如：25—40岁女性；仅用于本项目表达校准" value={form.audienceProfile} /><small>年龄、性别、兴趣或媒介习惯只作为项目画像，不决定主角、题材或情绪回报。</small></label>
-              <fieldset className="brief-choice-field brief-field--wide" disabled={!editable}><legend>情绪回报（可多选，至少一项）</legend><div className="brief-choice-grid">{EMOTIONAL_REWARD_OPTIONS.map(([value, label]) => <label key={value}><input checked={form.emotionalRewards.includes(value)} onChange={() => toggleEmotionalReward(value)} type="checkbox" /><span>{label}</span></label>)}</div><p className="brief-field__note">首批选题池参考：女频 {slateMix.female_frequency}% · 泛人群 {slateMix.general}% · 男频 {slateMix.male_frequency}%（仅多项目组合，不改本项目）。</p></fieldset>
+              <fieldset className="brief-choice-field brief-field--wide" disabled={!editable}><legend>情绪回报（可多选，至少一项）</legend><div className="brief-choice-grid">{EMOTIONAL_REWARD_OPTIONS.map(([value, label]) => <label key={value}><input checked={form.emotionalRewards.includes(value)} onChange={() => toggleEmotionalReward(value)} type="checkbox" /><span>{label}</span></label>)}</div>{suggestingEmotionalReward ? <p className="brief-field__note">AI 正在根据故事预选一项情绪回报……</p> : emotionalRewardSuggestionNote ? <p className="brief-field__note">{emotionalRewardSuggestionNote}</p> : null}<p className="brief-field__note">首批选题池参考：女频 {slateMix.female_frequency}% · 泛人群 {slateMix.general}% · 男频 {slateMix.male_frequency}%（仅多项目组合，不改本项目）。</p></fieldset>
             </BriefSection>
 
             <BriefSection

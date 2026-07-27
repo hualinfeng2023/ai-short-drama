@@ -18,6 +18,9 @@ import {
   Save,
   ShieldCheck,
   SlidersHorizontal,
+  Moon,
+  Monitor,
+  Sun,
 } from 'lucide-react'
 import {
   fetchProviderSettings,
@@ -32,12 +35,18 @@ import { Button, Modal, PageHeader, SelectControl, StatusBadge, Surface } from '
 import { ConfirmModal } from '../components/ConfirmModal'
 import { useStudio } from '../store/StudioContext'
 import { useToast } from '../store/ToastContext'
-import type { VisualMode } from '../types'
+import type { ThemeMode, VisualMode } from '../types'
 
 const modes: Array<{ id: VisualMode; title: string; description: string; tone: string; previewHint: string }> = [
   { id: 'standard', title: '标准工作台', description: '规范基线：浅灰画布、白色面板、蓝色单主色。', tone: '适合完整流程', previewHint: '侧栏 + 内容区 + 操作栏' },
   { id: 'focus', title: '专注模式', description: '更紧凑的间距与更少的辅助说明，优先信息密度。', tone: '适合高频审核', previewHint: '窄侧栏 + 高密度列表' },
-  { id: 'cinema', title: '暗房模式', description: '深色工作区与更强画面层级，突出小样和版本比较。', tone: '适合媒体审阅', previewHint: '深色画布 + 突出预览区' },
+  { id: 'cinema', title: '媒体审阅模式', description: '收紧审阅场景的留白与流程间距，突出小样和版本比较。', tone: '适合媒体审阅', previewHint: '紧凑画布 + 突出预览区' },
+]
+
+const themes: Array<{ id: ThemeMode; title: string; description: string }> = [
+  { id: 'light', title: '亮色模式', description: '在明亮环境下保持清晰的层级与对比。' },
+  { id: 'dark', title: '暗黑模式', description: '降低环境光干扰，适合长时间审阅画面。' },
+  { id: 'system', title: '跟随系统', description: '自动匹配设备当前的明暗外观设置。' },
 ]
 
 const PROMPT_MODEL_OPTIONS = [
@@ -131,7 +140,7 @@ function ConnectionResult({ result }: { result: ProviderConnectionResult | null 
 }
 
 export function SettingsPage() {
-  const { apiStatus, project, visualMode, setVisualMode, resetDemo, resyncCurrentProject } = useStudio()
+  const { apiStatus, project, visualMode, setVisualMode, themeMode, setThemeMode, resetDemo, resyncCurrentProject } = useStudio()
   const { notify } = useToast()
   const [settingsSection, setSettingsSection] = useState<'appearance' | 'runtime' | 'providers' | 'data'>('appearance')
   const [runtime, setRuntime] = useState<RuntimeConfig | null>(null)
@@ -351,8 +360,12 @@ export function SettingsPage() {
       <div className="settings-content" key={settingsSection}>
         {settingsSection === 'appearance' ? (
           <section>
-            <div className="section-heading"><div><h2>界面模式</h2></div></div>
-            <p className="settings-copy">三种模式共享同一信息架构与交互规则，切换只影响信息密度和画面层级。</p>
+            <div className="section-heading"><div><h2>颜色模式</h2></div></div>
+            <p className="settings-copy">颜色模式独立于工作台布局；选择“跟随系统”后会在设备外观变化时自动更新。</p>
+            <div className="theme-grid">{themes.map((theme) => <button aria-pressed={themeMode === theme.id} className={themeMode === theme.id ? 'active' : ''} key={theme.id} onClick={() => { if (themeMode !== theme.id) { setThemeMode(theme.id); notify(`已切换到「${theme.title}」。`, 'info') } }} type="button"><span aria-hidden="true" className={`theme-option-icon theme-option-icon--${theme.id}`}>{theme.id === 'light' ? <Sun size={18} /> : theme.id === 'dark' ? <Moon size={18} /> : <Monitor size={18} />}</span><span><strong>{theme.title}</strong><small>{theme.description}</small></span>{themeMode === theme.id ? <Check aria-label="当前选择" size={16} /> : null}</button>)}</div>
+
+            <div className="section-heading settings-section-heading"><div><h2>工作台布局</h2></div></div>
+            <p className="settings-copy">三种布局共享同一信息架构与交互规则，切换只影响信息密度和画面层级，不会改变颜色模式。</p>
             <div className="mode-grid">{modes.map((mode) => <button className={visualMode === mode.id ? 'active' : ''} key={mode.id} onClick={() => { if (visualMode !== mode.id) { setVisualMode(mode.id); notify(`已切换到「${mode.title}」，界面密度与层级已更新。`, 'info') } }}><span className={`mode-preview mode-preview--${mode.id}`} aria-hidden="true"><i /><i /><i /><span className="mode-preview__hint">{mode.previewHint}</span></span><div><strong>{mode.title}</strong><p>{mode.description}</p><small>{mode.tone}</small></div>{visualMode === mode.id ? <em><Check size={14} />当前</em> : null}</button>)}</div>
           </section>
         ) : null}

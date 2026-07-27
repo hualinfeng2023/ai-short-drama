@@ -4161,6 +4161,83 @@ def _director_timeline_preview(
     }
 
 
+def _current_director_revision_base(
+    session: Session,
+    *,
+    project: Project,
+    proposal_base: ScriptVersion,
+) -> ScriptVersion:
+    if proposal_base.status != "SUPERSEDED":
+        return proposal_base
+    current = session.scalar(
+        select(ScriptVersion)
+        .where(
+            ScriptVersion.project_id == project.id,
+            ScriptVersion.episode_ordinal == proposal_base.episode_ordinal,
+            ScriptVersion.status == "READY_FOR_REVIEW",
+        )
+        .order_by(ScriptVersion.version.desc())
+    )
+    if current is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DIRECTOR_PROPOSAL_STALE",
+                "message": "剧本已经更新，请重新审查当前场景",
+            },
+        )
+    return current
+
+
+def _current_director_change_target(
+    session: Session,
+    *,
+    proposal: dict[str, object],
+    proposal_target: ScriptScene | ScriptLine,
+    current_base: ScriptVersion,
+    change_scope: str,
+) -> tuple[ScriptScene, ScriptScene | ScriptLine]:
+    current_scene = session.scalar(
+        select(ScriptScene).where(
+            ScriptScene.script_version_id == current_base.id,
+            ScriptScene.ordinal == int(proposal["scene_ordinal"]),
+        )
+    )
+    if current_scene is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DIRECTOR_TARGET_CHANGED",
+                "message": "当前剧本中已找不到这个场景，请重新审查",
+            },
+        )
+    if change_scope == "SCENE":
+        return current_scene, current_scene
+    if not isinstance(proposal_target, ScriptLine):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DIRECTOR_TARGET_CHANGED",
+                "message": "原建议的对白目标已经变化，请重新审查",
+            },
+        )
+    current_line = session.scalar(
+        select(ScriptLine).where(
+            ScriptLine.script_scene_id == current_scene.id,
+            ScriptLine.ordinal == proposal_target.ordinal,
+        )
+    )
+    if current_line is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DIRECTOR_TARGET_CHANGED",
+                "message": "当前剧本中已找不到这句对白，请重新审查",
+            },
+        )
+    return current_scene, current_line
+
+
 def _execute_apply_director_proposal(
     session: Session,
     *,
@@ -4251,13 +4328,26 @@ def _execute_apply_director_proposal(
             expected_version=expected_version,
             **dict(change["changes"]),
         ).model_dump(exclude={"expected_version"}, exclude_none=True)
+    proposal_base_script = base_script
+    current_base_script = _current_director_revision_base(
+        session,
+        project=project,
+        proposal_base=proposal_base_script,
+    )
+    current_scene, current_target_entity = _current_director_change_target(
+        session,
+        proposal=proposal,
+        proposal_target=target_entity,
+        current_base=current_base_script,
+        change_scope=change_scope,
+    )
     for field, expected in dict(change["before"]).items():
-        if getattr(target_entity, field, object()) != expected:
+        if getattr(current_target_entity, field, object()) != expected:
             raise HTTPException(
                 status_code=409,
                 detail={
                     "code": "DIRECTOR_SOURCE_CHANGED",
-                    "message": "Director 审查使用的原始字段已变化，请重新审查",
+                    "message": "这部分剧本已经改过，请重新审查后再采用",
                     "details": {"field": field},
                 },
             )
@@ -4265,18 +4355,18 @@ def _execute_apply_director_proposal(
     _assert_preserved_director_objects(session, preserved)
     result = revise_script(
         session,
-        script_id=base_script.id,
+        script_id=current_base_script.id,
         expected_version=expected_version,
         scope=change_scope,
-        entity_id=change_entity_id,
+        entity_id=current_target_entity.id,
         changes=validated_changes,
         commit=False,
         allow_director_revision=True,
     )
     revised_scene, revised_line = _revised_entity(
         session,
-        source_scene_id=str(proposal["script_scene_id"]),
-        source_entity_id=change_entity_id,
+        source_scene_id=current_scene.id,
+        source_entity_id=current_target_entity.id,
         revised_script_id=str(result["id"]),
         scope=change_scope,
     )
@@ -4295,7 +4385,7 @@ def _execute_apply_director_proposal(
     impact["comparison"] = {
         "before": change["before"],
         "after": after_values,
-        "base_script_version_id": base_script.id,
+        "base_script_version_id": current_base_script.id,
         "result_script_version_id": result["id"],
         "estimated_duration_before_ms": sum(
             int(item["estimated_duration_ms"]) for item in dict(impact["context"]).get("lines", [])
@@ -4311,10 +4401,12 @@ def _execute_apply_director_proposal(
     impact["comparison"]["timeline_preview"] = _director_timeline_preview(
         session,
         project=project,
-        base_script=base_script,
+        base_script=current_base_script,
         revised_script_id=str(result["id"]),
         scene_ordinal=int(proposal["scene_ordinal"]),
     )
+    if proposal_base_script.id != current_base_script.id:
+        impact["comparison"]["proposal_base_script_version_id"] = proposal_base_script.id
     impact["invalidated"] = downstream.get("affected_objects", [])
     impact["invalidation_result"] = invalidation_result
     change_set.impact_json = canonical_json(impact)
@@ -4327,7 +4419,7 @@ def _execute_apply_director_proposal(
         },
         entity_type="director_proposal",
         entity_id=change_set.id,
-        before_hash=base_script.content_hash,
+        before_hash=current_base_script.content_hash,
         after_hash=str(result["content_hash"]),
     )
 

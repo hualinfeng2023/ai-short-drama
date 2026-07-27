@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, ArrowRight, CalendarDays, Clapperboard, Clock3, LoaderCircle, Plus, RotateCcw, Trash2 } from 'lucide-react'
 import { Link, useNavigate } from 'react-router'
 import { calculateProgress } from '../data/demo'
@@ -10,7 +10,14 @@ import type { ProjectSummary } from '../types'
 import { localizeDisplayText } from '../utils/localizeDisplayText'
 
 export function ProjectsPage() {
-  const { apiStatus, deleteProject, project, projectSummaries, resetDemo } = useStudio()
+  const {
+    apiStatus,
+    deleteProject,
+    project,
+    projectSummaries,
+    refreshProjects,
+    resetDemo,
+  } = useStudio()
   const progress = calculateProgress(project.shots)
   const featureImage = project.shots.find((shot) => shot.currentImageUrl)?.currentImageUrl
   const featureShot = project.shots.find((shot) => shot.currentImageUrl) ?? project.shots[0]
@@ -25,6 +32,36 @@ export function ProjectsPage() {
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [sortBy, setSortBy] = useState<'updated' | 'name'>('updated')
+
+  useEffect(() => {
+    let active = true
+    let refreshInFlight = false
+    const refresh = async () => {
+      if (!active || refreshInFlight || document.visibilityState !== 'visible') return
+      refreshInFlight = true
+      try {
+        await refreshProjects()
+      } catch {
+        // Keep the last usable project list; the next poll or focus event retries.
+      } finally {
+        refreshInFlight = false
+      }
+    }
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') void refresh()
+    }
+
+    void refresh()
+    const interval = window.setInterval(() => void refresh(), 5000)
+    window.addEventListener('focus', refreshWhenVisible)
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+    return () => {
+      active = false
+      window.clearInterval(interval)
+      window.removeEventListener('focus', refreshWhenVisible)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+    }
+  }, [refreshProjects])
 
   const statusOptions = useMemo(
     () => Array.from(new Set(projectSummaries.map((item) => item.status))),

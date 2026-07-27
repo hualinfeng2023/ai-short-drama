@@ -11,6 +11,7 @@ from app.domain.director import DirectorReviewOutput
 from app.domain.narrative_targeting import TOPIC_SLATE_MIX, reject_unrequested_stereotypes
 from app.services.text_provider import (
     EpisodeScriptDraft,
+    ModelOutputSemanticError,
     NarrativeReview,
     RoutedTextProvider,
     ScriptPackageOutput,
@@ -27,6 +28,7 @@ from app.services.text_provider import (
     deterministic_story_package,
     deterministic_story_structure,
     normalize_story_structure_payload,
+    validate_narrative_review_relationship_context,
     validate_script_package_relationship_contract,
 )
 
@@ -519,6 +521,17 @@ def test_story_package_rejects_incomplete_breakout_chain() -> None:
         StoryPackage.model_validate(package)
 
 
+def test_story_package_rejects_question_as_continuation_hook() -> None:
+    direction = deterministic_directions(BRIEF).model_dump(mode="json")["directions"][0]
+    package = deterministic_story_package(BRIEF, direction).model_dump(mode="json")
+    question_hook = "究竟是谁交出了最后一个胚胎？"
+    package["scripts"][0]["short_drama_engine"]["continuation_hook"] = question_hook
+    package["scripts"][0]["breakout_engine"]["sequel_unit"]["next_unit_trigger"] = question_hook
+
+    with pytest.raises(ValidationError, match="具体剧情铺垫"):
+        StoryPackage.model_validate(package)
+
+
 def test_story_structure_separates_story_bible_and_relationship_graph() -> None:
     direction = deterministic_directions(BRIEF).model_dump(mode="json")["directions"][0]
     structure = deterministic_story_structure(BRIEF, direction)
@@ -538,6 +551,16 @@ async def test_script_package_strongly_references_approved_relationship_context(
     relationship_graph["graph_version_id"] = "graph-v1"
     relationship_graph["content_hash"] = "hash-v1"
     relationship_graph["beats"][0]["relationship_beat_id"] = "beat-v1"
+    unrelated_story_beat = json.loads(json.dumps(relationship_graph["beats"][0]))
+    unrelated_story_beat.update(
+        {
+            "relationship_beat_id": "story-beat-before-authentication",
+            "trigger_type": "STORY_EVENT",
+            "trigger_ref": None,
+            "ordinal": 0,
+        }
+    )
+    relationship_graph["beats"].insert(0, unrelated_story_beat)
 
     result = await RoutedTextProvider().generate_script_package(
         replace(get_settings(), ark_api_key=None),
@@ -563,6 +586,55 @@ async def test_script_package_strongly_references_approved_relationship_context(
     leaked.scripts[0].scenes[0].lines[0].text = relationship_graph["edges"][0]["secret"]
     with pytest.raises(ValueError, match="秘密在设定揭示场景之前泄露"):
         validate_script_package_relationship_contract(leaked, relationship_graph)
+
+
+async def test_script_package_aligns_authentication_to_approved_relationship_beat() -> None:
+    direction = deterministic_directions(BRIEF).model_dump(mode="json")["directions"][0]
+    structure = deterministic_story_structure(BRIEF, direction)
+    relationship_graph = structure.relationship_graph.model_dump(mode="json")
+    relationship_graph["graph_version_id"] = "graph-v1"
+    relationship_graph["content_hash"] = "hash-v1"
+    relationship_graph["beats"][0]["relationship_beat_id"] = "approved-authentication-1"
+    relationship_graph["beats"][0]["trigger_ref"] = "authentication:1"
+
+    result = await RoutedTextProvider().generate_script_package(
+        replace(get_settings(), ark_api_key=None),
+        BRIEF,
+        direction,
+        structure.story_bible.model_dump(mode="json"),
+        relationship_graph,
+    )
+
+    reorder = ScriptPackageOutput.model_validate(
+        result.payload
+    ).scripts[0].breakout_engine.relationship_reorders[0]
+    assert reorder.trigger_auth_sequence == 1
+    assert reorder.relationship_beat_id == "approved-authentication-1"
+
+
+def test_narrative_review_rejects_relationship_auth_pair_not_available_in_episode() -> None:
+    direction = deterministic_directions(BRIEF).model_dump(mode="json")["directions"][0]
+    package = deterministic_story_package(BRIEF, direction)
+    structure = deterministic_story_structure(BRIEF, direction)
+    relationship_graph = structure.relationship_graph.model_dump(mode="json")
+    relationship_graph["beats"][0]["relationship_beat_id"] = "approved-authentication-1"
+    relationship_graph["beats"][0]["trigger_ref"] = "authentication:1"
+    review = NarrativeReview(
+        short_drama_engine=package.scripts[0].short_drama_engine,
+        breakout_engine=package.scripts[0].breakout_engine,
+        critic=package.critic,
+    )
+
+    with pytest.raises(ModelOutputSemanticError) as error:
+        validate_narrative_review_relationship_context(review, relationship_graph)
+
+    assert error.value.code == "RELATIONSHIP_REORDER_AUTH_MISMATCH"
+    assert error.value.details["available_pairs"] == [
+        {
+            "relationship_key": "protagonist-witness",
+            "trigger_auth_sequence": 1,
+        }
+    ]
 
 
 def test_split_story_package_assembly_repairs_only_mechanical_invariants() -> None:
@@ -629,9 +701,10 @@ async def test_story_package_provider_uses_three_scoped_generation_contracts(
         validator,
         transport=None,
         payload_normalizer=None,
+        semantic_validator=None,
         thinking_type=None,
     ):
-        del payload_normalizer, prompt, thinking_type, transport
+        del payload_normalizer, prompt, semantic_validator, thinking_type, transport
         validators.append(validator.__name__)
         if validator is StoryFoundation:
             payload = StoryFoundation(
@@ -921,6 +994,39 @@ async def test_ark_text_provider_rejects_three_invalid_structures() -> None:
     assert caught.value.details["validator"] == "StoryDirection"
     assert len(caught.value.details["attempts"]) == 3
     assert all(item["validation_error"] for item in caught.value.details["attempts"])
+
+
+async def test_ark_text_provider_retries_transient_network_errors() -> None:
+    direction = deterministic_directions(BRIEF).model_dump(mode="json")["directions"][0]
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise httpx.ConnectError("temporary connection failure", request=request)
+        return httpx.Response(
+            200,
+            content=(
+                _sse_event(
+                    "response.output_text.delta",
+                    {"delta": json.dumps(direction, ensure_ascii=False)},
+                )
+                + _sse_event("response.completed", {"response": {}})
+                + b"data: [DONE]\n\n"
+            ),
+            headers={"x-request-id": "network-recovered"},
+        )
+
+    result = await _ark_json(
+        replace(get_settings(), ark_api_key="test-key"),
+        prompt="return a story direction",
+        validator=StoryDirection,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert calls == 3
+    assert result.request_id == "network-recovered"
 
 
 async def test_ark_json_reports_each_validation_failure_before_terminal_error() -> None:

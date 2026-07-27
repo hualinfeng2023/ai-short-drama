@@ -209,13 +209,30 @@ async def generate_character_visual_candidate(
         job,
         payload,
         reference_asset_ids=[
-            str(item)
-            for item in payload.get("reference_asset_ids", [])
-            if isinstance(item, str)
+            str(item) for item in payload.get("reference_asset_ids", []) if isinstance(item, str)
         ],
     )
-    await context.checkpoint(session, job, 74, "检查水印、前景遮挡、身体连续性与纯白背景")
-    quality_report = await evaluate_character_image_quality(context.settings, image)
+    family_references = reference_data_urls(
+        session,
+        context.settings,
+        [
+            str(item)
+            for item in payload.get("family_reference_asset_ids", [])
+            if isinstance(item, str)
+        ],
+        detect_and_mask_character_watermark=True,
+    )
+    await context.checkpoint(
+        session,
+        job,
+        74,
+        "检查水印、人物完整性、纯白背景与亲属身份独立性",
+    )
+    quality_report = await evaluate_character_image_quality(
+        context.settings,
+        image,
+        distinct_identity_reference_images=family_references,
+    )
     await context.checkpoint(session, job, 82, "登记角色形象候选与提示词快照")
     asset, candidate = materialize_visual_candidate(
         session,
@@ -252,7 +269,11 @@ async def generate_character_identity_dossier(
         max_wait_seconds=IDENTITY_DOSSIER_MAX_WAIT_SECONDS,
     )
     await context.checkpoint(session, job, 74, "检查水印、前景遮挡、身体连续性与纯白背景")
-    quality_report = await evaluate_character_image_quality(context.settings, image)
+    quality_report = await evaluate_character_image_quality(
+        context.settings,
+        image,
+        quality_context=str(payload.get("quality_context") or ""),
+    )
     await context.checkpoint(session, job, 82, "登记角色身份档案视图")
     asset, record = materialize_identity_asset(
         session,

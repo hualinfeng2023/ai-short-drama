@@ -28,11 +28,11 @@ from app.db.models import (
 )
 from app.db.session import get_engine
 from app.domain.director import DirectorProposalRequest
+from app.seed import PROJECT_ID
 from app.services import director_proposals
 from app.services.director_proposals import DirectorProposalDraft
-from app.services.text_provider import TextGenerationResult, TextProviderError
-from app.seed import PROJECT_ID
 from app.services.projects import canonical_json, content_hash
+from app.services.text_provider import TextGenerationResult, TextProviderError
 
 STORY_ID = "93000000-0000-4000-8000-000000000001"
 BIBLE_ID = "93000000-0000-4000-8000-000000000002"
@@ -40,6 +40,8 @@ OUTLINE_ID = "93000000-0000-4000-8000-000000000003"
 SCRIPT_ID = "93000000-0000-4000-8000-000000000004"
 SCENE_ID = "93000000-0000-4000-8000-000000000005"
 LINE_ID = "93000000-0000-4000-8000-000000000006"
+SECOND_SCENE_ID = "93000000-0000-4000-8000-000000000008"
+SECOND_LINE_ID = "93000000-0000-4000-8000-000000000009"
 
 
 def prepare_script() -> int:
@@ -240,6 +242,79 @@ def prepare_script() -> int:
         )
         session.commit()
     return line_text.index("你现在")
+
+
+def add_second_script_scene() -> None:
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        script = session.get(ScriptVersion, SCRIPT_ID)
+        assert script is not None
+        payload = json.loads(script.payload_json)
+        payload["estimated_duration_ms"] = 15_000
+        payload["scenes"].append(
+            {
+                "heading": "门外告别",
+                "location": "旧公寓门口",
+                "time_of_day": "夜",
+                "purpose": "让角色说出最后的选择",
+                "emotion": "克制",
+                "duration_ms": 7_000,
+                "bgm_intent": "安静留白",
+                "sfx_intents": ["关门声"],
+                "lines": [
+                    {
+                        "speaker_key": "support",
+                        "text": "我会在楼下等你。",
+                        "line_type": "DIALOGUE",
+                        "emotion": "平静",
+                        "speech_rate": 1.0,
+                        "pause_after_ms": 300,
+                        "estimated_duration_ms": 2_000,
+                        "pronunciation": {},
+                        "localizations": {},
+                    }
+                ],
+            }
+        )
+        script.payload_json = canonical_json(payload)
+        script.content_hash = content_hash(payload)
+        script.estimated_duration_ms = 15_000
+        session.add(
+            ScriptScene(
+                id=SECOND_SCENE_ID,
+                script_version_id=SCRIPT_ID,
+                ordinal=2,
+                heading="门外告别",
+                location="旧公寓门口",
+                time_of_day="夜",
+                purpose="让角色说出最后的选择",
+                emotion="克制",
+                duration_ms=7_000,
+                bgm_intent="安静留白",
+                sfx_intent_json='["关门声"]',
+            )
+        )
+        session.flush()
+        session.add(
+            ScriptLine(
+                id=SECOND_LINE_ID,
+                script_scene_id=SECOND_SCENE_ID,
+                ordinal=1,
+                speaker_key="support",
+                text="我会在楼下等你。",
+                line_type="DIALOGUE",
+                emotion="平静",
+                speech_rate=1.0,
+                pause_after_ms=300,
+                estimated_duration_ms=2_000,
+                pronunciation_json="{}",
+                localization_json="{}",
+            )
+        )
+        session.commit()
 
 
 @pytest.mark.anyio
@@ -681,6 +756,101 @@ async def test_director_proposal_review_execute_compare_and_rollback(
             )
         )
         assert len(command_audits) == 3
+
+
+@pytest.mark.anyio
+async def test_director_proposal_follows_current_review_script_when_other_scene_changed(
+    client: AsyncClient,
+) -> None:
+    prepare_script()
+    add_second_script_scene()
+    request = {
+        "expected_version": 8,
+        "target_type": "SCRIPT_SCENE",
+        "issue_types": ["AI_DIALOGUE"],
+        "actor": "test-director",
+    }
+    first_proposal_response = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json={**request, "target_id": SCENE_ID},
+        headers={"Idempotency-Key": "director-sequential-first-create-v1"},
+    )
+    assert first_proposal_response.status_code == 201, first_proposal_response.text
+    first_proposal = first_proposal_response.json()["data"]
+    second_proposal_response = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json={**request, "target_id": SECOND_SCENE_ID},
+        headers={"Idempotency-Key": "director-sequential-second-create-v1"},
+    )
+    assert second_proposal_response.status_code == 201, second_proposal_response.text
+    second_proposal = second_proposal_response.json()["data"]
+
+    first_applied = await client.post(
+        f"/api/v1/director-review-proposals/{first_proposal['proposal_id']}/execute",
+        json={
+            "expected_version": 8,
+            "option_id": first_proposal["recommended_option"],
+            "actor": "test-director",
+            "confirmed": True,
+        },
+        headers={"Idempotency-Key": "director-sequential-first-apply-v1"},
+    )
+    assert first_applied.status_code == 200, first_applied.text
+    version_two = first_applied.json()["data"]["script"]
+
+    second_applied = await client.post(
+        f"/api/v1/director-review-proposals/{second_proposal['proposal_id']}/execute",
+        json={
+            "expected_version": 9,
+            "option_id": second_proposal["recommended_option"],
+            "actor": "test-director",
+            "confirmed": True,
+        },
+        headers={"Idempotency-Key": "director-sequential-second-apply-v1"},
+    )
+    assert second_applied.status_code == 200, second_applied.text
+    second_result = second_applied.json()["data"]
+    assert second_result["script"]["version"] == 3
+    assert second_result["script"]["parent_version_id"] == version_two["id"]
+    comparison = second_result["proposal"]["comparison"]
+    assert comparison["base_script_version_id"] == version_two["id"]
+    assert comparison["proposal_base_script_version_id"] == SCRIPT_ID
+
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        latest_scenes = list(
+            session.scalars(
+                select(ScriptScene)
+                .where(ScriptScene.script_version_id == second_result["script"]["id"])
+                .order_by(ScriptScene.ordinal)
+            )
+        )
+        assert len(latest_scenes) == 2
+        latest_lines = [
+            session.scalar(
+                select(ScriptLine)
+                .where(ScriptLine.script_scene_id == scene.id)
+                .order_by(ScriptLine.ordinal)
+            )
+            for scene in latest_scenes
+        ]
+        assert latest_lines[0] is not None
+        assert latest_lines[1] is not None
+        first_selected = next(
+            item
+            for item in first_proposal["alternatives"]
+            if item["option_id"] == first_proposal["recommended_option"]
+        )
+        second_selected = next(
+            item
+            for item in second_proposal["alternatives"]
+            if item["option_id"] == second_proposal["recommended_option"]
+        )
+        assert latest_lines[0].text == first_selected["proposed_change"]["changes"]["text"]
+        assert latest_lines[1].text == second_selected["proposed_change"]["changes"]["text"]
 
 
 @pytest.mark.anyio
