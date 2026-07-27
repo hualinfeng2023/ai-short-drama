@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import os
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -55,9 +56,12 @@ async def _wait_project_status(
 
 
 def _probe_mp4(content: bytes) -> dict[str, object]:
-    with tempfile.NamedTemporaryFile(suffix=".mp4") as output:
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as output:
         output.write(content)
         output.flush()
+        os.fsync(output.fileno())
+        path = output.name
+    try:
         result = subprocess.run(
             [
                 "ffprobe",
@@ -67,12 +71,14 @@ def _probe_mp4(content: bytes) -> dict[str, object]:
                 "format=duration:stream=codec_type,codec_name,width,height,r_frame_rate",
                 "-of",
                 "json",
-                output.name,
+                path,
             ],
             capture_output=True,
             text=True,
             check=True,
         )
+    finally:
+        os.unlink(path)
     return json.loads(result.stdout)
 
 
@@ -92,6 +98,8 @@ async def run_once(client: httpx.AsyncClient, ordinal: int) -> SmokeResult:
                 "target_platform": "douyin",
                 "reference_asset_ids": [],
                 "assumptions": [],
+                "narrative_protagonist": "dual",
+                "emotional_rewards": ["romance", "identity"],
             },
         )
     )
@@ -122,6 +130,8 @@ async def run_once(client: httpx.AsyncClient, ordinal: int) -> SmokeResult:
     )
     assert isinstance(linked, dict)
     project = linked["project"]
+
+    project = _data(await client.get(f"/api/v1/projects/{project_id}"))
 
     proposal_job = _data(
         await client.post(
