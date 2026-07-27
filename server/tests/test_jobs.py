@@ -1053,6 +1053,7 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
     assert len(preproduction["props"]) >= 1
     assert len(preproduction["voices"]) == 2
     assert all(item["cloning_enabled"] is False for item in preproduction["voices"])
+    assert all(item["payload"]["voice_description"] for item in preproduction["voices"])
 
     for asset_type, items in (
         ("location", preproduction["locations"]),
