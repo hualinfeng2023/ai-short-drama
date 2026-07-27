@@ -423,53 +423,90 @@ def list_director_proposals(session: Session, *, project_id: str) -> list[dict[s
     return proposals
 
 
-def list_director_generation_failures(
+def _metadata_count(metadata: dict[str, object], key: str, *, default: int = 0) -> int:
+    value = metadata.get(key, default)
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def list_director_generation_history(
     session: Session,
     *,
     project_id: str,
     script_scene_id: str | None = None,
 ) -> list[dict[str, object]]:
-    def metadata_count(metadata: dict[str, object], key: str) -> int:
-        value = metadata.get(key, 0)
-        try:
-            return int(value)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return 0
-
     project_or_404(session, project_id)
     query = (
         select(GenerationRecord)
         .where(
             GenerationRecord.project_id == project_id,
             GenerationRecord.capability == "DIRECTOR_SCENE_REVIEW",
-            GenerationRecord.entity_type == "script_scene",
-            GenerationRecord.status == "FAILED",
         )
         .order_by(GenerationRecord.created_at.desc())
     )
-    if script_scene_id is not None:
-        query = query.where(GenerationRecord.entity_id == script_scene_id)
     records = list(session.scalars(query))
-    failures: list[dict[str, object]] = []
+    proposal_ids = {
+        record.entity_id
+        for record in records
+        if record.entity_type == "director_proposal"
+    }
+    proposals_by_id = {
+        item.id: item
+        for item in session.scalars(
+            select(ChangeSet).where(
+                ChangeSet.project_id == project_id,
+                ChangeSet.id.in_(proposal_ids),
+            )
+        )
+    } if proposal_ids else {}
+    history: list[dict[str, object]] = []
     for record in records:
         try:
             metadata = json.loads(record.metadata_json)
         except json.JSONDecodeError:
             metadata = {}
         metadata = metadata if isinstance(metadata, dict) else {}
+        target_script_scene_id = (
+            record.entity_id
+            if record.entity_type == "script_scene"
+            else metadata.get("target_script_scene_id")
+        )
+        if not isinstance(target_script_scene_id, str):
+            continue
+        if script_scene_id is not None and target_script_scene_id != script_scene_id:
+            continue
         error = metadata.get("error")
         error = error if isinstance(error, dict) else {}
-        failures.append(
+        proposal = proposals_by_id.get(record.entity_id)
+        proposal_payload: dict[str, object] = {}
+        if proposal is not None:
+            try:
+                impact = json.loads(proposal.impact_json)
+            except json.JSONDecodeError:
+                impact = {}
+            if isinstance(impact, dict) and isinstance(impact.get("proposal"), dict):
+                proposal_payload = impact["proposal"]
+        repair_attempts = _metadata_count(metadata, "repair_attempts")
+        attempt_count = _metadata_count(
+            metadata,
+            "attempt_count",
+            default=repair_attempts + 1 if record.status == "SUCCEEDED" else 0,
+        )
+        history.append(
             {
                 "generation_record_id": record.id,
-                "script_scene_id": record.entity_id,
+                "script_scene_id": target_script_scene_id,
+                "script_version_id": metadata.get("target_script_version_id"),
                 "status": record.status,
                 "provider": record.provider,
                 "model": record.model,
                 "provider_request_id": record.provider_request_id,
                 "latency_ms": record.latency_ms,
-                "attempt_count": metadata_count(metadata, "attempt_count"),
-                "repair_attempts": metadata_count(metadata, "repair_attempts"),
+                "estimated_cost_usd": record.estimated_cost_usd,
+                "attempt_count": attempt_count,
+                "repair_attempts": repair_attempts,
                 "failure_stage": metadata.get("failure_stage"),
                 "error_code": error.get("code"),
                 "error_message": error.get("message"),
@@ -477,7 +514,28 @@ def list_director_generation_failures(
                 "retry_of_generation_record_id": metadata.get(
                     "retry_of_generation_record_id"
                 ),
+                "proposal_id": proposal.id if proposal is not None else None,
+                "proposal_status": proposal.status if proposal is not None else None,
+                "issue_type": proposal_payload.get("issue_type"),
                 "created_at": record.created_at,
+                "completed_at": record.completed_at,
             }
         )
-    return failures
+    return history
+
+
+def list_director_generation_failures(
+    session: Session,
+    *,
+    project_id: str,
+    script_scene_id: str | None = None,
+) -> list[dict[str, object]]:
+    return [
+        item
+        for item in list_director_generation_history(
+            session,
+            project_id=project_id,
+            script_scene_id=script_scene_id,
+        )
+        if item["status"] == "FAILED"
+    ]

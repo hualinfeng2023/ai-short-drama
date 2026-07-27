@@ -20,6 +20,7 @@ from app.domain.director import (
 )
 from app.services.director_proposals import (
     director_proposal_or_404,
+    list_director_generation_history,
     list_director_generation_failures,
     list_director_proposals,
     prepare_director_proposal,
@@ -396,6 +397,21 @@ def get_project_director_generation_failures(
 ) -> dict[str, object]:
     return success(
         list_director_generation_failures(
+            session,
+            project_id=project_id,
+            script_scene_id=script_scene_id,
+        )
+    )
+
+
+@router.get("/projects/{project_id}/director-generation-history")
+def get_project_director_generation_history(
+    project_id: str,
+    script_scene_id: str | None = Query(default=None, min_length=36, max_length=36),
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return success(
+        list_director_generation_history(
             session,
             project_id=project_id,
             script_scene_id=script_scene_id,

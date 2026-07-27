@@ -1481,6 +1481,26 @@ async def test_director_explicit_retry_requires_new_key_and_records_lineage(
         assert succeeded_metadata["retry_of_generation_record_id"] == failed_record_id
         succeeded_record_id = succeeded_record.id
 
+    history_response = await client.get(
+        f"/api/v1/projects/{PROJECT_ID}/director-generation-history",
+        params={"script_scene_id": SCENE_ID},
+    )
+    assert history_response.status_code == 200, history_response.text
+    history = history_response.json()["data"]
+    assert [item["generation_record_id"] for item in history] == [
+        succeeded_record_id,
+        failed_record_id,
+    ]
+    assert history[0]["status"] == "SUCCEEDED"
+    assert history[0]["script_scene_id"] == SCENE_ID
+    assert history[0]["script_version_id"] == SCRIPT_ID
+    assert history[0]["proposal_id"] == proposal["proposal_id"]
+    assert history[0]["proposal_status"] == "PROPOSED"
+    assert history[0]["retry_of_generation_record_id"] == failed_record_id
+    assert history[0]["attempt_count"] == history[0]["repair_attempts"] + 1
+    assert history[1]["status"] == "FAILED"
+    assert history[1]["proposal_id"] is None
+
     invalid_source = await client.post(
         f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
         json={

@@ -5,14 +5,16 @@ import {
   type DirectorReviewProposal,
 } from './client'
 
-export interface DirectorGenerationFailure {
+export interface DirectorGenerationRecord {
   generationRecordId: string
   scriptSceneId: string
-  status: 'FAILED'
+  scriptVersionId?: string
+  status: 'SUCCEEDED' | 'FAILED'
   provider: string
   model: string
   providerRequestId?: string
   latencyMs?: number
+  estimatedCostUsd?: number
   attemptCount: number
   repairAttempts: number
   failureStage?: string
@@ -20,8 +22,14 @@ export interface DirectorGenerationFailure {
   errorMessage?: string
   retryable: boolean
   retryOfGenerationRecordId?: string
+  proposalId?: string
+  proposalStatus?: string
+  issueType?: string
   createdAt: string
+  completedAt?: string
 }
+
+export type DirectorGenerationFailure = DirectorGenerationRecord & { status: 'FAILED' }
 
 interface RetryDirectorGenerationInput {
   expectedVersion: number
@@ -69,16 +77,28 @@ export async function fetchDirectorGenerationFailures(
   )
   const payload = await responsePayload(response)
   const records = dataFromPayload<Array<Record<string, unknown>>>(response, payload)
-  return records.map((record) => ({
+  return records.map((record) => mapDirectorGenerationRecord(record) as DirectorGenerationFailure)
+}
+
+function mapDirectorGenerationRecord(
+  record: Record<string, unknown>,
+): DirectorGenerationRecord {
+  return {
     generationRecordId: String(record.generation_record_id),
     scriptSceneId: String(record.script_scene_id),
-    status: 'FAILED',
+    ...(typeof record.script_version_id === 'string'
+      ? { scriptVersionId: record.script_version_id }
+      : {}),
+    status: record.status === 'SUCCEEDED' ? 'SUCCEEDED' : 'FAILED',
     provider: String(record.provider),
     model: String(record.model),
     ...(typeof record.provider_request_id === 'string'
       ? { providerRequestId: record.provider_request_id }
       : {}),
     ...(typeof record.latency_ms === 'number' ? { latencyMs: record.latency_ms } : {}),
+    ...(typeof record.estimated_cost_usd === 'number'
+      ? { estimatedCostUsd: record.estimated_cost_usd }
+      : {}),
     attemptCount: Number(record.attempt_count ?? 0),
     repairAttempts: Number(record.repair_attempts ?? 0),
     ...(typeof record.failure_stage === 'string'
@@ -92,8 +112,31 @@ export async function fetchDirectorGenerationFailures(
     ...(typeof record.retry_of_generation_record_id === 'string'
       ? { retryOfGenerationRecordId: record.retry_of_generation_record_id }
       : {}),
+    ...(typeof record.proposal_id === 'string' ? { proposalId: record.proposal_id } : {}),
+    ...(typeof record.proposal_status === 'string'
+      ? { proposalStatus: record.proposal_status }
+      : {}),
+    ...(typeof record.issue_type === 'string' ? { issueType: record.issue_type } : {}),
     createdAt: String(record.created_at),
-  }))
+    ...(typeof record.completed_at === 'string'
+      ? { completedAt: record.completed_at }
+      : {}),
+  }
+}
+
+export async function fetchDirectorGenerationHistory(
+  projectId: string,
+  scriptSceneId: string,
+  signal?: AbortSignal,
+): Promise<DirectorGenerationRecord[]> {
+  const query = new URLSearchParams({ script_scene_id: scriptSceneId })
+  const response = await fetch(
+    `/api/v1/projects/${projectId}/director-generation-history?${query}`,
+    { headers: { Accept: 'application/json' }, signal },
+  )
+  const payload = await responsePayload(response)
+  const records = dataFromPayload<Array<Record<string, unknown>>>(response, payload)
+  return records.map(mapDirectorGenerationRecord)
 }
 
 export async function retryDirectorGeneration(

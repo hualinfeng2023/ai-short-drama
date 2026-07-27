@@ -27,9 +27,10 @@ import {
   type DirectorReviewProposal,
 } from '../api/client'
 import {
-  fetchDirectorGenerationFailures,
+  fetchDirectorGenerationHistory,
   retryDirectorGeneration,
   type DirectorGenerationFailure,
+  type DirectorGenerationRecord,
 } from '../api/directorFailures'
 import {
   canvasProjectionSignature,
@@ -42,6 +43,7 @@ import {
 } from '../canvas/filmCanvasProjection'
 import { ImpactConfirmModal } from '../components/ConfirmModal'
 import { DirectorFailureInspector } from '../components/director-review/DirectorFailureInspector'
+import { DirectorGenerationHistory } from '../components/director-review/DirectorGenerationHistory'
 import {
   DirectorReviewCard,
   directorApprovalRequiresOverride,
@@ -119,7 +121,7 @@ export function FilmCanvasPage() {
   const [error, setError] = useState<string | null>(null)
   const [directorProposals, setDirectorProposals] = useState<DirectorReviewProposal[]>([])
   const [directorSelections, setDirectorSelections] = useState<Record<string, string>>({})
-  const [directorFailures, setDirectorFailures] = useState<DirectorGenerationFailure[]>([])
+  const [directorHistory, setDirectorHistory] = useState<DirectorGenerationRecord[]>([])
   const [directorBusy, setDirectorBusy] = useState(false)
   const [directorError, setDirectorError] = useState<string | null>(null)
   const [directorAction, setDirectorAction] = useState<DirectorReviewAction | null>(null)
@@ -237,27 +239,27 @@ export function FilmCanvasPage() {
     [projection, selectedNode],
   )
 
-  const loadDirectorFailures = useCallback(async (
+  const loadDirectorHistory = useCallback(async (
     scriptSceneId: string,
     signal?: AbortSignal,
   ) => {
     if (!projectId) return
-    const failures = await fetchDirectorGenerationFailures(projectId, scriptSceneId, signal)
-    setDirectorFailures(failures)
+    const history = await fetchDirectorGenerationHistory(projectId, scriptSceneId, signal)
+    setDirectorHistory(history)
   }, [projectId])
 
   useEffect(() => {
     const scriptSceneId = directorTarget?.scriptSceneId
-    setDirectorFailures([])
+    setDirectorHistory([])
     setDirectorError(null)
     if (!scriptSceneId) return
     const controller = new AbortController()
-    void loadDirectorFailures(scriptSceneId, controller.signal).catch((reason: unknown) => {
+    void loadDirectorHistory(scriptSceneId, controller.signal).catch((reason: unknown) => {
       if (reason instanceof DOMException && reason.name === 'AbortError') return
-      setDirectorError(reason instanceof Error ? reason.message : 'Director 失败记录读取失败')
+      setDirectorError(reason instanceof Error ? reason.message : 'Director 审查历史读取失败')
     })
     return () => controller.abort()
-  }, [directorTarget?.scriptSceneId, loadDirectorFailures])
+  }, [directorTarget?.scriptSceneId, loadDirectorHistory])
 
   const selectedDirectorProposal = useMemo(() => {
     if (!projection || !directorTarget || !selectedNode) return null
@@ -283,6 +285,11 @@ export function FilmCanvasPage() {
       ?? directorProposals.find((item) => item.scriptSceneId === directorTarget.scriptSceneId)
       ?? null
   }, [directorProposals, directorTarget, projection, selectedNode])
+
+  const latestDirectorFailure = useMemo<DirectorGenerationFailure | null>(() => {
+    const latest = directorHistory[0]
+    return latest?.status === 'FAILED' ? { ...latest, status: 'FAILED' } : null
+  }, [directorHistory])
 
   function upsertDirectorProposal(next: DirectorReviewProposal) {
     setDirectorProposals((current) => [
@@ -316,7 +323,7 @@ export function FilmCanvasPage() {
           ? '项目版本已经变化，请等待画布刷新后重新审查。'
           : reason instanceof Error ? reason.message : 'Director 审查失败',
       )
-      await loadDirectorFailures(directorTarget.scriptSceneId).catch(() => undefined)
+      await loadDirectorHistory(directorTarget.scriptSceneId).catch(() => undefined)
     } finally {
       setDirectorBusy(false)
     }
@@ -338,7 +345,7 @@ export function FilmCanvasPage() {
       await Promise.all([
         load(undefined, true),
         loadDirectorProposals(),
-        loadDirectorFailures(directorTarget.scriptSceneId),
+        loadDirectorHistory(directorTarget.scriptSceneId),
       ])
       notify('Director 已创建新的审查记录；原失败记录保持可追溯。')
     } catch (reason) {
@@ -347,7 +354,7 @@ export function FilmCanvasPage() {
           ? '项目版本已经变化，请等待画布刷新后重新审查。'
           : reason instanceof Error ? reason.message : 'Director 重新审查失败',
       )
-      await loadDirectorFailures(directorTarget.scriptSceneId).catch(() => undefined)
+      await loadDirectorHistory(directorTarget.scriptSceneId).catch(() => undefined)
     } finally {
       setDirectorBusy(false)
     }
@@ -523,10 +530,11 @@ export function FilmCanvasPage() {
           ) : null}
           {directorTarget ? (
             <>
-              {directorFailures[0] ? (
+              <DirectorGenerationHistory records={directorHistory} />
+              {latestDirectorFailure ? (
                 <DirectorFailureInspector
                   busy={directorBusy}
-                  failure={directorFailures[0]}
+                  failure={latestDirectorFailure}
                   onRetry={(failure) => void retryFailedDirector(failure)}
                 />
               ) : null}
