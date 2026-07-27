@@ -240,7 +240,7 @@ def test_v1_upgrade_recovers_from_partial_sqlite_ddl(
         "director_intent_json",
         "rejection_reasons_json",
     }
-    assert revision == "0028_provenance_traceability"
+    assert revision == "0029_legacy_take_provenance"
     if platform_targets is not None:
         assert '"priority":"PRIMARY"' in platform_targets
     command.check(config)

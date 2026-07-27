@@ -1322,7 +1322,17 @@ export function StoryPage() {
               <dl className="story-direction-summary__key-facts">
                 <div><dt>核心冲突</dt><dd>{direction.storyDna?.central_conflict ?? direction.differentiator ?? '—'}</dd></div>
                 <div><dt>情绪承诺</dt><dd>{direction.storyDna?.emotional_promise ?? direction.directorStatement}</dd></div>
-                <div><dt>制作规模</dt><dd>{production.characterCount} 个角色 · {production.sceneCount} 个场景 · {production.exteriorSceneCount} 个外景</dd></div>
+                <div>
+                  <dt>制作规模</dt>
+                  <dd
+                    aria-label={`${production.characterCount} 个角色，${production.sceneCount} 个场景，${production.exteriorSceneCount} 个外景`}
+                    className="story-direction-summary__production-facts"
+                  >
+                    <span><strong>{production.characterCount}</strong><small>角色</small></span>
+                    <span><strong>{production.sceneCount}</strong><small>场景</small></span>
+                    <span><strong>{production.exteriorSceneCount}</strong><small>外景</small></span>
+                  </dd>
+                </div>
               </dl>
               <div
                 aria-label={`Brief 合规：${complianceLabel(compliance.status)}${exceptions.length ? `，${exceptions.length} 条需关注` : ''}`}

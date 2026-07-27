@@ -137,7 +137,12 @@ def _create_shot_spec_revisions() -> None:
             sa.Column("id", sa.String(36), primary_key=True),
             sa.Column("project_id", sa.String(36), sa.ForeignKey("projects.id"), nullable=False),
             sa.Column("shot_id", sa.String(36), sa.ForeignKey("shots.id"), nullable=False),
-            sa.Column("shot_spec_id", sa.String(36), sa.ForeignKey("shot_specs.id"), nullable=False),
+            sa.Column(
+                "shot_spec_id",
+                sa.String(36),
+                sa.ForeignKey("shot_specs.id"),
+                nullable=False,
+            ),
             sa.Column("version", sa.Integer(), nullable=False),
             sa.Column(
                 "parent_revision_id",
