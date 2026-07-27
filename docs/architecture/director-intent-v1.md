@@ -3,8 +3,8 @@
 ## 结论
 
 当前系统已经具备 DirectorIntent v1 的可确认编译链路。它复用现有
-Director Proposal / ChangeSet，不新增事实源；当前只把时间线继承做成了可验证
-回执，分镜、提示词和音频仍明确标记为 `NOT_INTEGRATED`。
+Director Proposal / ChangeSet，不新增事实源；时间线、分镜、实际生成提示词和
+音频均通过同一 intent 版本产生可验证回执。
 
 | 能力 | 当前状态 | 代码证据 |
 | --- | --- | --- |
@@ -16,7 +16,7 @@ Director Proposal / ChangeSet，不新增事实源；当前只把时间线继承
 | 解析“这里”对应的情节点、人物目标和时间范围 | 已实现 | `server/app/services/director_intent.py` 的 context resolver |
 | 统一叙事、摄影、表演、声音、节奏意图 | 已实现 | `DirectorIntentCompilationOutput` 与五通道 preview |
 | 时间线继承同一意图版本 | 已实现 | 确认后写入 `TIMELINE / INHERITED` 消费回执 |
-| 分镜、提示词、音频继承同一意图版本 | 待接入 | 当前回执为 `NOT_INTEGRATED`，不伪报已生效 |
+| 分镜、提示词、音频继承同一意图版本 | 已实现 | `director_intent_consumption.py`、`ShotSpec.prompt_json`、`AudioCue.payload_json` 与 `GenerationRecord.director_intent_json` |
 | 电影术语的情境证据与冲突门禁 | 已实现 | evidence refs、置信度、blocking conflict 与 fail-closed |
 | 用户可见修改预览与确认 | 已实现 | `DirectorReviewCard` 的五通道、冲突和继承状态面板 |
 
@@ -32,8 +32,8 @@ Director Proposal / ChangeSet，不新增事实源；当前只把时间线继承
 3. `BLOCKING` 冲突只有 `PASS` 才能确认。`UNKNOWN` 与 `FAIL` 都应 fail closed。
 4. 确认的是 `intent_id + intent_version + context_fingerprint`。上游版本变化后，
    意图进入 `STALE`，不能静默传播。
-5. 分镜、提示词、音频和时间线必须声明继承目标。后续接入时，每个消费者还要
-   写回独立消费证据；仅检查字段存在不等于证明意图真的生效。
+5. 分镜、提示词、音频和时间线必须声明继承目标。每个消费者都要写回产物 ID、
+   消费快照哈希和对应实体 ID；仅检查字段存在不等于证明意图真的生效。
 
 ## Schema
 
@@ -89,7 +89,7 @@ Director Proposal / ChangeSet，不新增事实源；当前只把时间线继承
 ## 首版不做什么
 
 - 不新增独立 Canvas / Director 状态源。
-- 不在 Schema 尚未接入消费者时声称“已经共同继承”。
+- 不在消费者尚未产生产物时声称“已经继承”；确认后先标记 `PENDING`。
 - 不让模型仅靠术语风格判断可信度。
 - 不把摄影或声音意图偷偷塞入现有 Scene / Line 文本补丁。
 - 不因定义契约而触发图片、视频、配音或音乐生成。
@@ -103,5 +103,13 @@ Director Proposal / ChangeSet，不新增事实源；当前只把时间线继承
   `DIRECTOR_INTENT_STALE_CONTEXT`。
 - 意图编译成功与失败分别记录为 `DIRECTOR_INTENT_COMPILATION`；
   provider 合同失败不会创建 ChangeSet。
-- 当前“继承”只对脚本执行产生的时间线只读投影提供真实回执。分镜、提示词、
-  音频消费者尚未接入，因此必须保持 `NOT_INTEGRATED`。
+- `director_intent_consumption.py` 只选择当前批准剧本血缘链上、已确认且离当前
+  版本最近的场景意图；其他分支或其他场景不会被静默传播。
+- 分镜规划把 `STORYBOARD` 快照写入 Storyboard / ShotSpec；实际出图时从持久化
+  ShotSpec 重建提示词，并把 `PROMPT` 快照写入 GenerationRecord。
+- 声音规划把 `AUDIO` 快照写入 SoundBrief / AudioCue；正式音频生成记录继续
+  保存同一快照。
+- 确认后下游回执先为 `PENDING`；只有生成事务成功并取得 Storyboard、
+  ShotSpec 或 AudioCue 证据后，才更新为 `INHERITED`。
+- Film IR 通过 `DIRECTS_STORYBOARD`、`DIRECTS_GENERATION_PROMPT` 和
+  `DIRECTS_AUDIO_CUE` 显式展示已确认意图到下游产物的血缘。

@@ -1450,6 +1450,75 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
                                     "director_intent_preview.intent.scope"
                                 ),
                             )
+                inheritance = proposal.get("director_intent_inheritance")
+                if isinstance(inheritance, list):
+                    for receipt in inheritance:
+                        if (
+                            not isinstance(receipt, dict)
+                            or receipt.get("status") != "INHERITED"
+                        ):
+                            continue
+                        consumer = receipt.get("consumer")
+                        output_version = receipt.get("output_version")
+                        receipt_evidence = receipt.get("evidence")
+                        if consumer == "STORYBOARD" and isinstance(output_version, str):
+                            inherited_storyboard = next(
+                                (
+                                    item
+                                    for item in storyboards
+                                    if item.id == output_version
+                                ),
+                                None,
+                            )
+                            if inherited_storyboard is not None:
+                                graph.add_edge(
+                                    "DirectorIntent",
+                                    intent_id,
+                                    "Storyboard",
+                                    (
+                                        f"storyboard:{project.id}:"
+                                        f"{inherited_storyboard.episode_ordinal}"
+                                    ),
+                                    "DIRECTS_STORYBOARD",
+                                    inferred=False,
+                                    evidence=(
+                                        "change_sets.impact_json.proposal."
+                                        "director_intent_inheritance"
+                                    ),
+                                )
+                        elif consumer == "PROMPT" and isinstance(receipt_evidence, dict):
+                            shot_spec_ids = receipt_evidence.get("shot_spec_ids")
+                            if isinstance(shot_spec_ids, list):
+                                for shot_spec_id in shot_spec_ids:
+                                    shot_spec = session.get(ShotSpec, str(shot_spec_id))
+                                    if shot_spec is not None and shot_spec.shot_id in shot_ids:
+                                        graph.add_edge(
+                                            "DirectorIntent",
+                                            intent_id,
+                                            "Shot",
+                                            shot_spec.shot_id,
+                                            "DIRECTS_GENERATION_PROMPT",
+                                            inferred=False,
+                                            evidence=(
+                                                "shot_specs.prompt_json.director_intent"
+                                            ),
+                                        )
+                        elif consumer == "AUDIO" and isinstance(receipt_evidence, dict):
+                            audio_cue_ids = receipt_evidence.get("audio_cue_ids")
+                            if isinstance(audio_cue_ids, list):
+                                for audio_cue_id in audio_cue_ids:
+                                    if str(audio_cue_id) in cue_ids:
+                                        graph.add_edge(
+                                            "DirectorIntent",
+                                            intent_id,
+                                            "AudioCue",
+                                            str(audio_cue_id),
+                                            "DIRECTS_AUDIO_CUE",
+                                            inferred=False,
+                                            evidence=(
+                                                "audio_cues.payload_json.director_intent"
+                                            ),
+                                        )
         for target in proposal.get("target_objects", []):
             if not isinstance(target, dict):
                 continue

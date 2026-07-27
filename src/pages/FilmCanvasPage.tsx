@@ -72,6 +72,7 @@ import {
   type FilmCanvasEdge,
   type FilmCanvasEmptyLaneNode,
   type FilmCanvasGraphNode,
+  type FilmCanvasLaneHeaderNode,
   type FilmCanvasNode,
   isFilmObjectNode,
 } from '../canvas/filmCanvasProjection'
@@ -97,7 +98,7 @@ import {
 import { useToast } from '../store/ToastContext'
 import { useProjectReadiness } from '../store/ProjectReadinessContext'
 
-const VIEW_STATE_KEY_PREFIX = 'film-canvas-view-state-v1'
+const VIEW_STATE_KEY_PREFIX = 'film-canvas-view-state-v1:production-lanes-v2'
 const DEFAULT_VIEWPORT: Viewport = { x: 0, y: 0, zoom: 1 }
 const PROJECTION_REFRESH_INTERVAL_MS = 3_000
 
@@ -263,20 +264,44 @@ function FilmObjectNode({ data, selected }: NodeProps<FilmCanvasNode>) {
 }
 
 function FilmCanvasEmptyLaneNode({ data }: NodeProps<FilmCanvasEmptyLaneNode>) {
+  const icon = data.variant === 'assets'
+    ? <UsersRound size={20} />
+    : data.variant === 'timeline'
+      ? <GitMerge size={20} />
+      : <Clapperboard size={20} />
   return (
-    <section className="film-canvas-empty-lane" aria-label={data.label}>
-      <span className="film-canvas-empty-lane__icon"><Clapperboard size={20} /></span>
-      <p className="eyebrow">后续制作区域</p>
+    <section
+      className={`film-canvas-empty-lane film-canvas-empty-lane--${data.variant}`}
+      aria-label={data.label}
+    >
+      <span className="film-canvas-empty-lane__icon">{icon}</span>
+      <p className="eyebrow">{data.eyebrow}</p>
       <h3>{data.label}</h3>
       <p>{data.description}</p>
-      <small>当前尚未生成分镜内容</small>
+      <small>{data.status}</small>
+      <Link
+        className="button button--secondary button--sm film-canvas-empty-lane__action nodrag nopan"
+        to={data.actionHref}
+      >
+        {data.actionLabel}<ArrowUpRight size={14} />
+      </Link>
     </section>
+  )
+}
+
+function FilmCanvasLaneHeaderNode({ data }: NodeProps<FilmCanvasLaneHeaderNode>) {
+  return (
+    <header className="film-canvas-lane-header" aria-label={`${data.label}区域`}>
+      <span>{String(data.index).padStart(2, '0')}</span>
+      <strong>{data.label}</strong>
+    </header>
   )
 }
 
 const nodeTypes = {
   emptyLane: FilmCanvasEmptyLaneNode,
   filmObject: FilmObjectNode,
+  laneHeader: FilmCanvasLaneHeaderNode,
 }
 
 export function FilmCanvasPage() {
@@ -431,6 +456,10 @@ export function FilmCanvasPage() {
     () => nodes.find(
       (node): node is FilmCanvasNode => node.selected === true && isFilmObjectNode(node),
     ) ?? null,
+    [nodes],
+  )
+  const initialFitViewNodes = useMemo(
+    () => nodes.filter((node) => !isFilmObjectNode(node)).map((node) => ({ id: node.id })),
     [nodes],
   )
 
@@ -1044,25 +1073,6 @@ export function FilmCanvasPage() {
               </Button>
             ) : null}
           </div>
-          <div className="film-canvas-next-action__relay" aria-label="推进接力">
-            <span className="is-complete">
-              <Check size={14} />
-              <small>已完成</small>
-              <strong>{canvasGuidance.completedStageLabel ?? '前置准备'}</strong>
-            </span>
-            <i aria-hidden="true" />
-            <span className="is-current">
-              <ArrowRight size={14} />
-              <small>现在</small>
-              <strong>{canvasGuidance.activeStageLabel}</strong>
-            </span>
-            <i aria-hidden="true" />
-            <span>
-              <LockKeyhole size={14} />
-              <small>随后</small>
-              <strong>{canvasGuidance.nextStageLabel ?? '后续交付'}</strong>
-            </span>
-          </div>
         </Surface>
       ) : null}
       <section className="film-canvas-summary" aria-label="投影摘要">
@@ -1076,6 +1086,10 @@ export function FilmCanvasPage() {
           <ReactFlow<FilmCanvasGraphNode, FilmCanvasEdge>
             edges={edges}
             fitView={!hasSavedViewport}
+            fitViewOptions={{
+              maxZoom: 0.85,
+              nodes: initialFitViewNodes,
+            }}
             maxZoom={1.8}
             minZoom={0.25}
             nodeTypes={nodeTypes}

@@ -39,6 +39,11 @@ from app.db.models import (
 from app.schemas import JobRead
 from app.services.assets import register_file, resolve_asset_path
 from app.services.character_image_qc import detect_lower_right_watermark
+from app.services.director_intent_consumption import (
+    confirmed_director_intents_by_scene,
+    director_intent_prompt_block,
+    update_director_intent_inheritance_receipt,
+)
 from app.services.events import append_event
 from app.services.generation_records import ensure_generation_record
 from app.services.image_provider import GeneratedImage
@@ -276,8 +281,9 @@ def resolve_storyboard_take_generation_inputs(
 ) -> tuple[str, list[str], int]:
     """在出图时重建提示词与参考图，确保沿用锁定身份而非过期 JSON 提示。"""
     shot = session.get(Shot, str(payload["shot_id"]))
+    spec = session.get(ShotSpec, str(payload["shot_spec_id"]))
     project = session.get(Project, job.project_id)
-    if shot is None or project is None:
+    if shot is None or spec is None or project is None:
         raise ValueError("分镜任务实体不存在")
     try:
         character_ids = json.loads(shot.character_ids_json or "[]")
@@ -319,6 +325,17 @@ def resolve_storyboard_take_generation_inputs(
         characters=characters,
         aspect_ratio=project.aspect_ratio,
     )
+    try:
+        prompt_payload = json.loads(spec.prompt_json or "{}")
+    except json.JSONDecodeError:
+        prompt_payload = {}
+    director_intent = (
+        prompt_payload.get("director_intent")
+        if isinstance(prompt_payload, dict)
+        else None
+    )
+    if isinstance(director_intent, dict):
+        prompt = f"{prompt}\n{director_intent_prompt_block(director_intent)}"
     note = payload.get("note")
     if isinstance(note, str) and note.strip():
         prompt = f"{prompt}\n导演修改意图：{note.strip()}。"
@@ -483,10 +500,31 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
             .order_by(ScriptScene.ordinal)
         ).all()
     )
+    director_intents = confirmed_director_intents_by_scene(session, script=script)
     child_job_ids: list[str] = []
     shot_payloads: list[dict[str, object]] = []
+    intent_evidence: dict[str, dict[str, object]] = {}
+    intent_consumption: list[dict[str, object]] = []
     shot_ordinal = 1
     for script_scene in script_scenes:
+        confirmed_intent = director_intents.get(script_scene.ordinal)
+        storyboard_intent = (
+            confirmed_intent.snapshot_for("STORYBOARD")
+            if confirmed_intent is not None
+            else None
+        )
+        prompt_intent = (
+            confirmed_intent.snapshot_for("PROMPT")
+            if confirmed_intent is not None
+            else None
+        )
+        if storyboard_intent is not None:
+            intent_consumption.append(storyboard_intent)
+            intent_evidence[confirmed_intent.change_set_id] = {
+                "scene_ordinal": script_scene.ordinal,
+                "shot_spec_ids": [],
+                "prompt_receipt_hashes": [],
+            }
         lines = list(
             session.scalars(
                 select(ScriptLine)
@@ -591,6 +629,8 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
                 characters=bound_characters,
                 aspect_ratio=project.aspect_ratio,
             )
+            if prompt_intent is not None:
+                image_prompt = f"{image_prompt}\n{director_intent_prompt_block(prompt_intent)}"
             prompt_payload = {
                 "description": description,
                 "dialogue": dialogue,
@@ -608,6 +648,8 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
                 "prop_version_ids": [item.id for item in props],
                 "reference_asset_ids": reference_asset_ids,
                 "image_prompt": image_prompt,
+                "director_intent": prompt_intent,
+                "storyboard_director_intent": storyboard_intent,
             }
             spec = ShotSpec(
                 id=str(uuid4()),
@@ -652,6 +694,7 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
                     "shot_id": shot.id,
                     "prompt": image_prompt,
                     "reference_asset_ids": reference_asset_ids,
+                    "director_intent": prompt_intent,
                     "seed": int(spec.content_hash[:8], 16),
                 },
                 label=f"{code} · 分镜版本",
@@ -695,8 +738,21 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
                     "script_line_id": line.id,
                     "duration_ms": spec.duration_ms,
                     "content_hash": spec.content_hash,
+                    "director_intent_receipt_hash": (
+                        prompt_intent.get("receipt_hash")
+                        if prompt_intent is not None
+                        else None
+                    ),
                 }
             )
+            if confirmed_intent is not None:
+                evidence = intent_evidence[confirmed_intent.change_set_id]
+                shot_spec_ids = evidence["shot_spec_ids"]
+                prompt_hashes = evidence["prompt_receipt_hashes"]
+                if isinstance(shot_spec_ids, list):
+                    shot_spec_ids.append(spec.id)
+                if isinstance(prompt_hashes, list) and prompt_intent is not None:
+                    prompt_hashes.append(prompt_intent["receipt_hash"])
             shot_ordinal += 1
     storyboard.payload_json = canonical_json(
         {
@@ -704,9 +760,38 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
             "script_version_id": script.id,
             "visual_bible_version_id": visual_bible.id,
             "shots": shot_payloads,
+            "director_intent_consumption": intent_consumption,
         }
     )
     storyboard.content_hash = content_hash(json.loads(storyboard.payload_json))
+    for confirmed_intent in director_intents.values():
+        evidence = intent_evidence.get(confirmed_intent.change_set_id)
+        if evidence is None or not evidence.get("shot_spec_ids"):
+            continue
+        update_director_intent_inheritance_receipt(
+            session,
+            intent=confirmed_intent,
+            consumer="STORYBOARD",
+            status="INHERITED",
+            output_version=storyboard.id,
+            evidence={
+                **evidence,
+                "storyboard_version_id": storyboard.id,
+                "planning_mode": "DIRECTIVE_BOUND",
+            },
+        )
+        update_director_intent_inheritance_receipt(
+            session,
+            intent=confirmed_intent,
+            consumer="PROMPT",
+            status="INHERITED",
+            output_version=storyboard.id,
+            evidence={
+                **evidence,
+                "storyboard_version_id": storyboard.id,
+                "prompt_source": "shot_specs.prompt_json.director_intent",
+            },
+        )
     root_node = session.scalar(
         select(WorkflowNode).where(
             WorkflowNode.workflow_run_id == workflow.id,
@@ -843,6 +928,11 @@ def materialize_storyboard_take(
                 "reused_existing_output": reused,
                 "replace_existing": replace_existing,
             },
+            director_intent=(
+                payload.get("director_intent")
+                if isinstance(payload.get("director_intent"), dict)
+                else {}
+            ),
         )
         take.generation_record_id = record.id
 

@@ -109,6 +109,17 @@ const DIRECTOR_INTENT_CONSUMER_LABELS: Record<
   TIMELINE: '时间线',
 }
 
+const DIRECTOR_INTENT_INHERITANCE_LABELS: Record<
+  DirectorIntentInheritanceEvidence['status'],
+  string
+> = {
+  INHERITED: '已继承',
+  NOT_INTEGRATED: '尚未接入',
+  PENDING: '待生成',
+  STALE: '已过期',
+  BLOCKED: '被阻断',
+}
+
 function formatIntentTime(milliseconds: number): string {
   const seconds = milliseconds / 1000
   return `${seconds.toFixed(Number.isInteger(seconds) ? 0 : 1)} 秒`
@@ -205,7 +216,7 @@ function DirectorIntentPreviewPanel({
             {inheritance.map((item) => (
               <span data-status={item.status} key={item.consumer}>
                 {DIRECTOR_INTENT_CONSUMER_LABELS[item.consumer]}
-                <small>{item.status === 'INHERITED' ? '已继承' : '尚未接入'}</small>
+                <small>{DIRECTOR_INTENT_INHERITANCE_LABELS[item.status]}</small>
               </span>
             ))}
           </div>

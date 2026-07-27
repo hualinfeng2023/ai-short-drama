@@ -66,13 +66,40 @@ describe('Film Canvas projection adapter', () => {
     const emptyStoryboardLane = graph.nodes.find(
       (node) => node.type === 'emptyLane' && node.id === 'canvas-empty-lane:storyboard',
     )
+    const emptyAssetLane = graph.nodes.find(
+      (node) => node.type === 'emptyLane' && node.id === 'canvas-empty-lane:assets',
+    )
+    const emptyTimelineLane = graph.nodes.find(
+      (node) => node.type === 'emptyLane' && node.id === 'canvas-empty-lane:timeline',
+    )
+    const laneHeaders = graph.nodes.filter((node) => node.type === 'laneHeader')
 
     expect(objectNodes).toHaveLength(2)
+    expect(laneHeaders.map((node) => node.data.label)).toEqual([
+      '故事与剧本',
+      '场次与台词',
+      '前期资产',
+      '动态分镜',
+      '制作时间线',
+    ])
     expect(graph.edges).toHaveLength(1)
     expect(objectNodes[0]?.data.projection).toBe(projection.nodes[0])
+    expect(emptyAssetLane?.data).toMatchObject({
+      label: '待补齐资产',
+      eyebrow: '前期资产区域',
+      variant: 'assets',
+    })
     expect(emptyStoryboardLane?.data).toMatchObject({
+      actionHref: '/projects/project-1/storyboard',
+      actionLabel: '进入动态分镜',
       label: '分镜区域',
       description: '剧本批准后，故事板与镜头会出现在这里。',
+      variant: 'storyboard',
+    })
+    expect(emptyTimelineLane?.data).toMatchObject({
+      label: '制作时间线',
+      status: '当前尚未生成时间线',
+      variant: 'timeline',
     })
     expect(graph.edges[0]).toMatchObject({
       source: 'Project:project-1',
@@ -86,6 +113,25 @@ describe('Film Canvas projection adapter', () => {
     expect(getCanvasRelationLabel('APPEARS_IN_BEAT')).toBe('出场')
     expect(getCanvasRelationLabel('PROPOSES_CHANGE_TO')).toBe('建议修改')
     expect(getCanvasRelationLabel('UNKNOWN_RELATION')).toBe('UNKNOWN_RELATION')
+  })
+
+  it('removes empty states as their canonical production objects become available', () => {
+    const filledProjection: CanvasProjection = {
+      ...projection,
+      nodes: [
+        ...projection.nodes,
+        ...(['Character', 'Prop', 'Storyboard', 'Timeline'] as const).map((type) => ({
+          ...projection.nodes[1]!,
+          ref: { type, id: `${type.toLowerCase()}-1`, versionId: `${type.toLowerCase()}-v1` },
+          label: `${type} 1`,
+        })),
+      ],
+    }
+
+    const graph = projectCanvasGraph(filledProjection, null)
+
+    expect(graph.nodes.filter((node) => node.type === 'emptyLane')).toHaveLength(0)
+    expect(graph.nodes.filter((node) => node.type === 'laneHeader')).toHaveLength(5)
   })
 
   it('resolves a dialogue speaker through the canonical character key', () => {
@@ -180,7 +226,11 @@ describe('Film Canvas projection adapter', () => {
 
     expect(viewState.projection_lock_version).toBe(7)
     expect(viewState.nodes['Scene:scene-1']?.x).toBe(600)
+    expect(Object.keys(viewState.nodes)).toHaveLength(2)
+    expect(viewState.nodes).not.toHaveProperty('canvas-empty-lane:assets')
     expect(viewState.nodes).not.toHaveProperty('canvas-empty-lane:storyboard')
+    expect(viewState.nodes).not.toHaveProperty('canvas-empty-lane:timeline')
+    expect(viewState.nodes).not.toHaveProperty('canvas-lane-header:1')
     expect(viewState.selected).toEqual([{
       type: sceneRef.type,
       id: sceneRef.id,

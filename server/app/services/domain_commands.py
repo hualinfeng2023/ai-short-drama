@@ -4642,7 +4642,7 @@ def _execute_apply_director_proposal(
             *[
                 {
                     "consumer": consumer,
-                    "status": "NOT_INTEGRATED",
+                    "status": "PENDING",
                     "intent_version": intent.intent_version,
                 }
                 for consumer in ("STORYBOARD", "PROMPT", "AUDIO")

@@ -11,31 +11,46 @@ from app.api.v1 import director as director_api
 from app.config import get_settings
 from app.db.models import (
     Asset,
+    AudioCue,
     AuditLog,
     ChangeSet,
     EpisodeOutlineVersion,
     EventLog,
     GenerationRecord,
     IdempotencyKey,
+    Job,
     Project,
     ScriptLine,
     ScriptScene,
     ScriptVersion,
     Shot,
+    ShotSpec,
+    SoundBriefVersion,
     StoryBibleVersion,
     StoryVersion,
     Take,
+    VisualBibleVersion,
 )
 from app.db.session import get_engine
 from app.domain.director import DirectorProposalRequest
 from app.seed import PROJECT_ID
 from app.services import director_proposals
+from app.services.audio_pipeline import create_audio_pipeline, materialize_audio_take
 from app.services.director_intent import (
     prepare_director_intent_preview,
     resolve_director_intent_context,
 )
 from app.services.director_proposals import DirectorProposalDraft
+from app.services.film_ir import get_film_ir_projection
+from app.services.image_provider import GeneratedImage
+from app.services.jobs import enqueue_job
+from app.services.media import deterministic_png_bytes
 from app.services.projects import canonical_json, content_hash
+from app.services.storyboards_v2 import (
+    create_dynamic_storyboard,
+    materialize_storyboard_take,
+    resolve_storyboard_take_generation_inputs,
+)
 from app.services.text_provider import TextGenerationResult, TextProviderError
 
 STORY_ID = "93000000-0000-4000-8000-000000000001"
@@ -846,9 +861,9 @@ async def test_director_proposal_review_execute_compare_and_rollback(
         item["consumer"]: item for item in result["proposal"]["director_intent_inheritance"]
     }
     assert inheritance["TIMELINE"]["status"] == "INHERITED"
-    assert inheritance["STORYBOARD"]["status"] == "NOT_INTEGRATED"
-    assert inheritance["PROMPT"]["status"] == "NOT_INTEGRATED"
-    assert inheritance["AUDIO"]["status"] == "NOT_INTEGRATED"
+    assert inheritance["STORYBOARD"]["status"] == "PENDING"
+    assert inheritance["PROMPT"]["status"] == "PENDING"
+    assert inheritance["AUDIO"]["status"] == "PENDING"
     timeline_preview = result["proposal"]["comparison"]["timeline_preview"]
     assert timeline_preview["schema_version"] == "director-timeline-preview-v1"
     assert timeline_preview["projection_mode"] == "READ_ONLY"
@@ -1055,6 +1070,179 @@ async def test_director_intent_confirmation_rejects_wrong_preview_token(
 
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "DIRECTOR_INTENT_CONFIRMATION_TOKEN_INVALID"
+
+
+@pytest.mark.anyio
+async def test_confirmed_director_intent_is_consumed_by_storyboard_prompt_and_audio(
+    client: AsyncClient,
+) -> None:
+    prepare_script()
+    proposed = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json={
+            "expected_version": 8,
+            "target_type": "SCRIPT_SCENE",
+            "target_id": SCENE_ID,
+            "issue_types": ["PACING"],
+            "instruction": "这里更紧张",
+            "compile_intent": True,
+            "actor": "test-director",
+        },
+        headers={"Idempotency-Key": "director-intent-consumption-create-v1"},
+    )
+    assert proposed.status_code == 201, proposed.text
+    proposal = proposed.json()["data"]
+    executed = await client.post(
+        f"/api/v1/director-review-proposals/{proposal['proposal_id']}/execute",
+        json={
+            "expected_version": 8,
+            "option_id": proposal["recommended_option"],
+            "actor": "test-director",
+            "confirmed": True,
+            "intent_confirmation_token": proposal["director_intent_confirmation_token"],
+        },
+        headers={"Idempotency-Key": "director-intent-consumption-apply-v1"},
+    )
+    assert executed.status_code == 200, executed.text
+    revised_script_id = executed.json()["data"]["script"]["id"]
+
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        now = datetime.now(UTC)
+        revised_script = session.get(ScriptVersion, revised_script_id)
+        assert revised_script is not None
+        revised_script.status = "APPROVED"
+        revised_script.approved_at = now
+        revised_script.approved_by = "test-writer"
+        visual_bible = VisualBibleVersion(
+            id="93000000-0000-4000-8000-000000000031",
+            project_id=PROJECT_ID,
+            version=1,
+            status="APPROVED",
+            character_look_ids_json="[]",
+            location_version_ids_json="[]",
+            prop_version_ids_json="[]",
+            voice_profile_ids_json="[]",
+            payload_json="{}",
+            content_hash=content_hash({}),
+            approved_at=now,
+            approved_by="test-director",
+            created_at=now,
+        )
+        session.add(visual_bible)
+        session.flush()
+        storyboard_job, _ = enqueue_job(
+            session,
+            project_id=PROJECT_ID,
+            job_type="GENERATE_STORYBOARD_V2",
+            entity_type="visual_bible_version",
+            entity_id=visual_bible.id,
+            idempotency_key="director-intent-consumption-storyboard-v1",
+            input_payload={"visual_bible_version_id": visual_bible.id},
+            label="导演意图分镜测试",
+            stage="规划分镜",
+            trace_id="93000000-0000-4000-8000-000000000032",
+        )
+        storyboard, storyboard_child_ids = create_dynamic_storyboard(session, storyboard_job)
+        assert storyboard_child_ids
+        storyboard_payload = json.loads(storyboard.payload_json)
+        assert storyboard_payload["director_intent_consumption"][0]["consumer"] == "STORYBOARD"
+
+        storyboard_child = session.get(Job, storyboard_child_ids[0])
+        assert storyboard_child is not None
+        storyboard_job_payload = json.loads(storyboard_child.input_json)
+        assert storyboard_job_payload["director_intent"]["consumer"] == "PROMPT"
+        prompt, _, _ = resolve_storyboard_take_generation_inputs(
+            session,
+            storyboard_child,
+            storyboard_job_payload,
+        )
+        assert "[已确认导演意图 v1 · 场景 1]" in prompt
+        assert "CAMERA" in prompt
+        spec = session.get(ShotSpec, storyboard_job_payload["shot_spec_id"])
+        assert spec is not None
+        spec_payload = json.loads(spec.prompt_json)
+        assert spec_payload["director_intent"]["source_change_set_id"] == proposal["proposal_id"]
+
+        _, storyboard_take, _ = materialize_storyboard_take(
+            session,
+            get_settings(),
+            storyboard_child,
+            GeneratedImage(
+                content=deterministic_png_bytes(64, 96, "director-intent-consumption"),
+                mime="image/png",
+                width=64,
+                height=96,
+                model="deterministic-image-v1",
+                request_id=None,
+            ),
+        )
+        storyboard_record = session.get(GenerationRecord, storyboard_take.generation_record_id)
+        assert storyboard_record is not None
+        assert json.loads(storyboard_record.director_intent_json)["consumer"] == "PROMPT"
+
+        storyboard.status = "APPROVED"
+        storyboard.approved_at = now
+        storyboard.approved_by = "test-director"
+        audio_job, _ = enqueue_job(
+            session,
+            project_id=PROJECT_ID,
+            job_type="GENERATE_AUDIO_PIPELINE",
+            entity_type="storyboard_version",
+            entity_id=storyboard.id,
+            idempotency_key="director-intent-consumption-audio-v1",
+            input_payload={"storyboard_version_id": storyboard.id},
+            label="导演意图声音测试",
+            stage="规划声音",
+            trace_id="93000000-0000-4000-8000-000000000033",
+        )
+        brief, audio_child_ids = create_audio_pipeline(session, audio_job)
+        assert isinstance(brief, SoundBriefVersion)
+        assert json.loads(brief.payload_json)["director_intent_consumption"][0][
+            "consumer"
+        ] == "AUDIO"
+        cue = session.scalar(
+            select(AudioCue)
+            .where(AudioCue.storyboard_version_id == storyboard.id)
+            .order_by(AudioCue.ordinal)
+        )
+        assert cue is not None
+        assert json.loads(cue.payload_json)["director_intent"]["consumer"] == "AUDIO"
+        audio_child = session.get(Job, audio_child_ids[0])
+        assert audio_child is not None
+        audio_take, _ = materialize_audio_take(session, get_settings(), audio_child)
+        audio_record = session.get(GenerationRecord, audio_take.generation_record_id)
+        assert audio_record is not None
+        assert json.loads(audio_record.director_intent_json)["consumer"] == "AUDIO"
+
+        change_set = session.get(ChangeSet, proposal["proposal_id"])
+        assert change_set is not None
+        receipts = {
+            item["consumer"]: item
+            for item in json.loads(change_set.impact_json)["proposal"][
+                "director_intent_inheritance"
+            ]
+        }
+        assert receipts["STORYBOARD"]["status"] == "INHERITED"
+        assert receipts["PROMPT"]["status"] == "INHERITED"
+        assert receipts["AUDIO"]["status"] == "INHERITED"
+        assert receipts["STORYBOARD"]["evidence"]["shot_spec_ids"] == [spec.id]
+        assert receipts["AUDIO"]["evidence"]["audio_cue_ids"]
+        project = session.get(Project, PROJECT_ID)
+        assert project is not None
+        intent_relations = {
+            edge.relation
+            for edge in get_film_ir_projection(session, project).edges
+            if edge.source.type == "DirectorIntent"
+        }
+        assert {
+            "DIRECTS_STORYBOARD",
+            "DIRECTS_GENERATION_PROMPT",
+            "DIRECTS_AUDIO_CUE",
+        } <= intent_relations
 
 
 @pytest.mark.anyio

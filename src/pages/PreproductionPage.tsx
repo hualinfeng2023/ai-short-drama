@@ -17,6 +17,18 @@ import { useToast } from '../store/ToastContext'
 import { localizeCharacterRole, localizeDisplayText } from '../utils/localizeDisplayText'
 import type { ProjectRecord } from '../types'
 
+const PREPRODUCTION_COMPLETE_STATUSES = new Set([
+  'PREPRODUCTION_APPROVED',
+  'STORYBOARD_READY',
+  'STORYBOARD_APPROVED',
+  'CHARACTER_LOCKED',
+  'PRODUCING',
+  'PREVIEW_READY',
+  'APPROVED',
+  'EXPORTING',
+  'EXPORTED',
+])
+
 export function PreproductionPage() {
   const { projectId } = useParams()
   const { project: activeProject } = useStudio()
@@ -115,6 +127,36 @@ export function PreproductionPage() {
     (character) => workspace.looks.filter((look) => look.characterId === character.id).length >= 1,
   )
   const canApprove = project.status === 'PREPRODUCTION_READY' && allLocked && looksReady
+  const unlockedCharacterNames = workspace.characters
+    .filter((character) => !character.lockedCandidateId)
+    .map((character) => character.name)
+  const missingLookCharacterNames = workspace.characters
+    .filter((character) => (
+      workspace.looks.every((look) => look.characterId !== character.id)
+    ))
+    .map((character) => character.name)
+  const approvalDisabled = !canApprove || busy !== null
+  const preproductionComplete = PREPRODUCTION_COMPLETE_STATUSES.has(project.status)
+  const approvalDisabledReasons = preproductionComplete
+    ? ['第 3 阶段已经批准，无需重复操作']
+    : [
+      busy !== null ? '正在处理其他前期资产操作，请稍候' : null,
+      project.status !== 'PREPRODUCTION_READY'
+        ? `项目当前为「${getStatusLabel(project.status)}」，请先完成上一阶段`
+        : null,
+      workspace.characters.length === 0
+        ? '尚未生成角色候选'
+        : unlockedCharacterNames.length > 0
+          ? `请先锁定角色：${unlockedCharacterNames.join('、')}`
+          : null,
+      missingLookCharacterNames.length > 0
+        ? `请先为角色准备至少 1 个造型：${missingLookCharacterNames.join('、')}`
+        : null,
+    ].filter((reason): reason is string => Boolean(reason))
+  const approvalDisabledReason = approvalDisabled
+    ? `暂不可批准：${approvalDisabledReasons.join('；')}`
+    : null
+  const approvalTooltipId = 'preproduction-approval-disabled-reason'
 
   return <div className="page page--preproduction">
     <PageHeader
@@ -177,7 +219,26 @@ export function PreproductionPage() {
       <article><p className="eyebrow">世界资产</p><h2>场景与道具</h2>{workspace.locations.map((location) => <div key={location.id}><strong>{location.name}</strong><span>场景第 {location.version} 版</span></div>)}{workspace.props.map((prop) => <div key={prop.id}><strong>{prop.name}</strong><span>道具第 {prop.version} 版</span></div>)}</article>
     </section>
 
-    <section className="character-lock-bar"><div><LockKeyhole size={18} /><span><strong>第 3 阶段 · 视觉设定</strong><small>批准后，所有分镜镜头都会绑定稳定的角色造型、场景、道具和声音编号。</small></span></div><Button disabled={!canApprove || busy !== null} onClick={() => setApproveOpen(true)}>{busy === 'approve' ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}批准第 3 阶段并生成分镜</Button></section>
+    <section className="character-lock-bar">
+      <div><LockKeyhole size={18} /><span><strong>第 3 阶段 · 视觉设定</strong><small>批准后，所有分镜镜头都会绑定稳定的角色造型、场景、道具和声音编号。</small></span></div>
+      <span
+        aria-describedby={approvalDisabledReason ? approvalTooltipId : undefined}
+        className="preproduction-approval-control"
+        tabIndex={approvalDisabledReason ? 0 : undefined}
+      >
+        <Button
+          aria-describedby={approvalDisabledReason ? approvalTooltipId : undefined}
+          disabled={approvalDisabled}
+          onClick={() => setApproveOpen(true)}
+        >
+          {busy === 'approve' ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}
+          批准第 3 阶段并生成分镜
+        </Button>
+        {approvalDisabledReason ? (
+          <span id={approvalTooltipId} role="tooltip">{approvalDisabledReason}</span>
+        ) : null}
+      </span>
+    </section>
 
     <ImpactConfirmModal
       confirmLabel="批准并生成分镜"

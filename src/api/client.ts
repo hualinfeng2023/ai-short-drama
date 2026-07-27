@@ -2295,6 +2295,7 @@ export interface DirectorIntentInheritanceEvidence {
   sourceFingerprint?: string
   appliedRange?: { startMs: number; endMs: number } | null
   outputVersion?: string | null
+  evidence?: Record<string, unknown>
 }
 
 export interface DirectorReviewProposal {
@@ -2497,6 +2498,7 @@ interface ApiDirectorReviewProposal {
     source_fingerprint?: string
     applied_range?: { start_ms: number; end_ms: number } | null
     output_version?: string | null
+    evidence?: Record<string, unknown>
   }>
   created_at: string
 }
@@ -2715,6 +2717,7 @@ function mapDirectorReviewProposal(
           }
         : item.applied_range,
       outputVersion: item.output_version,
+      ...(item.evidence ? { evidence: item.evidence } : {}),
     })),
     createdAt: proposal.created_at,
   }

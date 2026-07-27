@@ -6,6 +6,9 @@ const NODE_HEIGHT = 108
 const COLUMN_GAP = 304
 const ROW_GAP = 148
 const EMPTY_LANE_HEIGHT = 552
+const COMPACT_EMPTY_LANE_HEIGHT = 176
+const LANE_HEADER_HEIGHT = 48
+const LANE_HEADER_Y = -76
 
 const TYPE_COLUMN: Record<string, number> = {
   Project: 0,
@@ -71,12 +74,26 @@ export interface FilmCanvasNodeData extends Record<string, unknown> {
 
 export type FilmCanvasNode = Node<FilmCanvasNodeData, 'filmObject'>
 export interface FilmCanvasEmptyLaneNodeData extends Record<string, unknown> {
+  actionHref: string
+  actionLabel: string
   description: string
+  eyebrow: string
   label: string
+  status: string
+  variant: 'assets' | 'storyboard' | 'timeline'
 }
 
 export type FilmCanvasEmptyLaneNode = Node<FilmCanvasEmptyLaneNodeData, 'emptyLane'>
-export type FilmCanvasGraphNode = FilmCanvasNode | FilmCanvasEmptyLaneNode
+export interface FilmCanvasLaneHeaderNodeData extends Record<string, unknown> {
+  index: number
+  label: string
+}
+
+export type FilmCanvasLaneHeaderNode = Node<FilmCanvasLaneHeaderNodeData, 'laneHeader'>
+export type FilmCanvasGraphNode =
+  | FilmCanvasNode
+  | FilmCanvasEmptyLaneNode
+  | FilmCanvasLaneHeaderNode
 export type FilmCanvasEdge = Edge
 
 export interface FilmCanvasNodeViewState {
@@ -120,6 +137,26 @@ export function canvasNodeId(ref: CanvasReference): string {
 
 export function isFilmObjectNode(node: FilmCanvasGraphNode): node is FilmCanvasNode {
   return node.type === 'filmObject'
+}
+
+function createLaneHeaderNodes(): FilmCanvasLaneHeaderNode[] {
+  return [
+    { index: 1, label: '故事与剧本', column: 0, width: COLUMN_GAP + NODE_WIDTH },
+    { index: 2, label: '场次与台词', column: 2, width: NODE_WIDTH },
+    { index: 3, label: '前期资产', column: 3, width: NODE_WIDTH },
+    { index: 4, label: '动态分镜', column: 4, width: NODE_WIDTH },
+    { index: 5, label: '制作时间线', column: 5, width: NODE_WIDTH },
+  ].map(({ index, label, column, width }) => ({
+    id: `canvas-lane-header:${index}`,
+    type: 'laneHeader',
+    position: { x: column * COLUMN_GAP, y: LANE_HEADER_Y },
+    data: { index, label },
+    draggable: false,
+    connectable: false,
+    deletable: false,
+    selectable: false,
+    style: { width, height: LANE_HEADER_HEIGHT },
+  }))
 }
 
 export function getCanvasRelationLabel(relation: string): string {
@@ -317,25 +354,91 @@ export function projectCanvasGraph(
   const hasStoryboardContent = projection.nodes.some(
     (item) => item.ref.type === 'Storyboard' || item.ref.type === 'Shot',
   )
-  const nodes: FilmCanvasGraphNode[] = hasStoryboardContent
-    ? objectNodes
-    : [
-      ...objectNodes,
-      {
+  const hasTimelineContent = projection.nodes.some((item) => item.ref.type === 'Timeline')
+  const presentAssetTypes = new Set(
+    projection.nodes
+      .map((item) => item.ref.type)
+      .filter((type) => ['Character', 'Scene', 'Location', 'Prop'].includes(type)),
+  )
+  const missingAssetLabels = [
+    !presentAssetTypes.has('Character') ? '角色' : null,
+    !presentAssetTypes.has('Scene') && !presentAssetTypes.has('Location') ? '场景与地点' : null,
+    !presentAssetTypes.has('Prop') ? '道具' : null,
+  ].filter((label): label is string => label !== null)
+  const assetColumnRows = rowByColumn.get(TYPE_COLUMN.Character) ?? 0
+  const helperNodes: FilmCanvasGraphNode[] = [
+    ...createLaneHeaderNodes(),
+    ...(missingAssetLabels.length > 0
+      ? [{
+        id: 'canvas-empty-lane:assets',
+        type: 'emptyLane' as const,
+        position: {
+          x: TYPE_COLUMN.Character * COLUMN_GAP,
+          y: assetColumnRows * ROW_GAP,
+        },
+        data: {
+          actionHref: `/projects/${projection.projectId}/preproduction`,
+          actionLabel: '进入前期资产',
+          label: assetColumnRows > 0 ? '待补齐资产' : '前期资产区域',
+          description: `${missingAssetLabels.join('、')}尚未准备；剧本批准后可继续生成并锁定。`,
+          eyebrow: '前期资产区域',
+          status: assetColumnRows > 0 ? '已有部分资产' : '当前尚未生成前期资产',
+          variant: 'assets' as const,
+        },
+        draggable: false,
+        connectable: false,
+        deletable: false,
+        selectable: false,
+        style: {
+          width: NODE_WIDTH,
+          height: assetColumnRows > 0 ? COMPACT_EMPTY_LANE_HEIGHT : EMPTY_LANE_HEIGHT,
+        },
+      }]
+      : []),
+    ...(!hasStoryboardContent
+      ? [{
         id: 'canvas-empty-lane:storyboard',
-        type: 'emptyLane',
+        type: 'emptyLane' as const,
         position: { x: TYPE_COLUMN.Storyboard * COLUMN_GAP, y: 0 },
         data: {
+          actionHref: `/projects/${projection.projectId}/storyboard`,
+          actionLabel: '进入动态分镜',
           label: '分镜区域',
           description: '剧本批准后，故事板与镜头会出现在这里。',
+          eyebrow: '后续制作区域',
+          status: '当前尚未生成分镜内容',
+          variant: 'storyboard' as const,
         },
         draggable: false,
         connectable: false,
         deletable: false,
         selectable: false,
         style: { width: NODE_WIDTH, height: EMPTY_LANE_HEIGHT },
-      },
-    ]
+      }]
+      : []),
+    ...(!hasTimelineContent
+      ? [{
+        id: 'canvas-empty-lane:timeline',
+        type: 'emptyLane' as const,
+        position: { x: TYPE_COLUMN.Timeline * COLUMN_GAP, y: 0 },
+        data: {
+          actionHref: `/projects/${projection.projectId}/production`,
+          actionLabel: '进入制作时间线',
+          label: '制作时间线',
+          description: '分镜批准并完成镜头生成后，画面与声音会在这里汇入成片。',
+          eyebrow: '最终制作区域',
+          status: '当前尚未生成时间线',
+          variant: 'timeline' as const,
+        },
+        draggable: false,
+        connectable: false,
+        deletable: false,
+        selectable: false,
+        style: { width: NODE_WIDTH, height: EMPTY_LANE_HEIGHT },
+      }]
+      : []),
+  ]
+  const nodes: FilmCanvasGraphNode[] = [...objectNodes, ...helperNodes]
   const visibleNodeIds = new Set(nodes.map((node) => node.id))
   const edges = projection.edges
     .map<FilmCanvasEdge>((edge, index) => ({
