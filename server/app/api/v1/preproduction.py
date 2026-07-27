@@ -1,4 +1,4 @@
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from fastapi import APIRouter, Depends, Header, Response, status
 from sqlalchemy.orm import Session
@@ -6,9 +6,17 @@ from sqlalchemy.orm import Session
 from app.api.trace import success
 from app.db.session import get_session
 from app.domain.commands import CommandActor, DirectorCommand, ExpectedVersion
-from app.schemas import StoryPackageGenerateRequest
+from app.schemas import (
+    StoryPackageGenerateRequest,
+    WorldAssetImageGenerateRequest,
+    WorldAssetReferenceLockRequest,
+)
 from app.services.domain_commands import dispatch_domain_command
-from app.services.preproduction import preproduction_workspace
+from app.services.preproduction import (
+    lock_world_asset_reference,
+    preproduction_workspace,
+    request_world_asset_image_generation,
+)
 from app.services.projects import content_hash
 from app.services.workspace import project_or_404
 
@@ -20,6 +28,56 @@ def get_preproduction(
     project_id: str, session: Session = Depends(get_session)
 ) -> dict[str, object]:
     return success(preproduction_workspace(session, project_id))
+
+
+@router.post(
+    "/projects/{project_id}/preproduction/{asset_type}/{version_id}/reference-images",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def generate_world_asset_reference(
+    project_id: str,
+    asset_type: str,
+    version_id: str,
+    payload: WorldAssetImageGenerateRequest,
+    response: Response,
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=160),
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    job, replayed = request_world_asset_image_generation(
+        session,
+        project_id=project_id,
+        asset_type=asset_type,
+        version_id=version_id,
+        expected_version=payload.expected_version,
+        actor=payload.actor,
+        idempotency_key=idempotency_key,
+        trace_id=str(uuid4()),
+    )
+    response.headers["Idempotency-Replayed"] = str(replayed).lower()
+    return success({"job": job})
+
+
+@router.post(
+    "/projects/{project_id}/preproduction/{asset_type}/{version_id}/reference-images/lock",
+)
+def lock_world_asset_reference_image(
+    project_id: str,
+    asset_type: str,
+    version_id: str,
+    payload: WorldAssetReferenceLockRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return success(
+        lock_world_asset_reference(
+            session,
+            project_id=project_id,
+            asset_type=asset_type,
+            version_id=version_id,
+            asset_id=payload.asset_id,
+            expected_version=payload.expected_version,
+            actor=payload.actor,
+        )
+    )
 
 
 @router.post(

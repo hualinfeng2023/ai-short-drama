@@ -520,6 +520,13 @@ export interface PreproductionWorkspace {
     version: number
     name: string
     payload: Record<string, unknown>
+    referenceAssetIds: string[]
+    imageCandidates: Array<{
+      id: string
+      assetUrl: string
+      status: string
+      createdAt: string
+    }>
     status: string
     contentHash: string
   }>
@@ -529,6 +536,13 @@ export interface PreproductionWorkspace {
     version: number
     name: string
     payload: Record<string, unknown>
+    referenceAssetIds: string[]
+    imageCandidates: Array<{
+      id: string
+      assetUrl: string
+      status: string
+      createdAt: string
+    }>
     status: string
     contentHash: string
   }>
@@ -4683,6 +4697,13 @@ export async function fetchPreproduction(
       version: number
       name: string
       payload: Record<string, unknown>
+      reference_asset_ids: string[]
+      image_candidates: Array<{
+        id: string
+        asset_url: string
+        status: string
+        created_at: string
+      }>
       status: string
       content_hash: string
     }>
@@ -4692,6 +4713,13 @@ export async function fetchPreproduction(
       version: number
       name: string
       payload: Record<string, unknown>
+      reference_asset_ids: string[]
+      image_candidates: Array<{
+        id: string
+        asset_url: string
+        status: string
+        created_at: string
+      }>
       status: string
       content_hash: string
     }>
@@ -4722,10 +4750,24 @@ export async function fetchPreproduction(
     })),
     locations: data.locations.map((item) => ({
       ...item,
+      referenceAssetIds: item.reference_asset_ids,
+      imageCandidates: item.image_candidates.map((candidate) => ({
+        id: candidate.id,
+        assetUrl: candidate.asset_url,
+        status: candidate.status,
+        createdAt: candidate.created_at,
+      })),
       contentHash: item.content_hash,
     })),
     props: data.props.map((item) => ({
       ...item,
+      referenceAssetIds: item.reference_asset_ids,
+      imageCandidates: item.image_candidates.map((candidate) => ({
+        id: candidate.id,
+        assetUrl: candidate.asset_url,
+        status: candidate.status,
+        createdAt: candidate.created_at,
+      })),
       contentHash: item.content_hash,
     })),
     voices: data.voices.map((item) => ({
@@ -4745,6 +4787,50 @@ export async function fetchPreproduction(
       contentHash: item.content_hash,
     })),
   }
+}
+
+export async function generateWorldAssetReference(
+  projectId: string,
+  assetType: 'location' | 'prop',
+  versionId: string,
+  expectedVersion: number,
+): Promise<Job> {
+  const result = await requestJson<{ job: ApiJob }>(
+    `/api/v1/projects/${projectId}/preproduction/${assetType}/${versionId}/reference-images`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': crypto.randomUUID(),
+      },
+      body: JSON.stringify({
+        expected_version: expectedVersion,
+        actor: 'demo-user',
+      }),
+    },
+  )
+  return mapJob(result.job)
+}
+
+export async function lockWorldAssetReference(
+  projectId: string,
+  assetType: 'location' | 'prop',
+  versionId: string,
+  assetId: string,
+  expectedVersion: number,
+): Promise<void> {
+  await requestJson(
+    `/api/v1/projects/${projectId}/preproduction/${assetType}/${versionId}/reference-images/lock`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        expected_version: expectedVersion,
+        asset_id: assetId,
+        actor: 'demo-user',
+      }),
+    },
+  )
 }
 
 export async function approvePreproduction(

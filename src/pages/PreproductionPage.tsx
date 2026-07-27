@@ -5,7 +5,9 @@ import {
   approvePreproduction,
   fetchPreproduction,
   fetchProject,
+  generateWorldAssetReference,
   lockCharacterCandidate,
+  lockWorldAssetReference,
   type PreproductionWorkspace,
 } from '../api/client'
 import { Button, PageHeader, StatusBadge, Surface, getStatusLabel } from '../components/ui'
@@ -28,6 +30,10 @@ const PREPRODUCTION_COMPLETE_STATUSES = new Set([
   'EXPORTING',
   'EXPORTED',
 ])
+
+function formatLookLabel(label: string) {
+  return localizeDisplayText(label).replace(/^造型\s*\d+\s*·\s*/, '')
+}
 
 export function PreproductionPage() {
   const { projectId } = useParams()
@@ -114,6 +120,51 @@ export function PreproductionPage() {
     }
   }
 
+  async function generateWorldReference(
+    assetType: 'location' | 'prop',
+    versionId: string,
+    name: string,
+  ) {
+    if (!projectId || !project) return
+    setBusy(`generate-${versionId}`)
+    setError(null)
+    try {
+      await generateWorldAssetReference(projectId, assetType, versionId, project.lockVersion)
+      notify(`${name}参考图已进入生成队列，完成后会自动显示在本页。`)
+      await refresh()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '参考图生成失败')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function lockWorldReference(
+    assetType: 'location' | 'prop',
+    versionId: string,
+    assetId: string,
+    name: string,
+  ) {
+    if (!projectId || !project) return
+    setBusy(`lock-${versionId}`)
+    setError(null)
+    try {
+      await lockWorldAssetReference(
+        projectId,
+        assetType,
+        versionId,
+        assetId,
+        project.lockVersion,
+      )
+      notify(`${name}参考图已锁定。`)
+      await refresh()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '参考图锁定失败')
+    } finally {
+      setBusy(null)
+    }
+  }
+
   if (!loading && (!project || !workspace || !projectId)) {
     return <ServiceRequiredState feature="前期资产" projectId={projectId} />
   }
@@ -126,7 +177,25 @@ export function PreproductionPage() {
   const looksReady = workspace.characters.every(
     (character) => workspace.looks.filter((look) => look.characterId === character.id).length >= 1,
   )
-  const canApprove = project.status === 'PREPRODUCTION_READY' && allLocked && looksReady
+  const worldAssets = [
+    ...workspace.locations.map((item) => ({
+      ...item,
+      assetType: 'location' as const,
+      typeLabel: '场景',
+    })),
+    ...workspace.props.map((item) => ({
+      ...item,
+      assetType: 'prop' as const,
+      typeLabel: '关键道具',
+    })),
+  ]
+  const worldAssetsReady = worldAssets.every((item) => item.referenceAssetIds.length > 0)
+  const canApprove = (
+    project.status === 'PREPRODUCTION_READY'
+    && allLocked
+    && looksReady
+    && worldAssetsReady
+  )
   const unlockedCharacterNames = workspace.characters
     .filter((character) => !character.lockedCandidateId)
     .map((character) => character.name)
@@ -135,6 +204,9 @@ export function PreproductionPage() {
       workspace.looks.every((look) => look.characterId !== character.id)
     ))
     .map((character) => character.name)
+  const missingWorldAssetNames = worldAssets
+    .filter((item) => item.referenceAssetIds.length === 0)
+    .map((item) => item.name)
   const approvalDisabled = !canApprove || busy !== null
   const preproductionComplete = PREPRODUCTION_COMPLETE_STATUSES.has(project.status)
   const approvalDisabledReasons = preproductionComplete
@@ -151,6 +223,9 @@ export function PreproductionPage() {
           : null,
       missingLookCharacterNames.length > 0
         ? `请先为角色准备至少 1 个造型：${missingLookCharacterNames.join('、')}`
+        : null,
+      missingWorldAssetNames.length > 0
+        ? `请先生成并锁定参考图：${missingWorldAssetNames.join('、')}`
         : null,
     ].filter((reason): reason is string => Boolean(reason))
   const approvalDisabledReason = approvalDisabled
@@ -173,8 +248,8 @@ export function PreproductionPage() {
     </section>
 
     <Surface className="story-section">
-      <div className="section-heading"><div><h2>已锁定身份引用</h2><p>角色身份已在剧本生成前人工锁定；本阶段只读取身份与基础 Look Version，不会替换候选或覆盖既有镜头。</p></div></div>
-      <div className="preproduction-character-list">{workspace.characters.map((character) => {
+      <div className="section-heading"><div><h2>角色准备情况</h2><p>逐个确认角色的身份参考图、当前造型和声音权限；本阶段不会自动替换已锁定的身份。</p></div></div>
+      <div className="preproduction-character-list character-readiness-list">{workspace.characters.map((character) => {
         const lockedReferenceUrl = character.lockedCandidateId && activeProject.id === projectId
           ? activeProject.shots.find((shot) => (
             shot.currentImageUrl
@@ -185,17 +260,37 @@ export function PreproductionPage() {
           ? character.candidates.find((candidate) => candidate.id === character.lockedCandidateId)
           : undefined
         const lockedImageUrl = lockedReferenceUrl || lockedCandidate?.assetUrl
+        const looks = workspace.looks.filter((look) => look.characterId === character.id)
+        const voices = workspace.voices.filter((voice) => voice.characterId === character.id)
+        const look = looks.reduce((latest, item) => (
+          !latest || item.version > latest.version ? item : latest
+        ), looks[0])
+        const voice = voices.reduce((latest, item) => (
+          !latest || item.version > latest.version ? item : latest
+        ), voices[0])
         return <article key={character.id}>
-        <header><div><p className="eyebrow">{localizeCharacterRole(character.role)}</p><h3>{character.name}</h3><p>{character.visualBrief}</p></div><StatusBadge status={character.status} /></header>
-        {lockedCandidate && lockedImageUrl ? (
-          <div className="preproduction-locked-look">
-            <img alt={`${character.name} 已锁定形象`} src={lockedImageUrl} />
+        <header><div><p className="eyebrow">{localizeCharacterRole(character.role)}</p><h3>{character.name}</h3><p>{character.visualBrief}</p></div></header>
+        <div className="character-readiness__grid">
+          <div className="character-readiness__identity">
+            {lockedCandidate && lockedImageUrl ? <img alt={`${character.name} 已锁定形象`} src={lockedImageUrl} /> : <div className="character-readiness__placeholder"><UsersRound size={20} /></div>}
             <div>
-              <strong>已锁定形象</strong>
-              <small>候选 {lockedCandidate.ordinal}{lockedReferenceUrl ? ' · 项目参考镜头' : ''}</small>
+              <span><LockKeyhole size={14} />身份参考</span>
+              <strong>{character.lockedCandidateId ? '已锁定形象' : '等待锁定'}</strong>
+              <small>{lockedCandidate ? `候选 ${lockedCandidate.ordinal}${lockedReferenceUrl ? ' · 项目参考镜头' : ''}` : '请从下方候选中选择'}</small>
             </div>
           </div>
-        ) : (
+          <div className="character-assets__summary">
+            <span><Sparkles size={14} />当前造型</span>
+            <strong>{look ? formatLookLabel(look.label) : '尚未准备'}</strong>
+            <small>{look ? `第 ${look.version} 版 · ${localizeDisplayText(look.usageScope)} · ${getStatusLabel(look.status)}` : '需要生成并批准角色造型'}</small>
+          </div>
+          <div className="character-assets__summary">
+            <span><Mic2 size={14} />声音权限</span>
+            <strong>{voice ? getStatusLabel(voice.consentStatus) : '尚未准备'}</strong>
+            <small>{voice ? (voice.cloningEnabled ? '真人声音克隆已开启' : '真人声音克隆关闭') : '需要配置声音档案'}</small>
+          </div>
+        </div>
+        {character.lockedCandidateId ? null : (
           <div className="character-candidate-grid">{character.candidates.map((candidate) => {
             const active = selected[character.id] === candidate.id
             return <button className={`character-candidate ${active ? 'character-candidate--selected' : ''}`} key={candidate.id} onClick={() => setSelected((value) => ({ ...value, [character.id]: candidate.id }))}><img alt={`${character.name} 候选 ${candidate.ordinal}`} src={candidate.assetUrl} /><span><strong>候选 {candidate.ordinal}</strong><small>生成种子 · {candidate.seed}</small></span>{active ? <em><Check size={15} />已选择</em> : null}</button>
@@ -213,10 +308,60 @@ export function PreproductionPage() {
       })}</div>
     </Surface>
 
-    <section className="preproduction-assets">
-      <article><p className="eyebrow">造型版本</p><h2>{workspace.looks.length} 个已生成版本</h2>{workspace.looks.map((look) => <div key={look.id}><strong>{localizeDisplayText(look.label)}</strong><StatusBadge status={look.status} /><span>第 {look.version} 版 · {localizeDisplayText(look.usageScope)}</span></div>)}</article>
-      <article><p className="eyebrow">声音安全</p><h2>声音档案</h2>{workspace.voices.map((voice) => <div key={voice.id}><Mic2 size={15} /><strong>{voice.voiceKey}</strong><span>{getStatusLabel(voice.consentStatus)}</span><small>{voice.cloningEnabled ? '已开启克隆' : '真人声音克隆关闭'}</small></div>)}</article>
-      <article><p className="eyebrow">世界资产</p><h2>场景与道具</h2>{workspace.locations.map((location) => <div key={location.id}><strong>{location.name}</strong><span>场景第 {location.version} 版</span></div>)}{workspace.props.map((prop) => <div key={prop.id}><strong>{prop.name}</strong><span>道具第 {prop.version} 版</span></div>)}</article>
+    <section className="preproduction-assets preproduction-assets--world-only">
+      <article className="world-assets">
+        <p className="eyebrow">世界资产</p>
+        <h2>场景与关键道具参考图</h2>
+        <p className="world-assets__intro">生成后需人工确认锁定，分镜和后续镜头才会引用一致的空间与道具外观。</p>
+        <div className="world-assets__grid">{worldAssets.map((item) => {
+          const candidate = item.imageCandidates[0]
+          const hasLockedReference = item.referenceAssetIds.length > 0
+          const candidateIsLocked = Boolean(
+            candidate && item.referenceAssetIds.includes(candidate.id),
+          )
+          const stateLabel = hasLockedReference
+            ? candidateIsLocked ? '已锁定' : '新候选待确认'
+            : candidate ? '待确认' : '缺少参考图'
+          return <section className="world-asset-card" key={`${item.assetType}-${item.id}`}>
+            <header>
+              <div><span>{item.typeLabel}</span><h3>{item.name}</h3></div>
+              <strong data-ready={hasLockedReference}>{stateLabel}</strong>
+            </header>
+            {candidate ? (
+              <img alt={`${item.name}参考图候选`} src={candidate.assetUrl} />
+            ) : (
+              <div className="world-asset-card__placeholder"><Sparkles size={22} /><span>尚未生成参考图</span></div>
+            )}
+            <small>{item.typeLabel}第 {item.version} 版</small>
+            <footer>
+              <Button
+                disabled={busy !== null}
+                onClick={() => void generateWorldReference(item.assetType, item.id, item.name)}
+                size="sm"
+                variant="secondary"
+              >
+                {busy === `generate-${item.id}` ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}
+                {candidate ? '重新生成' : '生成参考图'}
+              </Button>
+              {candidate && !candidateIsLocked ? (
+                <Button
+                  disabled={busy !== null}
+                  onClick={() => void lockWorldReference(
+                    item.assetType,
+                    item.id,
+                    candidate.id,
+                    item.name,
+                  )}
+                  size="sm"
+                >
+                  {busy === `lock-${item.id}` ? <LoaderCircle className="spin" size={15} /> : <LockKeyhole size={15} />}
+                  锁定参考图
+                </Button>
+              ) : null}
+            </footer>
+          </section>
+        })}</div>
+      </article>
     </section>
 
     <section className="character-lock-bar">
@@ -225,6 +370,7 @@ export function PreproductionPage() {
         aria-describedby={approvalDisabledReason ? approvalTooltipId : undefined}
         className="preproduction-approval-control"
         tabIndex={approvalDisabledReason ? 0 : undefined}
+        title={approvalDisabledReason ?? undefined}
       >
         <Button
           aria-describedby={approvalDisabledReason ? approvalTooltipId : undefined}

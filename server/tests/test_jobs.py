@@ -85,6 +85,7 @@ EXPECTED_JOB_TYPES = {
     "GENERATE_CHARACTER_VISUAL_CANDIDATE",
     "GENERATE_CHARACTER_IDENTITY_DOSSIER",
     "GENERATE_CHARACTER_LOOKS",
+    "GENERATE_WORLD_ASSET_IMAGE",
     "PREPARE_PREPRODUCTION_ASSETS",
     "GENERATE_STORYBOARD_V2",
     "GENERATE_STORYBOARD_TAKE",
@@ -1052,6 +1053,44 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
     assert len(preproduction["props"]) >= 1
     assert len(preproduction["voices"]) == 2
     assert all(item["cloning_enabled"] is False for item in preproduction["voices"])
+
+    for asset_type, items in (
+        ("location", preproduction["locations"]),
+        ("prop", preproduction["props"]),
+    ):
+        for item in items:
+            generated_reference = await client.post(
+                (
+                    f"/api/v1/projects/{project_id}/preproduction/"
+                    f"{asset_type}/{item['id']}/reference-images"
+                ),
+                json={"expected_version": current_version, "actor": "test-director"},
+                headers={"Idempotency-Key": f"world-reference-{asset_type}-{item['id']}"},
+            )
+            assert generated_reference.status_code == 202, generated_reference.text
+            assert await worker.run_once() is True
+            current_workspace = (
+                await client.get(f"/api/v1/projects/{project_id}/preproduction")
+            ).json()["data"]
+            current_item = next(
+                candidate
+                for candidate in current_workspace[f"{asset_type}s"]
+                if candidate["id"] == item["id"]
+            )
+            reference_candidate = current_item["image_candidates"][0]
+            locked_reference = await client.post(
+                (
+                    f"/api/v1/projects/{project_id}/preproduction/"
+                    f"{asset_type}/{item['id']}/reference-images/lock"
+                ),
+                json={
+                    "expected_version": current_version,
+                    "asset_id": reference_candidate["id"],
+                    "actor": "test-director",
+                },
+            )
+            assert locked_reference.status_code == 200, locked_reference.text
+            current_version = locked_reference.json()["data"]["project_lock_version"]
 
     approved_preproduction = await client.post(
         f"/api/v1/projects/{project_id}/preproduction/approve",

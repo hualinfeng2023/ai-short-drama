@@ -800,6 +800,17 @@ class StoryPackageGenerateRequest(BaseModel):
     actor: str = Field(default="demo-user", min_length=1, max_length=80)
 
 
+class WorldAssetImageGenerateRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    actor: str = Field(default="demo-user", min_length=1, max_length=80)
+
+
+class WorldAssetReferenceLockRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    asset_id: str = Field(min_length=36, max_length=36)
+    actor: str = Field(default="demo-user", min_length=1, max_length=80)
+
+
 class StoryboardShotRegenerateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
