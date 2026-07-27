@@ -148,6 +148,7 @@ from app.services.projects import (
     version_conflict,
 )
 from app.services.proposals import create_proposal_job
+from app.services.provenance import record_shot_spec_revision
 from app.services.relationship_graph_workflow import (
     approve_relationship_graph,
     create_confirmed_relationship_revision,
@@ -2450,6 +2451,19 @@ def _execute_shot_spec_update(
     if spec is not None:
         spec.status = "DRAFT"
         spec.content_hash = _shot_spec_content_hash(spec)
+        record_shot_spec_revision(
+            session,
+            project_id=project.id,
+            spec=spec,
+            actor=command.actor.id,
+            change_reason=str(
+                command.payload.get("reason")
+                or command.payload.get("note")
+                or "用户修改镜头规格"
+            ),
+            changes=changes,
+            trace_id=command.command_id,
+        )
 
     takes = session.scalars(select(Take).where(Take.shot_id == shot.id)).all()
     asset_ids = {take.asset_id for take in takes}
@@ -5803,8 +5817,32 @@ def dispatch_domain_command(
             action=command.command_type,
             entity_type=mutation.entity_type,
             entity_id=mutation.entity_id,
+            target_version_id=command.target_version_id,
+            actor_type=command.actor.type,
             before_hash=mutation.before_hash,
             after_hash=mutation.after_hash,
+            command_payload_json=canonical_json(command.payload),
+            result_snapshot_json=canonical_json(
+                RESULT_ADAPTER.dump_python(mutation.result, mode="json")
+            ),
+            rules_json=canonical_json(
+                command.payload.get("rules", {})
+                if isinstance(command.payload.get("rules"), dict)
+                else {}
+            ),
+            director_intent_json=canonical_json(
+                {
+                    key: command.payload[key]
+                    for key in ("instruction", "note", "reason", "custom_prompt")
+                    if key in command.payload
+                }
+            ),
+            rejection_reasons_json=canonical_json(
+                command.payload.get("issues", [])
+                if command.command_type == "DECIDE_REVIEW"
+                and command.payload.get("decision") == "REJECT"
+                else []
+            ),
             trace_id=command.command_id,
             created_at=datetime.now(UTC),
         )

@@ -2585,6 +2585,7 @@ def select_character_candidate(
                 "identity_version_id": identity.id,
                 "candidate_id": candidate.id,
                 "reference_asset_id": candidate.asset_id,
+                "reference_asset_ids": [candidate.asset_id],
                 "view_type": view_type,
                 "quality_context": f"INFANT_{view_type}" if infant else None,
                 "prompt": (
@@ -2964,6 +2965,7 @@ def generate_character_identity_view(
             "identity_version_id": identity.id,
             "candidate_id": candidate.id,
             "reference_asset_id": reference_asset_id,
+            "reference_asset_ids": [reference_asset_id],
             "replace_identity_asset_id": existing.id,
             "view_type": view_type,
             "quality_context": f"INFANT_{view_type}" if infant else None,
@@ -3041,8 +3043,14 @@ def materialize_identity_asset(
         quality_status: str,
         reused: bool,
     ) -> None:
+        raw_reference_asset_ids = payload.get("reference_asset_ids")
+        if not isinstance(raw_reference_asset_ids, list):
+            legacy_reference_asset_id = payload.get("reference_asset_id")
+            raw_reference_asset_ids = (
+                [legacy_reference_asset_id] if isinstance(legacy_reference_asset_id, str) else []
+            )
         reference_asset_ids = [
-            item for item in payload.get("reference_asset_ids", []) if isinstance(item, str)
+            item for item in raw_reference_asset_ids if isinstance(item, str)
         ]
         ensure_generation_record(
             session,

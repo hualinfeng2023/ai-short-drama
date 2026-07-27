@@ -4268,6 +4268,7 @@ p {
 
 .film-canvas-node footer small {
   overflow: hidden;
+  margin-left: auto;
   color: var(--color-text-tertiary);
   text-overflow: ellipsis;
   white-space: nowrap;

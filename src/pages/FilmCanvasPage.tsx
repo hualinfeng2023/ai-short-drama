@@ -214,7 +214,7 @@ function FilmObjectNode({ data, selected }: NodeProps<FilmCanvasNode>) {
       />
       <header>
         <span>{objectTypeLabels[item.ref.type] ?? item.ref.type}</span>
-        <StatusBadge status={item.approvalStatus} />
+        <StatusBadge status={item.canonicalStatus} />
       </header>
       <div className="film-canvas-node__content">
         {item.thumbnailUrl ? (
@@ -230,7 +230,6 @@ function FilmObjectNode({ data, selected }: NodeProps<FilmCanvasNode>) {
         <p className="film-canvas-node__summary" title={item.contentSummary}>{item.contentSummary}</p>
       ) : null}
       <footer>
-        <span>{getStatusLabel(item.canonicalStatus)}</span>
         <small>{item.ref.versionId ? `版本 ${item.ref.versionId.slice(0, 8)}` : '无独立版本'}</small>
       </footer>
       <Handle
@@ -1005,8 +1004,7 @@ export function FilmCanvasPage() {
                 <div><dt>稳定编号</dt><dd>{selectedNode.data.projection.ref.id}</dd></div>
                 <div><dt>版本编号</dt><dd>{selectedNode.data.projection.ref.versionId ?? '未单独版本化'}</dd></div>
                 <div><dt>事实类型</dt><dd>{canonicalKindLabels[selectedNode.data.projection.canonicalKind] ?? selectedNode.data.projection.canonicalKind}</dd></div>
-                <div><dt>事实状态</dt><dd>{getStatusLabel(selectedNode.data.projection.canonicalStatus)}</dd></div>
-                <div><dt>审批状态</dt><dd>{getStatusLabel(selectedNode.data.projection.approvalStatus)}</dd></div>
+                <div><dt>状态</dt><dd>{getStatusLabel(selectedNode.data.projection.canonicalStatus)}</dd></div>
               </dl>
               <section className="film-canvas-inspector__actions" aria-label="项目操作">
                 <div>

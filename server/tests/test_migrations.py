@@ -56,6 +56,8 @@ def test_v1_upgrade_recovers_from_partial_sqlite_ddl(
         "script_lines",
         "script_excerpt_revisions",
         "dependency_edges",
+        "lineage_edges",
+        "shot_spec_revisions",
         "character_look_versions",
         "voice_profiles",
         "location_versions",
@@ -223,7 +225,22 @@ def test_v1_upgrade_recovers_from_partial_sqlite_ddl(
         "ix_dependency_edges_project_source",
         "ix_dependency_edges_project_target",
     } <= {item["name"] for item in inspector.get_indexes("dependency_edges")}
-    assert revision == "0026_dependency_edges"
+    assert {item["name"] for item in inspector.get_columns("generation_records")} >= {
+        "input_snapshot_json",
+        "parameters_json",
+        "rules_json",
+        "director_intent_json",
+    }
+    assert {item["name"] for item in inspector.get_columns("audit_log")} >= {
+        "target_version_id",
+        "actor_type",
+        "command_payload_json",
+        "result_snapshot_json",
+        "rules_json",
+        "director_intent_json",
+        "rejection_reasons_json",
+    }
+    assert revision == "0028_provenance_traceability"
     if platform_targets is not None:
         assert '"priority":"PRIMARY"' in platform_targets
     command.check(config)

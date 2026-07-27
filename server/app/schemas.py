@@ -892,6 +892,12 @@ class GenericReviewDecisionRequest(BaseModel):
     note: str | None = Field(default=None, max_length=2000)
     actor: str = Field(default="demo-user", min_length=1, max_length=80)
 
+    @model_validator(mode="after")
+    def validate_rejection_reason(self) -> "GenericReviewDecisionRequest":
+        if self.decision == "REJECT" and not self.issues and not self.note:
+            raise ValueError("否决时必须填写至少一项原因或备注")
+        return self
+
 
 class RelationshipPerspectivePayload(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
