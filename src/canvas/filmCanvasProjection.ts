@@ -23,6 +23,46 @@ const TYPE_COLUMN: Record<string, number> = {
   Timeline: 5,
 }
 
+const relationLabels: Record<string, string> = {
+  ACTIVE_CHARACTER_VERSION: '当前角色版本',
+  APPEARS_IN_BEAT: '出场',
+  APPEARS_IN_SHOT: '出现在镜头中',
+  BEAT_TO_SCENE: '对应制作场景',
+  BEAT_TO_SCRIPT_SCENE: '对应剧本场次',
+  CONTAINS: '包含',
+  CONTAINS_CLIP: '包含时间片段',
+  CONTAINS_DIALOGUE: '包含对白',
+  CONTAINS_SCENE: '包含场景',
+  CONTAINS_SHOT: '包含镜头',
+  CURRENT_DERIVED_TIMELINE: '当前派生时间线',
+  CURRENT_STORY: '当前故事',
+  DERIVES_BEAT: '生成剧情关键点',
+  DERIVES_STORYBOARD: '生成故事板',
+  DIALOGUE_TO_AUDIO: '对白对应音频',
+  EVALUATED_SCRIPT_SCENE: '评估剧本场次',
+  GENERATED_ASSET: '生成素材',
+  GENERATED_AUDIO_TAKE: '生成音频版本',
+  GENERATED_TAKE: '生成镜头版本',
+  INVALIDATES: '需要重新检查',
+  LOCATION_FOR_SHOT: '镜头地点',
+  NEXT_TAKE_VERSION: '下一镜头版本',
+  OUTPUT_ASSET: '输出素材',
+  PRESERVES: '保持不变',
+  PRODUCED_AUDIO_TAKE: '产出音频版本',
+  PRODUCED_TAKE: '产出镜头版本',
+  PROPOSES_CHANGE_TO: '建议修改',
+  PROP_FOR_SHOT: '镜头道具',
+  REALIZED_AS_SCENE: '落实为制作场景',
+  RETRY_OF: '重试自',
+  SCENE_TO_AUDIO: '场景对应音频',
+  SHOT_TO_AUDIO: '镜头对应音频',
+  SNAPSHOTTED_BY_SHOT: '由镜头快照记录',
+  SPECIFIES_SHOT: '定义镜头',
+  STORY_TO_BEAT: '故事拆分为关键点',
+  STORY_TO_SCRIPT: '故事生成剧本',
+  USED_BY_TIMELINE: '用于时间线',
+}
+
 export interface FilmCanvasNodeData extends Record<string, unknown> {
   projection: CanvasProjection['nodes'][number]
 }
@@ -69,6 +109,10 @@ export function canvasNodeId(ref: CanvasReference): string {
   return `${ref.type}:${ref.id}`
 }
 
+export function getCanvasRelationLabel(relation: string): string {
+  return relationLabels[relation] ?? relation
+}
+
 export function canvasProjectionSignature(projection: CanvasProjection): string {
   const nodes = projection.nodes.map((node) => [
     node.ref.type,
@@ -76,6 +120,8 @@ export function canvasProjectionSignature(projection: CanvasProjection): string 
     node.ref.versionId,
     node.canonicalStatus,
     node.approvalStatus,
+    node.label,
+    node.contentSummary,
   ])
   const edges = projection.edges.map((edge) => [
     edge.source.type,
@@ -240,7 +286,7 @@ export function projectCanvasGraph(
       id: `${canvasNodeId(edge.source)}-${edge.relation}-${canvasNodeId(edge.target)}-${index}`,
       source: canvasNodeId(edge.source),
       target: canvasNodeId(edge.target),
-      label: edge.relation,
+      label: getCanvasRelationLabel(edge.relation),
       animated: false,
       selectable: false,
       deletable: false,

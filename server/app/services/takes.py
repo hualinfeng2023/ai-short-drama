@@ -22,6 +22,7 @@ from app.db.models import (
     Episode,
     Job,
     Project,
+    ReviewRecord,
     Scene,
     Shot,
     Take,
@@ -33,6 +34,7 @@ from app.services.generation_records import ensure_generation_record
 from app.services.identity_consistency import IdentityEvaluation, image_data_url
 from app.services.image_provider import GeneratedImage
 from app.services.jobs import ACTIVE_STATUSES, QUEUED_STATUSES, enqueue_job, job_to_read
+from app.services.provenance import add_lineage_edge
 from app.services.workspace import shot_or_404
 
 IMAGE_JOB_TYPE = "GENERATE_SHOT_IMAGE"
@@ -479,6 +481,31 @@ def materialize_generated_take(
         created_at=datetime.now(UTC),
     )
     session.add(take)
+    session.flush()
+    add_lineage_edge(
+        session,
+        project_id=job.project_id,
+        source_type="Shot",
+        source_id=shot.id,
+        target_type="Take",
+        target_id=take.id,
+        target_version_id=take.id,
+        relation="has_take",
+        evidence="takes.shot_id",
+        trace_id=job.trace_id,
+    )
+    add_lineage_edge(
+        session,
+        project_id=job.project_id,
+        source_type="Take",
+        source_id=take.id,
+        source_version_id=take.id,
+        target_type="Asset",
+        target_id=asset.id,
+        relation="renders_to",
+        evidence="takes.asset_id",
+        trace_id=job.trace_id,
+    )
     trace_generation(asset, take)
     shot.candidate_take = take_version
     shot.status = "PENDING_REVIEW"
@@ -721,6 +748,37 @@ def review_candidate_identity(
     candidate.identity_reviewed_at = now
     candidate.identity_review_look_version = shot.character_look_version
     project = _shot_project(session, shot)
+    session.add(
+        ReviewRecord(
+            id=str(uuid4()),
+            project_id=project.id,
+            entity_type="take",
+            entity_id=candidate.id,
+            entity_version_id=candidate.id,
+            gate_key="CHARACTER_IDENTITY",
+            risk_level="HIGH",
+            status="REJECTED" if decision == "REGENERATE" else "APPROVED",
+            decision=decision,
+            issues_json=json.dumps(list(dict.fromkeys(issues)), ensure_ascii=False),
+            rules_json=json.dumps(
+                {
+                    "required_identity_status": "PASSED",
+                    "look_version": shot.character_look_version,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            director_intent_json=json.dumps(
+                {"preserve": ["构图", "剧情动作", "场景", "光线"], "note": clean_note},
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            note=clean_note,
+            actor=actor,
+            decided_at=now,
+            created_at=now,
+        )
+    )
     append_event(
         session,
         project_id=project.id,

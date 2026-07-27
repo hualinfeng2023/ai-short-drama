@@ -45,6 +45,7 @@ from app.services.image_provider import GeneratedImage
 from app.services.jobs import enqueue_job, job_to_read
 from app.services.media import PreviewFiles, PreviewShot
 from app.services.projects import canonical_json, content_hash, version_conflict
+from app.services.provenance import record_shot_spec_revision
 from app.services.workspace import project_or_404
 
 
@@ -629,6 +630,14 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
             )
             session.add(spec)
             session.flush()
+            record_shot_spec_revision(
+                session,
+                project_id=project.id,
+                spec=spec,
+                actor="system:storyboard-planner",
+                change_reason="由已锁定剧本场景与台词生成初始镜头规格",
+                trace_id=job.trace_id,
+            )
             child, _ = enqueue_job(
                 session,
                 project_id=project.id,

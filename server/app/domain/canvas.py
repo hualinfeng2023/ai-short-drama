@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -36,8 +36,11 @@ class CanvasNodeProjection(BaseModel):
     canonical_status: str
     approval_status: str
     label: str
+    content_summary: str | None = None
     group_key: str
     detail_route: str
+    thumbnail_url: str | None = None
+    operation_context: dict[str, Any] = Field(default_factory=dict)
     read_only: bool = True
 
 

@@ -41,6 +41,7 @@ class ProjectRead(OrmModel):
     timeline_version: int
     preview_approved: bool
     export_ready: bool
+    thumbnail_url: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -281,6 +282,21 @@ class ProjectNameSuggestionRequest(BaseModel):
 class ProjectNameSuggestionRead(BaseModel):
     original: str | None
     suggested: str
+    provider: str
+    model: str
+    warning: str | None = None
+
+
+class BriefEmotionalRewardSuggestionRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    idea: str = Field(min_length=10, max_length=4000)
+    genre: str = Field(min_length=1, max_length=80)
+
+
+class BriefEmotionalRewardSuggestionRead(BaseModel):
+    reward: EmotionalReward
+    rationale: str = Field(min_length=2, max_length=80)
     provider: str
     model: str
     warning: str | None = None
@@ -804,6 +820,7 @@ class ScriptEpisodeUpdateRequest(BaseModel):
 
 class ScriptSceneUpdateRequest(BaseModel):
     expected_version: int = Field(ge=1)
+    beat_description: str | None = Field(default=None, min_length=1, max_length=2000)
     purpose: str | None = Field(default=None, min_length=1, max_length=2000)
     emotion: str | None = Field(default=None, min_length=1, max_length=80)
     bgm_intent: str | None = Field(default=None, max_length=1000)
@@ -874,6 +891,12 @@ class GenericReviewDecisionRequest(BaseModel):
     issues: list[str] = Field(default_factory=list, max_length=20)
     note: str | None = Field(default=None, max_length=2000)
     actor: str = Field(default="demo-user", min_length=1, max_length=80)
+
+    @model_validator(mode="after")
+    def validate_rejection_reason(self) -> "GenericReviewDecisionRequest":
+        if self.decision == "REJECT" and not self.issues and not self.note:
+            raise ValueError("否决时必须填写至少一项原因或备注")
+        return self
 
 
 class RelationshipPerspectivePayload(BaseModel):

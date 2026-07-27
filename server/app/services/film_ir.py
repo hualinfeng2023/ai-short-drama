@@ -11,6 +11,7 @@ from app.db.models import (
     AudioTake,
     ChangeSet,
     Character,
+    CharacterCandidate,
     CharacterIdentityVersion,
     CharacterLookVersion,
     CharacterStoryStateVersion,
@@ -56,6 +57,58 @@ def _approval(status: str, *, explicit: str | None = None) -> str:
     if value in {"APPROVED", "LOCKED", "REJECTED"}:
         return value
     return "UNREVIEWED"
+
+
+def _director_proposal_summary(proposal: dict[str, Any]) -> str | None:
+    details: list[str] = []
+    scene_ordinal = proposal.get("scene_ordinal")
+    if isinstance(scene_ordinal, int):
+        details.append(f"第 {scene_ordinal} 场")
+
+    recommended_option = proposal.get("recommended_option")
+    alternatives = proposal.get("alternatives")
+    if isinstance(recommended_option, str) and isinstance(alternatives, list):
+        recommended = next(
+            (
+                option
+                for option in alternatives
+                if isinstance(option, dict) and option.get("option_id") == recommended_option
+            ),
+            None,
+        )
+        title = recommended.get("title") if isinstance(recommended, dict) else None
+        if isinstance(title, str) and title.strip():
+            details.append(f"推荐：{title.strip()}")
+
+    return " · ".join(details) or None
+
+
+def _script_summary(payload: dict[str, Any]) -> str | None:
+    engine = payload.get("short_drama_engine")
+    if isinstance(engine, dict):
+        for field in ("protagonist_desire", "stage_closure"):
+            value = engine.get(field)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+        beats = engine.get("beats")
+        if isinstance(beats, list):
+            for beat in beats:
+                if not isinstance(beat, dict):
+                    continue
+                value = beat.get("summary") or beat.get("description")
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+
+    scenes = payload.get("scenes")
+    if isinstance(scenes, list):
+        for scene in scenes:
+            if not isinstance(scene, dict):
+                continue
+            purpose = scene.get("purpose")
+            if isinstance(purpose, str) and purpose.strip():
+                return purpose.strip()
+    return None
 
 
 def _latest_by(rows: Iterable[Any], key: str) -> list[Any]:
@@ -335,8 +388,12 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
     }
     beat_scene_links: list[tuple[str, str]] = []
     beat_ids_by_script_scene: dict[str, list[str]] = {}
+    beat_summaries: list[tuple[str, str]] = []
     for script in scripts:
         script_id = script_logical_ids[script.id]
+        payload = _json(script.payload_json, {})
+        payload = payload if isinstance(payload, dict) else {}
+        title = payload.get("title")
         graph.add_object(
             object_type="Script",
             object_id=script_id,
@@ -346,6 +403,8 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
             table=ScriptVersion.__tablename__,
             row_id=script.id,
             attributes={
+                "title": title.strip() if isinstance(title, str) and title.strip() else None,
+                "summary": _script_summary(payload),
                 "episode_ordinal": script.episode_ordinal,
                 "version": script.version,
                 "estimated_duration_ms": script.estimated_duration_ms,
@@ -453,8 +512,7 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
                     evidence="script_lines.script_scene_id",
                 )
 
-        payload = _json(script.payload_json, {})
-        engine = payload.get("short_drama_engine", {}) if isinstance(payload, dict) else {}
+        engine = payload.get("short_drama_engine", {})
         beats = engine.get("beats", []) if isinstance(engine, dict) else []
         for index, beat in enumerate(beats, start=1):
             if not isinstance(beat, dict):
@@ -462,6 +520,8 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
             sequence = beat.get("sequence", index)
             persisted_key = beat.get("relationship_beat_id")
             beat_id = f"{script.id}:{sequence}"
+            summary = str(beat.get("summary") or beat.get("description") or "")
+            beat_summaries.append((beat_id, summary))
             graph.add_object(
                 object_type="Beat",
                 object_id=beat_id,
@@ -477,7 +537,7 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
                     "beat_type": beat.get("beat_type"),
                     "at_ms": beat.get("at_ms"),
                     "scene_ordinal": beat.get("scene_ordinal"),
-                    "summary": beat.get("summary") or beat.get("description"),
+                    "summary": summary,
                     "relationship_beat_id": persisted_key,
                 },
             )
@@ -611,6 +671,11 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
                 "description": spec.description if spec else shot.description,
                 "dialogue": spec.dialogue if spec else shot.dialogue,
                 "duration_ms": spec.duration_ms if spec else shot.duration_sec * 1000,
+                "shot_size": spec.shot_size if spec else shot.shot_size,
+                "camera_movement": (
+                    spec.camera_movement if spec else shot.camera_movement
+                ),
+                "shot_lock_version": shot.lock_version,
                 "current_take_id": shot.current_take_id,
             },
         )
@@ -692,7 +757,37 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
             .order_by(Character.character_key)
         )
     )
+    locked_identities = {
+        row.character_id: row
+        for row in session.scalars(
+            select(CharacterIdentityVersion).where(
+                CharacterIdentityVersion.id.in_(
+                    {
+                        character.locked_identity_version_id
+                        for character in characters
+                        if character.locked_identity_version_id
+                    }
+                )
+            )
+        ).all()
+    }
+    locked_candidate_ids = {
+        character.locked_candidate_id
+        for character in characters
+        if character.locked_candidate_id
+    } | {
+        identity.source_candidate_id for identity in locked_identities.values()
+    }
+    locked_candidates = {
+        row.id: row
+        for row in session.scalars(
+            select(CharacterCandidate).where(CharacterCandidate.id.in_(locked_candidate_ids))
+        ).all()
+    }
     for character in characters:
+        identity = locked_identities.get(character.id)
+        candidate_id = identity.source_candidate_id if identity else character.locked_candidate_id
+        candidate = locked_candidates.get(candidate_id) if candidate_id else None
         graph.add_object(
             object_type="Character",
             object_id=character.id,
@@ -709,8 +804,31 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
                 "locked_identity_version_id": character.locked_identity_version_id,
                 "active_look_version_id": character.active_look_version_id,
                 "active_story_state_version_id": character.active_story_state_version_id,
+                # Presentation-only reference for read-only consumers such as the canvas.
+                # The selected identity version remains authoritative when it exists.
+                "thumbnail_asset_id": candidate.asset_id if candidate else None,
             },
         )
+
+    for beat_id, summary in beat_summaries:
+        for character in characters:
+            if not any(
+                identifier and identifier in summary
+                for identifier in (character.name, character.character_key)
+            ):
+                continue
+            graph.add_edge(
+                "Character",
+                character.id,
+                "Beat",
+                beat_id,
+                "APPEARS_IN_BEAT",
+                inferred=True,
+                evidence=(
+                    "script_versions.payload_json.short_drama_engine.beats "
+                    "summary/description mentions characters.name or characters.character_key"
+                ),
+            )
 
     version_specs = (
         (
@@ -873,7 +991,15 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
     records = list(
         session.scalars(select(GenerationRecord).where(GenerationRecord.project_id == project.id))
     )
+    generation_metadata_by_id: dict[str, dict[str, Any]] = {}
     for record in records:
+        generation_metadata = _json(record.metadata_json, {})
+        generation_metadata = (
+            generation_metadata if isinstance(generation_metadata, dict) else {}
+        )
+        generation_metadata_by_id[record.id] = generation_metadata
+        generation_error = generation_metadata.get("error")
+        generation_error = generation_error if isinstance(generation_error, dict) else {}
         graph.add_object(
             object_type="GenerationRecord",
             object_id=record.id,
@@ -890,17 +1016,54 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
                 "model": record.model,
                 "output_asset_id": record.output_asset_id,
                 "estimated_cost_usd": record.estimated_cost_usd,
+                "provider_request_id": record.provider_request_id,
+                "latency_ms": record.latency_ms,
+                "repair_attempts": generation_metadata.get("repair_attempts"),
+                "failure_stage": generation_metadata.get("failure_stage"),
+                "error_code": generation_error.get("code"),
+                "retryable": generation_error.get("retryable"),
+                "retry_of_generation_record_id": generation_metadata.get(
+                    "retry_of_generation_record_id"
+                ),
             },
         )
-        graph.add_edge(
-            "GenerationRecord",
-            record.id,
-            "Asset",
-            record.output_asset_id or "",
-            "GENERATED_ASSET",
-            inferred=False,
-            evidence="generation_records.output_asset_id",
+        if record.output_asset_id:
+            graph.add_edge(
+                "GenerationRecord",
+                record.id,
+                "Asset",
+                record.output_asset_id,
+                "GENERATED_ASSET",
+                inferred=False,
+                evidence="generation_records.output_asset_id",
+            )
+        if record.capability == "DIRECTOR_SCENE_REVIEW":
+            if record.entity_type == "script_scene":
+                target_id = script_scene_logical_ids.get(record.entity_id)
+                if target_id:
+                    graph.add_edge(
+                        "GenerationRecord",
+                        record.id,
+                        "ScriptScene",
+                        target_id,
+                        "EVALUATED_SCRIPT_SCENE",
+                        inferred=False,
+                        evidence="generation_records.entity_type + entity_id",
+                    )
+    for record in records:
+        retry_source_id = generation_metadata_by_id.get(record.id, {}).get(
+            "retry_of_generation_record_id"
         )
+        if isinstance(retry_source_id, str):
+            graph.add_edge(
+                "GenerationRecord",
+                record.id,
+                "GenerationRecord",
+                retry_source_id,
+                "RETRY_OF",
+                inferred=False,
+                evidence="generation_records.metadata_json.retry_of_generation_record_id",
+            )
     for take in takes:
         if take.generation_record_id:
             graph.add_edge(
@@ -1054,6 +1217,12 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
         proposal = impact.get("proposal") if isinstance(impact, dict) else None
         if not isinstance(proposal, dict):
             continue
+        observation = proposal.get("observation")
+        label = (
+            observation.strip()
+            if isinstance(observation, str) and observation.strip()
+            else change_set.instruction
+        )
         graph.add_object(
             object_type="DirectorProposal",
             object_id=change_set.id,
@@ -1063,6 +1232,8 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
             table=ChangeSet.__tablename__,
             row_id=change_set.id,
             attributes={
+                "title": label,
+                "summary": _director_proposal_summary(proposal),
                 "issue_type": proposal.get("issue_type"),
                 "recommended_option": proposal.get("recommended_option"),
                 "confidence": proposal.get("confidence"),

@@ -343,20 +343,14 @@ async def test_relationship_graph_commands_are_idempotent_and_audited(
     }
     lock_headers = {"Idempotency-Key": "relationship-lock-command-v1"}
     locked = await client.post(
-        (
-            f"/api/v1/relationship-graphs/{graph['id']}"
-            "/relationships/protagonist-witness/lock"
-        ),
+        (f"/api/v1/relationship-graphs/{graph['id']}/relationships/protagonist-witness/lock"),
         json=lock_request,
         headers=lock_headers,
     )
     assert locked.status_code == 200, locked.text
     assert locked.headers["Idempotency-Replayed"] == "false"
     replayed_lock = await client.post(
-        (
-            f"/api/v1/relationship-graphs/{graph['id']}"
-            "/relationships/protagonist-witness/lock"
-        ),
+        (f"/api/v1/relationship-graphs/{graph['id']}/relationships/protagonist-witness/lock"),
         json=lock_request,
         headers=lock_headers,
     )
@@ -374,9 +368,7 @@ async def test_relationship_graph_commands_are_idempotent_and_audited(
                 select(AuditLog)
                 .where(
                     AuditLog.project_id == PROJECT_ID,
-                    AuditLog.action.in_(
-                        {"CREATE_RELATIONSHIP_GRAPH", "SET_RELATIONSHIP_LOCK"}
-                    ),
+                    AuditLog.action.in_({"CREATE_RELATIONSHIP_GRAPH", "SET_RELATIONSHIP_LOCK"}),
                 )
                 .order_by(AuditLog.created_at)
             ).all()
@@ -974,6 +966,13 @@ async def test_character_visual_flow_requires_manual_generation_and_lock(
             current_view = next(
                 item for item in current_identity["assets"] if item["view_type"] == "THREE_QUARTER"
             )
+            with factory() as session:
+                identity = session.get(CharacterIdentityVersion, identity_id)
+                failed_asset = session.get(CharacterIdentityAsset, current_view["id"])
+                assert identity is not None and failed_asset is not None
+                identity.status = "QC_REVIEW_REQUIRED"
+                failed_asset.status = "QC_FAILED"
+                session.commit()
             adjustment = await client.post(
                 (
                     f"/api/v1/projects/{PROJECT_ID}/characters/{character_id}"
@@ -1057,7 +1056,10 @@ async def test_character_visual_flow_requires_manual_generation_and_lock(
                 assert replacement_record.id == current_view["id"]
                 assert replacement_record.asset_id == replacement[0].id
                 assert replacement_record.asset_id != current_view["asset_id"]
+                assert replacement_record.status == "READY"
                 assert session.get(Asset, current_view["asset_id"]) is not None
+                identity = session.get(CharacterIdentityVersion, identity_id)
+                assert identity is not None and identity.status == "READY_FOR_REVIEW"
                 character = session.get(Character, character_id)
                 assert character is not None and character.status == "REVIEW_REQUIRED"
                 expected_version = character.lock_version
@@ -1859,7 +1861,8 @@ async def test_locked_biological_relative_creates_versioned_family_constraint_an
         assert len(child_jobs) == 3
         payload = json.loads(child_jobs[0].input_json)
         assert payload["family_constraint_version_id"] == constraint["id"]
-        assert len(payload["reference_asset_ids"]) == 1
+        assert payload["reference_asset_ids"] == []
+        assert payload["family_reference_asset_ids"] == constraint["source_asset_ids"]
         assert "Family Resemblance Constraint" in payload["prompt"]
         assert "不得仅通过改变年龄或性别制造亲属" in payload["prompt"]
         assert "保持目标角色独立" in payload["prompt"]

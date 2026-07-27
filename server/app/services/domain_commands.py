@@ -48,7 +48,7 @@ from app.db.models import (
     TimelineVersion,
 )
 from app.domain.commands import DirectorCommand
-from app.domain.director import DirectorReviewOutput
+from app.domain.director import DirectorReviewOutput, director_change_target_issues
 from app.schemas import (
     CharacterCandidateDeleteRequest,
     CharacterCandidateGenerateRequest,
@@ -122,7 +122,7 @@ from app.services.dependency_analysis import (
     apply_dependency_invalidation,
     persist_dependency_edges,
 )
-from app.services.director_proposals import director_proposal_to_read
+from app.services.director_proposals import director_proposal_to_read, director_retry_source
 from app.services.events import append_event
 from app.services.exports import create_export
 from app.services.jobs import (
@@ -148,6 +148,7 @@ from app.services.projects import (
     version_conflict,
 )
 from app.services.proposals import create_proposal_job
+from app.services.provenance import record_shot_spec_revision
 from app.services.relationship_graph_workflow import (
     approve_relationship_graph,
     create_confirmed_relationship_revision,
@@ -2450,6 +2451,19 @@ def _execute_shot_spec_update(
     if spec is not None:
         spec.status = "DRAFT"
         spec.content_hash = _shot_spec_content_hash(spec)
+        record_shot_spec_revision(
+            session,
+            project_id=project.id,
+            spec=spec,
+            actor=command.actor.id,
+            change_reason=str(
+                command.payload.get("reason")
+                or command.payload.get("note")
+                or "用户修改镜头规格"
+            ),
+            changes=changes,
+            trace_id=command.command_id,
+        )
 
     takes = session.scalars(select(Take).where(Take.shot_id == shot.id)).all()
     asset_ids = {take.asset_id for take in takes}
@@ -3814,6 +3828,21 @@ def _execute_create_director_proposal(
             },
         )
     payload = command.payload
+    retry_source_id = payload.get("retry_of_generation_record_id")
+    if retry_source_id is not None and not isinstance(retry_source_id, str):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "DIRECTOR_RETRY_SOURCE_INVALID",
+                "message": "Director 重试来源 ID 格式无效",
+            },
+        )
+    director_retry_source(
+        session,
+        project_id=project.id,
+        script_scene_id=scene.id,
+        generation_record_id=retry_source_id,
+    )
     review_payload = payload.get("review")
     context = payload.get("context")
     impact_payload = payload.get("impact")
@@ -3825,16 +3854,48 @@ def _execute_create_director_proposal(
             status_code=422,
             detail={"code": "COMMAND_PAYLOAD_INVALID", "message": "Director Proposal 内容无效"},
         )
-    review = DirectorReviewOutput.model_validate(review_payload)
+    try:
+        review = DirectorReviewOutput.model_validate(review_payload)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "DIRECTOR_CHANGE_CONTRACT_INVALID",
+                "message": "Director 返回了不可执行的修改字段",
+                "details": {"issues": exc.errors(include_url=False)},
+            },
+        ) from exc
+    line_ids = set(
+        session.scalars(
+            select(ScriptLine.id).where(ScriptLine.script_scene_id == scene.id)
+        ).all()
+    )
+    target_issues = director_change_target_issues(
+        review,
+        scene_id=scene.id,
+        line_ids=line_ids,
+    )
+    if target_issues:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "DIRECTOR_CHANGE_CONTRACT_INVALID",
+                "message": "Director 返回了场景范围外或类型不匹配的修改目标",
+                "details": {"issues": target_issues},
+            },
+        )
     proposal = {
         "issue_type": review.issue_type,
         "observation": review.observation,
         "rationale": review.rationale,
         "target_objects": [{"type": "ScriptScene", "id": scene.id, "version_id": script.id}],
         "proposed_changes": [
-            item.proposed_change.model_dump(mode="json") for item in review.options
+            item.proposed_change.model_dump(mode="json", exclude_none=True)
+            for item in review.options
         ],
-        "alternatives": [item.model_dump(mode="json") for item in review.options],
+        "alternatives": [
+            item.model_dump(mode="json", exclude_none=True) for item in review.options
+        ],
         "recommended_option": review.recommended_option_id,
         "confidence": review.confidence,
         "affected_objects": impact_payload.get("affected_objects", []),
@@ -3847,6 +3908,7 @@ def _execute_create_director_proposal(
         "script_scene_id": scene.id,
         "scene_ordinal": scene.ordinal,
         "requested_by": payload.get("requested_by"),
+        "retry_of_generation_record_id": payload.get("retry_of_generation_record_id"),
         "provider": provider,
     }
     stored_impact: dict[str, object] = {
@@ -3907,7 +3969,11 @@ def _execute_create_director_proposal(
             ),
             provider_task_id=None,
             status="SUCCEEDED",
-            latency_ms=None,
+            latency_ms=(
+                int(provider["latency_ms"])
+                if isinstance(provider.get("latency_ms"), (int, float))
+                else None
+            ),
             input_units=None,
             output_units=None,
             estimated_cost_usd=float(proposal["estimated_cost_usd"]),
@@ -3918,6 +3984,10 @@ def _execute_create_director_proposal(
                     "target_script_version_id": script.id,
                     "target_script_scene_id": scene.id,
                     "media_generation": False,
+                    "repair_attempts": int(provider.get("repair_attempts", 0)),
+                    "retry_of_generation_record_id": payload.get(
+                        "retry_of_generation_record_id"
+                    ),
                 }
             ),
             created_at=datetime.now(UTC),
@@ -4105,6 +4175,83 @@ def _director_timeline_preview(
     }
 
 
+def _current_director_revision_base(
+    session: Session,
+    *,
+    project: Project,
+    proposal_base: ScriptVersion,
+) -> ScriptVersion:
+    if proposal_base.status != "SUPERSEDED":
+        return proposal_base
+    current = session.scalar(
+        select(ScriptVersion)
+        .where(
+            ScriptVersion.project_id == project.id,
+            ScriptVersion.episode_ordinal == proposal_base.episode_ordinal,
+            ScriptVersion.status == "READY_FOR_REVIEW",
+        )
+        .order_by(ScriptVersion.version.desc())
+    )
+    if current is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DIRECTOR_PROPOSAL_STALE",
+                "message": "剧本已经更新，请重新审查当前场景",
+            },
+        )
+    return current
+
+
+def _current_director_change_target(
+    session: Session,
+    *,
+    proposal: dict[str, object],
+    proposal_target: ScriptScene | ScriptLine,
+    current_base: ScriptVersion,
+    change_scope: str,
+) -> tuple[ScriptScene, ScriptScene | ScriptLine]:
+    current_scene = session.scalar(
+        select(ScriptScene).where(
+            ScriptScene.script_version_id == current_base.id,
+            ScriptScene.ordinal == int(proposal["scene_ordinal"]),
+        )
+    )
+    if current_scene is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DIRECTOR_TARGET_CHANGED",
+                "message": "当前剧本中已找不到这个场景，请重新审查",
+            },
+        )
+    if change_scope == "SCENE":
+        return current_scene, current_scene
+    if not isinstance(proposal_target, ScriptLine):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DIRECTOR_TARGET_CHANGED",
+                "message": "原建议的对白目标已经变化，请重新审查",
+            },
+        )
+    current_line = session.scalar(
+        select(ScriptLine).where(
+            ScriptLine.script_scene_id == current_scene.id,
+            ScriptLine.ordinal == proposal_target.ordinal,
+        )
+    )
+    if current_line is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DIRECTOR_TARGET_CHANGED",
+                "message": "当前剧本中已找不到这句对白，请重新审查",
+            },
+        )
+    return current_scene, current_line
+
+
 def _execute_apply_director_proposal(
     session: Session,
     *,
@@ -4195,13 +4342,26 @@ def _execute_apply_director_proposal(
             expected_version=expected_version,
             **dict(change["changes"]),
         ).model_dump(exclude={"expected_version"}, exclude_none=True)
+    proposal_base_script = base_script
+    current_base_script = _current_director_revision_base(
+        session,
+        project=project,
+        proposal_base=proposal_base_script,
+    )
+    current_scene, current_target_entity = _current_director_change_target(
+        session,
+        proposal=proposal,
+        proposal_target=target_entity,
+        current_base=current_base_script,
+        change_scope=change_scope,
+    )
     for field, expected in dict(change["before"]).items():
-        if getattr(target_entity, field, object()) != expected:
+        if getattr(current_target_entity, field, object()) != expected:
             raise HTTPException(
                 status_code=409,
                 detail={
                     "code": "DIRECTOR_SOURCE_CHANGED",
-                    "message": "Director 审查使用的原始字段已变化，请重新审查",
+                    "message": "这部分剧本已经改过，请重新审查后再采用",
                     "details": {"field": field},
                 },
             )
@@ -4209,18 +4369,18 @@ def _execute_apply_director_proposal(
     _assert_preserved_director_objects(session, preserved)
     result = revise_script(
         session,
-        script_id=base_script.id,
+        script_id=current_base_script.id,
         expected_version=expected_version,
         scope=change_scope,
-        entity_id=change_entity_id,
+        entity_id=current_target_entity.id,
         changes=validated_changes,
         commit=False,
         allow_director_revision=True,
     )
     revised_scene, revised_line = _revised_entity(
         session,
-        source_scene_id=str(proposal["script_scene_id"]),
-        source_entity_id=change_entity_id,
+        source_scene_id=current_scene.id,
+        source_entity_id=current_target_entity.id,
         revised_script_id=str(result["id"]),
         scope=change_scope,
     )
@@ -4239,7 +4399,7 @@ def _execute_apply_director_proposal(
     impact["comparison"] = {
         "before": change["before"],
         "after": after_values,
-        "base_script_version_id": base_script.id,
+        "base_script_version_id": current_base_script.id,
         "result_script_version_id": result["id"],
         "estimated_duration_before_ms": sum(
             int(item["estimated_duration_ms"]) for item in dict(impact["context"]).get("lines", [])
@@ -4255,10 +4415,12 @@ def _execute_apply_director_proposal(
     impact["comparison"]["timeline_preview"] = _director_timeline_preview(
         session,
         project=project,
-        base_script=base_script,
+        base_script=current_base_script,
         revised_script_id=str(result["id"]),
         scene_ordinal=int(proposal["scene_ordinal"]),
     )
+    if proposal_base_script.id != current_base_script.id:
+        impact["comparison"]["proposal_base_script_version_id"] = proposal_base_script.id
     impact["invalidated"] = downstream.get("affected_objects", [])
     impact["invalidation_result"] = invalidation_result
     change_set.impact_json = canonical_json(impact)
@@ -4271,7 +4433,7 @@ def _execute_apply_director_proposal(
         },
         entity_type="director_proposal",
         entity_id=change_set.id,
-        before_hash=base_script.content_hash,
+        before_hash=current_base_script.content_hash,
         after_hash=str(result["content_hash"]),
     )
 
@@ -5655,8 +5817,32 @@ def dispatch_domain_command(
             action=command.command_type,
             entity_type=mutation.entity_type,
             entity_id=mutation.entity_id,
+            target_version_id=command.target_version_id,
+            actor_type=command.actor.type,
             before_hash=mutation.before_hash,
             after_hash=mutation.after_hash,
+            command_payload_json=canonical_json(command.payload),
+            result_snapshot_json=canonical_json(
+                RESULT_ADAPTER.dump_python(mutation.result, mode="json")
+            ),
+            rules_json=canonical_json(
+                command.payload.get("rules", {})
+                if isinstance(command.payload.get("rules"), dict)
+                else {}
+            ),
+            director_intent_json=canonical_json(
+                {
+                    key: command.payload[key]
+                    for key in ("instruction", "note", "reason", "custom_prompt")
+                    if key in command.payload
+                }
+            ),
+            rejection_reasons_json=canonical_json(
+                command.payload.get("issues", [])
+                if command.command_type == "DECIDE_REVIEW"
+                and command.payload.get("decision") == "REJECT"
+                else []
+            ),
             trace_id=command.command_id,
             created_at=datetime.now(UTC),
         )

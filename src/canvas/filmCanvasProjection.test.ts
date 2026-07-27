@@ -4,6 +4,7 @@ import {
   canvasProjectionSignature,
   canvasNodeId,
   createCanvasViewState,
+  getCanvasRelationLabel,
   parseCanvasViewState,
   projectCanvasGraph,
   resolveDirectorReviewTarget,
@@ -21,8 +22,11 @@ const projection: CanvasProjection = {
       canonicalStatus: 'ACTIVE',
       approvalStatus: 'APPROVED',
       label: '雨停以后',
+      contentSummary: null,
       groupKey: 'project',
       detailRoute: '/projects/project-1',
+      thumbnailUrl: null,
+      operationContext: {},
       readOnly: true,
     },
     {
@@ -31,8 +35,11 @@ const projection: CanvasProjection = {
       canonicalStatus: 'ACTIVE',
       approvalStatus: 'DRAFT',
       label: '便利店停电',
+      contentSummary: null,
       groupKey: 'episode:1',
       detailRoute: '/projects/project-1/episodes/episode-1',
+      thumbnailUrl: null,
+      operationContext: {},
       readOnly: true,
     },
   ],
@@ -60,9 +67,15 @@ describe('Film Canvas projection adapter', () => {
     expect(graph.edges[0]).toMatchObject({
       source: 'Project:project-1',
       target: 'Scene:scene-1',
-      label: 'CONTAINS',
       data: { inferred: false },
     })
+    expect(graph.edges[0]?.label).toBe(getCanvasRelationLabel('CONTAINS'))
+  })
+
+  it('shows relationship labels in Chinese while keeping the source relation unchanged', () => {
+    expect(getCanvasRelationLabel('APPEARS_IN_BEAT')).toBe('出场')
+    expect(getCanvasRelationLabel('PROPOSES_CHANGE_TO')).toBe('建议修改')
+    expect(getCanvasRelationLabel('UNKNOWN_RELATION')).toBe('UNKNOWN_RELATION')
   })
 
   it('keeps stale layout by stable id while taking canonical data from the latest projection', () => {
@@ -165,8 +178,11 @@ describe('Film Canvas projection adapter', () => {
           canonicalStatus: 'ACTIVE',
           approvalStatus: 'DRAFT',
           label: '第一场',
+          contentSummary: null,
           groupKey: 'episode:1',
           detailRoute: '/projects/project-1/story',
+          thumbnailUrl: null,
+          operationContext: {},
           readOnly: true,
         },
       ],

@@ -416,6 +416,34 @@ async def test_brief_requirements_can_be_drafted_without_mutating_project(
     assert unchanged["lock_version"] == 1
 
 
+async def test_emotional_reward_can_be_suggested_without_mutating_project(
+    client: AsyncClient,
+) -> None:
+    created = await client.post(
+        "/api/v1/projects",
+        json=CREATE_PAYLOAD,
+        headers={"Idempotency-Key": "create-emotional-reward-suggestion-v1"},
+    )
+    project = created.json()["data"]["project"]
+
+    suggestion = await client.post(
+        f"/api/v1/projects/{project['id']}/brief-emotional-reward-suggestions",
+        json={
+            "idea": "一对永生夫妻必须决定谁放弃永生，才能换取孩子出生。",
+            "genre": "sci_fi",
+        },
+    )
+
+    assert suggestion.status_code == 200
+    result = suggestion.json()["data"]
+    assert result["reward"] == "family"
+    assert result["provider"] == "local-fallback"
+    briefs = (
+        await client.get(f"/api/v1/projects/{project['id']}/brief-versions")
+    ).json()["data"]
+    assert briefs[0]["emotional_rewards"] == []
+
+
 async def test_brief_avoidances_can_be_suggested_without_mutating_project(
     client: AsyncClient,
 ) -> None:

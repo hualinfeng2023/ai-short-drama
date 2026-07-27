@@ -2,11 +2,12 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from dataclasses import replace
 
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
-from app.db.models import Job
+from app.db.models import Job, Project
 from app.jobs.contracts import JobExecutionContext, JobExecutionError
 from app.jobs.registry import register_job_handler
 from app.services.creative_story import (
@@ -16,9 +17,13 @@ from app.services.creative_story import (
     materialize_story_structure,
     script_package_generation_context,
 )
+from app.services.project_thumbnails import enqueue_project_thumbnail
 from app.services.proposals import materialize_mock_proposal
 from app.services.text_provider import (
+    EpisodeScriptDraft,
+    NarrativeReview,
     RoutedTextProvider,
+    ScriptPackageOutlines,
     StoryDirection,
     TextGenerationResult,
     TextProviderError,
@@ -26,6 +31,8 @@ from app.services.text_provider import (
     assemble_script_package,
     assemble_story_package,
 )
+
+SCRIPT_PACKAGE_PROVIDER_TIMEOUT_SECONDS = 600.0
 
 
 async def _await_with_progress[T](
@@ -109,6 +116,58 @@ def _story_direction_result_record(result: TextGenerationResult) -> dict[str, ob
         "request_id": result.request_id,
         "repair_attempts": result.repair_attempts,
     }
+
+
+def _text_generation_result_record(result: TextGenerationResult) -> dict[str, object]:
+    return {
+        "payload": result.payload,
+        "provider": result.provider,
+        "model": result.model,
+        "request_id": result.request_id,
+        "repair_attempts": result.repair_attempts,
+    }
+
+
+def _cached_script_package_results(job: Job) -> dict[str, TextGenerationResult]:
+    output_json = getattr(job, "output_json", None)
+    if not output_json:
+        return {}
+    try:
+        output = json.loads(output_json)
+    except json.JSONDecodeError:
+        return {}
+    raw_results = (
+        output.get("script_package_stages") if isinstance(output, dict) else None
+    )
+    if not isinstance(raw_results, dict):
+        return {}
+
+    validators = {
+        "outlines": ScriptPackageOutlines,
+        "script": EpisodeScriptDraft,
+        "review": NarrativeReview,
+    }
+    results: dict[str, TextGenerationResult] = {}
+    for stage_key, validator in validators.items():
+        raw = raw_results.get(stage_key)
+        if not isinstance(raw, dict):
+            continue
+        try:
+            payload = validator.model_validate(raw.get("payload")).model_dump(mode="json")
+            results[stage_key] = TextGenerationResult(
+                payload=payload,
+                provider=str(raw["provider"]),
+                model=str(raw["model"]),
+                request_id=(
+                    str(raw["request_id"])
+                    if raw.get("request_id") is not None
+                    else None
+                ),
+                repair_attempts=int(raw.get("repair_attempts", 0)),
+            )
+        except (KeyError, TypeError, ValueError, ValidationError):
+            continue
+    return results
 
 
 @register_job_handler("GENERATE_PROPOSAL")
@@ -377,58 +436,90 @@ async def generate_script_package(
         session, job
     )
     provider = RoutedTextProvider()
+    provider_settings = replace(
+        context.settings,
+        ark_request_timeout_seconds=max(
+            context.settings.ark_request_timeout_seconds,
+            SCRIPT_PACKAGE_PROVIDER_TIMEOUT_SECONDS,
+        ),
+    )
+    cached_results = _cached_script_package_results(job)
+    cached_records = {
+        stage_key: _text_generation_result_record(result)
+        for stage_key, result in cached_results.items()
+    }
+
+    async def save_stage(stage_key: str, result: TextGenerationResult) -> None:
+        cached_records[stage_key] = _text_generation_result_record(result)
+        save_intermediate = getattr(context, "save_intermediate_output", None)
+        if save_intermediate is not None:
+            await save_intermediate(
+                session,
+                job,
+                {"script_package_stages": dict(cached_records)},
+            )
+
     try:
-        outlines = await _await_with_progress(
-            context,
-            session,
-            job,
-            provider.generate_script_outlines(
-                context.settings,
-                brief,
-                direction,
-                story_bible,
-                relationship_graph,
-            ),
-            initial_progress=12,
-            ceiling=32,
-            stage="正在生成关系驱动的分集大纲",
-            interval_seconds=3.0,
-        )
+        outlines = cached_results.get("outlines")
+        if outlines is None:
+            outlines = await _await_with_progress(
+                context,
+                session,
+                job,
+                provider.generate_script_outlines(
+                    provider_settings,
+                    brief,
+                    direction,
+                    story_bible,
+                    relationship_graph,
+                ),
+                initial_progress=12,
+                ceiling=32,
+                stage="正在生成关系驱动的分集大纲",
+                interval_seconds=3.0,
+            )
+            await save_stage("outlines", outlines)
         foundation_context = {
             "story_bible": story_bible,
             "outlines": outlines.payload.get("outlines", []),
         }
-        script_draft = await _await_with_progress(
-            context,
-            session,
-            job,
-            provider.generate_episode_script(
-                context.settings,
-                brief,
-                direction,
-                foundation_context,
-            ),
-            initial_progress=34,
-            ceiling=58,
-            stage="正在生成首集结构化剧本",
-            interval_seconds=3.0,
-        )
-        review = await _await_with_progress(
-            context,
-            session,
-            job,
-            provider.generate_narrative_review(
-                context.settings,
-                brief,
-                direction,
-                script_draft.payload,
-                relationship_graph=relationship_graph,
-            ),
-            initial_progress=60,
-            ceiling=88,
-            stage="正在生成叙事引擎与结构质检",
-            interval_seconds=3.0,
-        )
+        script_draft = cached_results.get("script")
+        if script_draft is None:
+            script_draft = await _await_with_progress(
+                context,
+                session,
+                job,
+                provider.generate_episode_script(
+                    provider_settings,
+                    brief,
+                    direction,
+                    foundation_context,
+                ),
+                initial_progress=34,
+                ceiling=58,
+                stage="正在生成首集结构化剧本",
+                interval_seconds=3.0,
+            )
+            await save_stage("script", script_draft)
+        review = cached_results.get("review")
+        if review is None:
+            review = await _await_with_progress(
+                context,
+                session,
+                job,
+                provider.generate_narrative_review(
+                    provider_settings,
+                    brief,
+                    direction,
+                    script_draft.payload,
+                    relationship_graph=relationship_graph,
+                ),
+                initial_progress=60,
+                ceiling=88,
+                stage="正在生成叙事引擎与结构质检",
+                interval_seconds=3.0,
+            )
+            await save_stage("review", review)
         assembled = assemble_script_package(outlines, script_draft, review)
         package = apply_relationship_context_to_script_package(
             assembled.payload,
@@ -462,10 +553,25 @@ async def generate_script_package(
     await context.checkpoint(session, job, 78, "校验关系重排与认证变化强引用")
     await context.checkpoint(session, job, 90, "写入分集大纲与剧本版本事实")
     script = materialize_script_package(session, job, result)
+    project = session.get(Project, job.project_id)
+    if project is None:
+        raise JobExecutionError(
+            "PROJECT_NOT_FOUND",
+            "项目不存在，无法生成剧本缩略图",
+            retryable=False,
+        )
+    thumbnail_job, thumbnail_replayed = enqueue_project_thumbnail(
+        session,
+        project=project,
+        script=script,
+        trace_id=job.trace_id,
+    )
     return {
         "script_id": script.id,
         "episode_ordinal": script.episode_ordinal,
         "relationship_graph_id": script.relationship_graph_version_id,
         "provider": result.provider,
         "model": result.model,
+        "thumbnail_job_id": thumbnail_job.id,
+        "thumbnail_replayed": thumbnail_replayed,
     }

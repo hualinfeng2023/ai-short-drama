@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react'
+import { Link } from 'react-router'
 import {
   Check,
   ChevronDown,
@@ -146,6 +147,39 @@ const VALIDATION_CODE_LABELS: Record<string, string> = {
   HIDDEN_RELATIONSHIP_WITHOUT_REVEAL: '缺少揭示计划',
   FAMILY_KINSHIP_UNSPECIFIED: '血缘来源未标记',
   CORE_RELATIONSHIP_WITHOUT_BEAT: '核心关系缺少变化',
+}
+
+export function relationshipGraphFooterCopy(status: string): {
+  title: string
+  description: string
+  showApprovalAction: boolean
+} {
+  if (status === 'DRAFT') {
+    return {
+      title: '草稿可直接确认，也可以先提交审核。',
+      description: '确认后会准备结构化角色视觉档案；不会后台生图，也不会自动采用任何候选。',
+      showApprovalAction: true,
+    }
+  }
+  if (status === 'READY_FOR_REVIEW') {
+    return {
+      title: '当前版本已提交审核，可批准或撤回。',
+      description: '批准后会准备结构化角色视觉档案；不会后台生图，也不会自动采用任何候选。',
+      showApprovalAction: true,
+    }
+  }
+  if (status === 'APPROVED') {
+    return {
+      title: '关系基线已确认。',
+      description: '结构化角色视觉档案已准备；角色形象由你在角色工作区单独确认和锁定。',
+      showApprovalAction: false,
+    }
+  }
+  return {
+    title: '当前版本仅供查看。',
+    description: '如需调整关系，请从已批准版本创建修改版。',
+    showApprovalAction: false,
+  }
 }
 
 function characterName(characters: RelationshipCharacter[], key: string): string {
@@ -922,6 +956,8 @@ export function RelationshipGraphSection({
     })
   }
 
+  const footerCopy = relationshipGraphFooterCopy(selectedGraph.status)
+
   return (
     <section className="story-section relationship-editor" aria-labelledby="relationship-editor-title" id="relationship-review">
       <div className="relationship-editor__heading">
@@ -1119,7 +1155,7 @@ export function RelationshipGraphSection({
 
       <section className="relationship-validation" aria-labelledby="relationship-validation-title"><header><div><h3 id="relationship-validation-title">关系网检查</h3><p>阻断问题必须修正后才能确认关系并生成剧本。</p></div><span>{validationIssues.filter((issue) => issue.severity === 'BLOCKER').length} 个阻断 · {validationIssues.filter((issue) => issue.severity === 'WARNING').length} 个提醒</span></header>{validationIssues.length ? <ul>{validationIssues.map((issue) => <li data-severity={issue.severity.toLowerCase()} key={`${issue.code}-${issue.relationshipKey ?? issue.characterKey ?? ''}`}><button onClick={() => selectIssue(issue)} type="button"><strong>{validationTone(issue.severity)}</strong><span>{issue.message}</span><small title={issue.code}>{VALIDATION_CODE_LABELS[issue.code] ?? '关系规则'}</small></button></li>)}</ul> : <div className="relationship-validation__empty"><Check size={16} />当前检查未发现问题</div>}</section>
 
-      <footer className="relationship-editor__actions"><div><strong>{selectedGraph.status === 'DRAFT' ? '草稿可直接确认，也可以先提交审核。' : selectedGraph.status === 'READY_FOR_REVIEW' ? '当前版本已提交审核，可批准或撤回。' : '当前版本仅供查看。'}</strong><p>批准后会自动准备结构化角色视觉档案；不会后台生图，也不会自动采用任何候选。</p></div><div>{selectedGraph.editability.canCreateRevision ? <Button disabled={busy || draftState.dirty} onClick={openRevision} variant="secondary"><GitCompare size={16} />创建修改版</Button> : null}{selectedGraph.status === 'DRAFT' && selectedGraph.editability.canSubmit ? <Button disabled={busy || draftState.dirty} onClick={() => void run(async () => { const graph = await submitRelationshipGraph(selectedGraph); applyRemoteGraph(graph, '关系网已提交审核。') })} variant="secondary">提交审核</Button> : null}{selectedGraph.status === 'READY_FOR_REVIEW' ? <Button disabled={busy || draftState.dirty} onClick={() => void run(async () => { const graph = await withdrawRelationshipGraph(selectedGraph); applyRemoteGraph(graph, '已撤回审核，可继续编辑。') })} variant="secondary">撤回审核</Button> : null}<Button disabled={busy || draftState.dirty || !selectedGraph.editability.canApprove || validationIssues.some((issue) => issue.severity === 'BLOCKER')} onClick={() => setDialog('approval')}><Check size={16} />确认关系并准备角色形象</Button></div></footer>
+      <footer className="relationship-editor__actions"><div><strong>{footerCopy.title}</strong><p>{footerCopy.description}</p></div><div>{selectedGraph.editability.canCreateRevision ? <Button disabled={busy || draftState.dirty} onClick={openRevision} variant="secondary"><GitCompare size={16} />创建修改版</Button> : null}{selectedGraph.status === 'DRAFT' && selectedGraph.editability.canSubmit ? <Button disabled={busy || draftState.dirty} onClick={() => void run(async () => { const graph = await submitRelationshipGraph(selectedGraph); applyRemoteGraph(graph, '关系网已提交审核。') })} variant="secondary">提交审核</Button> : null}{selectedGraph.status === 'READY_FOR_REVIEW' ? <Button disabled={busy || draftState.dirty} onClick={() => void run(async () => { const graph = await withdrawRelationshipGraph(selectedGraph); applyRemoteGraph(graph, '已撤回审核，可继续编辑。') })} variant="secondary">撤回审核</Button> : null}{footerCopy.showApprovalAction ? <Button disabled={busy || draftState.dirty || !selectedGraph.editability.canApprove || validationIssues.some((issue) => issue.severity === 'BLOCKER')} onClick={() => setDialog('approval')}><Check size={16} />确认关系并准备角色形象</Button> : selectedGraph.status === 'APPROVED' ? <><span className="relationship-editor__approval-complete"><Check size={16} />关系已确认</span><Link className="button button--primary button--md" to={`/projects/${selectedGraph.projectId}/characters`}>查看角色形象</Link></> : null}</div></footer>
 
       <Modal
         className="modal--relationship-approval"

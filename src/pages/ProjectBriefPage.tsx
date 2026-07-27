@@ -9,6 +9,7 @@ import {
   ListChecks,
   ListPlus,
   LoaderCircle,
+  Maximize2,
   Play,
   RefreshCw,
   RotateCcw,
@@ -28,13 +29,15 @@ import {
   rewriteBriefStory,
   suggestBriefAvoidances,
   suggestBriefBlockingQuestions,
+  suggestBriefEmotionalReward,
   suggestBriefRequirements,
   suggestProjectName,
   updateProjectDraft,
 } from '../api/client'
-import { Button, getStatusLabel, PageHeader, SelectControl, StatusBadge } from '../components/ui'
+import { Button, getStatusLabel, Modal, PageHeader, SelectControl, StatusBadge } from '../components/ui'
 import { PageLoadingSkeleton } from '../components/PageLoadingSkeleton'
 import { ServiceRequiredState } from '../components/ServiceRequiredState'
+import { useProjectReadiness } from '../store/ProjectReadinessContext'
 import { useStudio } from '../store/StudioContext'
 import type {
   BriefVersionRecord,
@@ -215,13 +218,15 @@ function fitStoryIdeaTextarea(textarea: HTMLTextAreaElement): void {
 
   textarea.style.height = 'auto'
   const contentHeight = textarea.scrollHeight
-  textarea.style.height = `${Math.min(Math.max(contentHeight, minHeight), maxAutoHeight)}px`
+  const targetHeight = Math.min(Math.max(contentHeight, minHeight), maxAutoHeight)
+  textarea.style.height = `${targetHeight}px`
   textarea.style.overflowY = contentHeight > maxAutoHeight ? 'auto' : 'hidden'
 }
 
 export function ProjectBriefPage() {
   const { projectId } = useParams()
   const { apiStatus, project: activeProject, activateProject, refreshProjects } = useStudio()
+  const { readiness } = useProjectReadiness()
   const navigate = useNavigate()
   const [project, setProject] = useState<ProjectRecord | null>(null)
   const [form, setForm] = useState<BriefForm | null>(null)
@@ -240,6 +245,8 @@ export function ProjectBriefPage() {
   const [ideaGenerationStage, setIdeaGenerationStage] = useState(0)
   const [ideaGenerationProgress, setIdeaGenerationProgress] = useState(0)
   const [draftingRequirements, setDraftingRequirements] = useState(false)
+  const [suggestingEmotionalReward, setSuggestingEmotionalReward] = useState(false)
+  const [emotionalRewardSuggestionNote, setEmotionalRewardSuggestionNote] = useState<string | null>(null)
   const [requirementsBeforeDraft, setRequirementsBeforeDraft] = useState<string | null>(null)
   const [requirementsDraftNote, setRequirementsDraftNote] = useState<string | null>(null)
   const [draftingAvoidances, setDraftingAvoidances] = useState(false)
@@ -254,7 +261,9 @@ export function ProjectBriefPage() {
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [briefWizardStep, setBriefWizardStep] = useState<BriefWizardStep>('core')
+  const [storyIdeaReaderOpen, setStoryIdeaReaderOpen] = useState(false)
   const storyIdeaRef = useRef<HTMLTextAreaElement>(null)
+  const emotionalRewardSuggestionProjectRef = useRef<string | null>(null)
 
   useLayoutEffect(() => {
     if (storyIdeaRef.current) fitStoryIdeaTextarea(storyIdeaRef.current)
@@ -266,6 +275,8 @@ export function ProjectBriefPage() {
     let active = true
     setLoading(true)
     setError(null)
+    setSuggestingEmotionalReward(false)
+    setEmotionalRewardSuggestionNote(null)
 
     const loadBriefData = async () => {
       const retryDelays = [0, 350, 900]
@@ -321,6 +332,39 @@ export function ProjectBriefPage() {
         setBaselineForm(persistedForm)
         setBriefVersion(briefs[0]?.version ?? null)
         setProposal(proposals[0] ?? null)
+        if (
+          canApplySmartDefaults
+          && persistedForm.emotionalRewards.length === 0
+          && emotionalRewardSuggestionProjectRef.current !== projectId
+        ) {
+          emotionalRewardSuggestionProjectRef.current = projectId
+          setSuggestingEmotionalReward(true)
+          void suggestBriefEmotionalReward(projectId, {
+            idea: persistedForm.idea,
+            genre: smartGenre,
+          })
+            .then((suggestion) => {
+              if (!active) return
+              setForm((current) => {
+                if (!current || current.emotionalRewards.length > 0) return current
+                return { ...current, emotionalRewards: [suggestion.reward] }
+              })
+              const label = EMOTIONAL_REWARD_OPTIONS.find(
+                ([value]) => value === suggestion.reward,
+              )?.[1] ?? suggestion.reward
+              setEmotionalRewardSuggestionNote(
+                `AI 已预选“${label}”：${suggestion.rationale}。可直接改选，保存后生效。`,
+              )
+            })
+            .catch(() => {
+              if (active) {
+                setEmotionalRewardSuggestionNote('AI 暂未给出建议，请手动选择至少一项。')
+              }
+            })
+            .finally(() => {
+              if (active) setSuggestingEmotionalReward(false)
+            })
+        }
       })
       .catch((reason: unknown) => {
         if (reason instanceof DOMException && reason.name === 'AbortError') return
@@ -858,6 +902,11 @@ export function ProjectBriefPage() {
   const hasNextStepCta = Boolean(runningJobType)
     || project.status === 'RELATIONSHIP_READY'
     || project.status === 'CHARACTER_VISUAL_READY'
+  const workflowNextAction = readiness?.projectId === project.id
+    && readiness.nextActionHref !== `/projects/${project.id}`
+    && !hasNextStepCta
+    ? readiness
+    : null
   const headerActions = (
     <>
       {runningJobType ? (
@@ -889,6 +938,11 @@ export function ProjectBriefPage() {
           ) : null}
         </>
       )}
+      {workflowNextAction ? (
+        <Link className="button button--primary button--md" to={workflowNextAction.nextActionHref}>
+          {workflowNextAction.nextActionLabel}<ArrowRight size={16} />
+        </Link>
+      ) : null}
       <Link className="button button--secondary button--md" to="/projects"><ArrowLeft size={16} />项目列表</Link>
       {isActiveWorkspace ? (
         <Link
@@ -976,10 +1030,52 @@ export function ProjectBriefPage() {
               />
               {nameSuggestionNote ? <small aria-live="polite" className="brief-field__note">{nameSuggestionNote}</small> : null}
             </div>
+            <div className="brief-field">
+              <div className="brief-field__heading brief-field__heading--recommendation">
+                <label htmlFor="brief-genre">题材</label>
+                <span className="brief-field__recommendation" title="根据当前故事想法推荐">
+                  <span>建议</span>{recommendedGenreLabel}
+                </span>
+              </div>
+              <SelectControl aria-label="题材" disabled={!editable} id="brief-genre" onChange={(event) => updateGenre(event.target.value)} value={form.genre}>
+                {!hasKnownGenre ? <option value={form.genre}>{form.genre}（旧数据）</option> : null}
+                {GENRE_OPTION_GROUPS.map((group) => (
+                  <optgroup key={group.label} label={group.label}>
+                    {group.options.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                  </optgroup>
+                ))}
+              </SelectControl>
+            </div>
+            <div className="brief-field">
+              <div className="brief-field__heading brief-field__heading--recommendation">
+                <label htmlFor="brief-visual-style">视觉风格</label>
+                <span className="brief-field__recommendation" title="根据当前故事想法与题材推荐">
+                  <span>建议</span>{recommendedVisualStyleLabel}
+                </span>
+              </div>
+              <SelectControl aria-label="视觉风格" disabled={!editable} id="brief-visual-style" onChange={(event) => updateField('style', event.target.value)} value={form.style}>
+                {!hasKnownVisualStyle ? <option value={form.style}>{form.style}（旧数据）</option> : null}
+                {VISUAL_STYLE_OPTIONS.map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </SelectControl>
+            </div>
+            <label className="brief-field"><span>目标时长</span><SelectControl aria-label="目标时长" disabled={!editable} onChange={(event) => updateField('targetDurationSec', Number(event.target.value))} value={form.targetDurationSec}><option value={45}>45 秒</option><option value={60}>60 秒</option><option value={90}>90 秒</option></SelectControl></label>
+            <label className="brief-field"><span>画幅</span><SelectControl aria-label="画幅" disabled={!editable} onChange={(event) => updateField('aspectRatio', event.target.value as BriefForm['aspectRatio'])} value={form.aspectRatio}><option value="9:16">9:16 竖屏</option><option value="16:9">16:9 横屏</option></SelectControl></label>
+            <label className="brief-field"><span>内容形态</span><SelectControl aria-label="内容形态" disabled={!editable} onChange={(event) => updateField('productionFormat', event.target.value as ProductionFormat)} value={form.productionFormat}>{PRODUCTION_FORMAT_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
             <div className="brief-field brief-field--wide">
               <div className="brief-field__heading">
                 <label htmlFor="brief-story-idea">故事想法</label>
                 <span className="brief-field__actions">
+                  <button
+                    aria-haspopup="dialog"
+                    onClick={() => setStoryIdeaReaderOpen(true)}
+                    type="button"
+                  >
+                    <Maximize2 size={12} />展开全文
+                  </button>
                   <button
                     disabled={!editable || apiStatus !== 'connected' || rewritingIdea || form.idea.trim().length < 10}
                     onClick={() => void intelligentlyRewriteIdea()}
@@ -1042,41 +1138,15 @@ export function ProjectBriefPage() {
               </div>
               {ideaRewriteNote ? <small aria-live="polite" className="brief-field__note">{ideaRewriteNote}</small> : null}
             </div>
-            <div className="brief-field">
-              <div className="brief-field__heading brief-field__heading--recommendation">
-                <label htmlFor="brief-genre">题材</label>
-                <span className="brief-field__recommendation" title="根据当前故事想法推荐">
-                  <span>建议</span>{recommendedGenreLabel}
-                </span>
-              </div>
-              <SelectControl aria-label="题材" disabled={!editable} id="brief-genre" onChange={(event) => updateGenre(event.target.value)} value={form.genre}>
-                {!hasKnownGenre ? <option value={form.genre}>{form.genre}（旧数据）</option> : null}
-                {GENRE_OPTION_GROUPS.map((group) => (
-                  <optgroup key={group.label} label={group.label}>
-                    {group.options.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-                  </optgroup>
-                ))}
-              </SelectControl>
-            </div>
-            <div className="brief-field">
-              <div className="brief-field__heading brief-field__heading--recommendation">
-                <label htmlFor="brief-visual-style">视觉风格</label>
-                <span className="brief-field__recommendation" title="根据当前故事想法与题材推荐">
-                  <span>建议</span>{recommendedVisualStyleLabel}
-                </span>
-              </div>
-              <SelectControl aria-label="视觉风格" disabled={!editable} id="brief-visual-style" onChange={(event) => updateField('style', event.target.value)} value={form.style}>
-                {!hasKnownVisualStyle ? <option value={form.style}>{form.style}（旧数据）</option> : null}
-                {VISUAL_STYLE_OPTIONS.map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </SelectControl>
-            </div>
-            <label className="brief-field"><span>目标时长</span><SelectControl aria-label="目标时长" disabled={!editable} onChange={(event) => updateField('targetDurationSec', Number(event.target.value))} value={form.targetDurationSec}><option value={45}>45 秒</option><option value={60}>60 秒</option><option value={90}>90 秒</option></SelectControl></label>
-            <label className="brief-field"><span>画幅</span><SelectControl aria-label="画幅" disabled={!editable} onChange={(event) => updateField('aspectRatio', event.target.value as BriefForm['aspectRatio'])} value={form.aspectRatio}><option value="9:16">9:16 竖屏</option><option value="16:9">16:9 横屏</option></SelectControl></label>
-            <label className="brief-field"><span>内容形态</span><SelectControl aria-label="内容形态" disabled={!editable} onChange={(event) => updateField('productionFormat', event.target.value as ProductionFormat)} value={form.productionFormat}>{PRODUCTION_FORMAT_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</SelectControl></label>
+            <Modal
+              className="modal--story-idea-reader"
+              description="在浮窗中阅读完整故事想法。"
+              onClose={() => setStoryIdeaReaderOpen(false)}
+              open={storyIdeaReaderOpen}
+              title="故事想法"
+            >
+              <div className="story-idea-reader">{form.idea || '暂未填写故事想法。'}</div>
+            </Modal>
             </> : null}
 
             {briefWizardStep === 'audience' ? <>
@@ -1086,7 +1156,7 @@ export function ProjectBriefPage() {
 
             <BriefSection>
               <label className="brief-field brief-field--wide"><span>补充受众画像（可选）</span><input disabled={!editable} maxLength={240} onChange={(event) => updateField('audienceProfile', event.target.value)} placeholder="例如：25—40岁女性；仅用于本项目表达校准" value={form.audienceProfile} /><small>年龄、性别、兴趣或媒介习惯只作为项目画像，不决定主角、题材或情绪回报。</small></label>
-              <fieldset className="brief-choice-field brief-field--wide" disabled={!editable}><legend>情绪回报（可多选，至少一项）</legend><div className="brief-choice-grid">{EMOTIONAL_REWARD_OPTIONS.map(([value, label]) => <label key={value}><input checked={form.emotionalRewards.includes(value)} onChange={() => toggleEmotionalReward(value)} type="checkbox" /><span>{label}</span></label>)}</div><p className="brief-field__note">首批选题池参考：女频 {slateMix.female_frequency}% · 泛人群 {slateMix.general}% · 男频 {slateMix.male_frequency}%（仅多项目组合，不改本项目）。</p></fieldset>
+              <fieldset className="brief-choice-field brief-field--wide" disabled={!editable}><legend>情绪回报（可多选，至少一项）</legend><div className="brief-choice-grid">{EMOTIONAL_REWARD_OPTIONS.map(([value, label]) => <label key={value}><input checked={form.emotionalRewards.includes(value)} onChange={() => toggleEmotionalReward(value)} type="checkbox" /><span>{label}</span></label>)}</div>{suggestingEmotionalReward ? <p className="brief-field__note">AI 正在根据故事预选一项情绪回报……</p> : emotionalRewardSuggestionNote ? <p className="brief-field__note">{emotionalRewardSuggestionNote}</p> : null}<p className="brief-field__note">首批选题池参考：女频 {slateMix.female_frequency}% · 泛人群 {slateMix.general}% · 男频 {slateMix.male_frequency}%（仅多项目组合，不改本项目）。</p></fieldset>
             </BriefSection>
 
             <BriefSection

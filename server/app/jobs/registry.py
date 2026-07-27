@@ -19,6 +19,7 @@ _HANDLER_MODULES = (
     "app.jobs.handlers.timeline",
     "app.jobs.handlers.demo",
     "app.jobs.handlers.image",
+    "app.jobs.handlers.project_thumbnail",
     "app.jobs.handlers.video",
     "app.jobs.handlers.audio",
     "app.jobs.handlers.multitrack",

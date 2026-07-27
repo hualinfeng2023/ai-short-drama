@@ -57,13 +57,19 @@ DIGITAL_ENTITY_CLEAN_FRAME_CONSTRAINT = (
     "但不得出现任何可读文字、字母、数字、字幕、水印、Logo、品牌标识、签名、二维码或边框"
 )
 CHARACTER_PURE_WHITE_BACKGROUND_CONSTRAINT = (
-    "纯白背景硬约束：背景必须是均匀、无纹理、无渐变、无阴影、无环境反射的纯白色"
-    "（RGB 255,255,255，#FFFFFF）；人物轮廓外的全部背景像素保持纯白，"
+    "纯白背景硬约束：背景必须是均匀、无纹理、无渐变、无环境反射的纯白色"
+    "（RGB 255,255,255，#FFFFFF）；人物轮廓外的全部背景像素保持纯白。"
+    "允许脚底、身体或襁褓正下方紧贴主体、范围小且低对比度的自然接触阴影，"
+    "不得因为这种接触阴影判定背景不合格；"
     "不得使用灰白、米白、蓝白、摄影棚渐变、虚化场景或任何有色背景；"
-    "光线与色温只能作用于人物，不得污染背景；新生成、微调和重新生成都必须遵守"
+    "禁止大面积、明显、拖长的投影，光线与色温不得污染其余背景；"
+    "新生成、微调和重新生成都必须遵守"
 )
 CHARACTER_PROFILE_EXTRACTION_VERSION = "character-profile-extraction-v3"
 IDENTITY_DOSSIER_MAX_WAIT_SECONDS = 120
+EDITABLE_IDENTITY_REVIEW_STATUSES = frozenset(
+    {"GENERATING_DOSSIER", "READY_FOR_REVIEW", "QC_REVIEW_REQUIRED"}
+)
 AGE_MENTION_PATTERN = re.compile(
     r"(?<![\d零〇一二两三四五六七八九十百])"
     r"((?:\d{1,3}|[零〇一二两三四五六七八九十百]{1,4})"
@@ -97,12 +103,14 @@ FAMILY_INDEPENDENCE_CONSTRAINTS = [
     "气质关联只根据家庭环境、成长经历与人物关系推导，不作为遗传结果",
 ]
 
+
 def _normalize_appearance_fields(appearance: dict[str, object]) -> dict[str, object]:
     normalized = dict(appearance)
     legacy_hair_color = normalized.pop("hair_texture", None)
     if legacy_hair_color and not normalized.get("hair_color"):
         normalized["hair_color"] = legacy_hair_color
     return normalized
+
 
 DOSSIER_VIEWS: tuple[tuple[str, str], ...] = (
     ("FRONT", "正面头肩身份照，正视镜头"),
@@ -118,6 +126,26 @@ DOSSIER_VIEWS: tuple[tuple[str, str], ...] = (
         "右下悲伤（眉头内侧抬起并靠拢、眼睑下垂、嘴角下压、视线微垂）。"
         "四种表情必须在缩略图尺寸下也一眼可辨，但不得改变脸型、五官、年龄感、"
         "发型、服装和人物身份；不得出现四张近似中性微表情、重复格、文字标签或额外分格",
+    ),
+)
+
+INFANT_DOSSIER_VIEWS: tuple[tuple[str, str], ...] = (
+    ("FRONT", "新生儿正面身份照，自然平躺或安稳包裹于襁褓中，脸部完整清晰"),
+    ("THREE_QUARTER", "新生儿向右 45 度身份照，自然平躺，脸部与头部轮廓完整清晰"),
+    ("PROFILE", "新生儿标准右侧面身份照，自然平躺，头颈姿态符合新生儿生理特征"),
+    (
+        "FULL_BODY",
+        "新生儿完整身体比例身份照，自然平躺或安稳包裹于襁褓中，从头顶到襁褓末端完整入镜；"
+        "禁止站立、鞋履和成人身体比例；若腿脚被襁褓合理包裹，不要求露出腿脚，"
+        "但襁褓外轮廓必须完整自然，不得生成腿脚从襁褓外异常突出、重复或断裂",
+    ),
+    (
+        "EXPRESSIONS",
+        "严格的 2×2 等分四宫格，四格均为同一新生儿、同一正面头肩构图："
+        "自然平静、轻微愉悦、短暂警觉、轻微不适四种适龄表情；"
+        "不得改变脸型、五官、年龄感、发量、襁褓和人物身份。"
+        "四格背景均须为均匀 #FFFFFF 纯白，只允许用纯白留白分隔，"
+        "不得出现灰色分割线、边框、文字标签、重复格或成人化夸张表情",
     ),
 )
 
@@ -181,17 +209,38 @@ def _entity_kind(
     return "HUMAN"
 
 
+def _is_newborn_or_infant(
+    identity_fields: dict[str, object],
+    appearance_fields: dict[str, object],
+) -> bool:
+    text = " ".join(
+        _as_text(value, "")
+        for value in (
+            identity_fields.get("age"),
+            identity_fields.get("story_identity"),
+            appearance_fields.get("identifying_features"),
+            appearance_fields.get("body_type"),
+        )
+    ).casefold()
+    return bool(
+        re.search(
+            r"新生儿|刚出生|婴儿|襁褓|胚胎|胎儿"
+            r"|\bnewborn\b|\binfant\b|\bbaby\b|\bembryo\b|\bfetus\b",
+            text,
+        )
+    )
+
+
 def _dossier_views(profile: CharacterVisualProfileVersion) -> tuple[tuple[str, str], ...]:
     content = _profile_content(profile)
-    return (
-        DIGITAL_ENTITY_DOSSIER_VIEWS
-        if _entity_kind(
-            dict(content["identity_fields"]),
-            dict(content["appearance_fields"]),
-        )
-        == "DIGITAL_ENTITY"
-        else DOSSIER_VIEWS
-    )
+    identity_fields = dict(content["identity_fields"])
+    appearance_fields = dict(content["appearance_fields"])
+    if _entity_kind(identity_fields, appearance_fields) == "DIGITAL_ENTITY":
+        return DIGITAL_ENTITY_DOSSIER_VIEWS
+    if _is_newborn_or_infant(identity_fields, appearance_fields):
+        return INFANT_DOSSIER_VIEWS
+    return DOSSIER_VIEWS
+
 
 CANDIDATE_VARIANTS: tuple[dict[str, str], ...] = (
     {
@@ -255,16 +304,14 @@ OPEN_CASTING_DIRECTIONS: tuple[dict[str, str], ...] = (
         "key": "east_southeast_asian",
         "label": "东亚或东南亚背景演员",
         "instruction": (
-            "本候选采用东亚或东南亚背景演员；"
-            "只呈现自然个体特征，不添加文化符号或刻板外貌"
+            "本候选采用东亚或东南亚背景演员；只呈现自然个体特征，不添加文化符号或刻板外貌"
         ),
     },
     {
         "key": "black_african_diaspora",
         "label": "非洲或非洲侨民背景演员",
         "instruction": (
-            "本候选采用非洲或非洲侨民背景演员；"
-            "只呈现自然个体特征，不添加文化符号或刻板外貌"
+            "本候选采用非洲或非洲侨民背景演员；只呈现自然个体特征，不添加文化符号或刻板外貌"
         ),
     },
     {
@@ -281,8 +328,7 @@ OPEN_CASTING_DIRECTIONS: tuple[dict[str, str], ...] = (
         "key": "latino_latin_american",
         "label": "拉丁裔或拉丁美洲背景演员",
         "instruction": (
-            "本候选采用拉丁裔或拉丁美洲背景演员；"
-            "只呈现自然个体特征，不添加文化符号或刻板外貌"
+            "本候选采用拉丁裔或拉丁美洲背景演员；只呈现自然个体特征，不添加文化符号或刻板外貌"
         ),
     },
     {
@@ -363,11 +409,7 @@ def _pending_visual_source_changes(
         .order_by(StoryBibleVersion.version.desc())
         .limit(1)
     )
-    if (
-        source_bible is None
-        or latest_bible is None
-        or latest_bible.version <= source_bible.version
-    ):
+    if source_bible is None or latest_bible is None or latest_bible.version <= source_bible.version:
         return None
     source_character = _story_character_payload(source_bible, character.character_key)
     latest_character = _story_character_payload(latest_bible, character.character_key)
@@ -475,6 +517,34 @@ def _json(value: str) -> object:
     return json.loads(value)
 
 
+def _candidate_quality_issues(asset: Asset | None) -> list[dict[str, object]]:
+    if asset is None:
+        return []
+    metadata = _json(asset.metadata_json)
+    if not isinstance(metadata, dict):
+        return []
+    quality = metadata.get("generation_quality")
+    if not isinstance(quality, dict):
+        return []
+    checks = quality.get("checks")
+    if not isinstance(checks, list):
+        return []
+    return [
+        {
+            "type": str(item.get("type") or "UNKNOWN"),
+            "status": str(item.get("status") or "FAILED"),
+            "score": (
+                float(item["score"])
+                if isinstance(item.get("score"), int | float)
+                else None
+            ),
+            "message": _as_text(item.get("message"), "该项质量检查未通过"),
+        }
+        for item in checks
+        if isinstance(item, dict) and item.get("status") != "PASSED"
+    ]
+
+
 def _as_text(value: object, fallback: str) -> str:
     text = str(value or "").strip()
     return text or fallback
@@ -491,8 +561,20 @@ def _extract_age(value: object, visual_notes: str) -> str:
 
 
 def _chinese_number(value: str) -> int | None:
-    digits = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
-              "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    digits = {
+        "零": 0,
+        "〇": 0,
+        "一": 1,
+        "二": 2,
+        "两": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+    }
     if not value:
         return None
     if "百" in value:
@@ -520,7 +602,7 @@ def _without_redundant_leading_age(value: str, age: str) -> str:
     match = AGE_MENTION_PATTERN.match(value)
     if not match or _age_number(match.group(1)) != _age_number(age):
         return value
-    return value[match.end():].lstrip(" ,，、·:：；;")
+    return value[match.end() :].lstrip(" ,，、·:：；;")
 
 
 def _relationship_context(
@@ -874,11 +956,7 @@ def _locked_family_sources(
                 Character.source_relationship_graph_id == graph.id,
             )
         )
-        if (
-            relative is None
-            or relative.id in seen
-            or relative.locked_identity_version_id is None
-        ):
+        if relative is None or relative.id in seen or relative.locked_identity_version_id is None:
             continue
         identity = session.get(CharacterIdentityVersion, relative.locked_identity_version_id)
         if identity is None or identity.status != "LOCKED":
@@ -1219,9 +1297,7 @@ def prepare_character_visuals(
                 "era": "当代" if any(word in world for word in ("当代", "现代", "城市")) else world,
                 "occupation": _as_text(raw.get("occupation"), "待明确职业"),
                 "embodiment": (
-                    "屏幕界面或数字视觉形态"
-                    if entity_kind == "DIGITAL_ENTITY"
-                    else "实体角色"
+                    "屏幕界面或数字视觉形态" if entity_kind == "DIGITAL_ENTITY" else "实体角色"
                 ),
                 "social_class": "由职业、居住环境与服装材质综合表达",
                 "story_identity": _as_text(raw.get("dramatic_function"), character.role),
@@ -1450,11 +1526,7 @@ def character_visual_workspace(session: Session, project_id: str) -> dict[str, o
             else None
         )
         source_personality = (
-            [
-                str(item)
-                for item in source_character.get("personality", [])
-                if str(item).strip()
-            ]
+            [str(item) for item in source_character.get("personality", []) if str(item).strip()]
             if source_character is not None
             and isinstance(source_character.get("personality"), list)
             else []
@@ -1477,6 +1549,12 @@ def character_visual_workspace(session: Session, project_id: str) -> dict[str, o
             )
             .order_by(CharacterCandidate.ordinal)
         ).all()
+        candidate_assets = {
+            asset.id: asset
+            for asset in session.scalars(
+                select(Asset).where(Asset.id.in_([item.asset_id for item in candidates]))
+            ).all()
+        }
         batches = session.scalars(
             select(CharacterCandidateBatch)
             .where(CharacterCandidateBatch.character_id == character.id)
@@ -1495,6 +1573,12 @@ def character_visual_workspace(session: Session, project_id: str) -> dict[str, o
                 .where(CharacterIdentityAsset.identity_version_id == identity.id)
                 .order_by(CharacterIdentityAsset.created_at)
             ).all()
+            identity_asset_records = {
+                asset.id: asset
+                for asset in session.scalars(
+                    select(Asset).where(Asset.id.in_([item.asset_id for item in assets]))
+                ).all()
+            }
             dossier_jobs = session.scalars(
                 select(Job)
                 .where(
@@ -1544,6 +1628,9 @@ def character_visual_workspace(session: Session, project_id: str) -> dict[str, o
                             "asset_id": item.asset_id,
                             "asset_url": f"/api/v1/assets/{item.asset_id}/content",
                             "status": item.status,
+                            "quality_issues": _candidate_quality_issues(
+                                identity_asset_records.get(item.asset_id)
+                            ),
                         }
                         for item in assets
                     ],
@@ -1608,12 +1695,14 @@ def character_visual_workspace(session: Session, project_id: str) -> dict[str, o
                         "seed": item.seed,
                         "status": item.status,
                         "review_status": item.review_status,
+                        "quality_issues": _candidate_quality_issues(
+                            candidate_assets.get(item.asset_id)
+                        ),
                         "selected": item.selected,
                         "deletable": (
                             item.id != character.locked_candidate_id
                             and all(
-                                identity.source_candidate_id != item.id
-                                for identity in identities
+                                identity.source_candidate_id != item.id for identity in identities
                             )
                         ),
                         "delete_block_reason": (
@@ -1668,15 +1757,17 @@ def character_visual_workspace(session: Session, project_id: str) -> dict[str, o
                             or (
                                 f"{_as_text(_json(item.prompt_snapshot_json).get('prompt'), '')}"
                                 "。候选方向："
-                            f"{_as_text(
-                                dict(
-                                    _json(item.prompt_snapshot_json).get(
-                                        'candidate_variant',
-                                        {},
+                                f"{
+                                    _as_text(
+                                        dict(
+                                            _json(item.prompt_snapshot_json).get(
+                                                'candidate_variant',
+                                                {},
+                                            )
+                                        ).get('instruction'),
+                                        '',
                                     )
-                                ).get('instruction'),
-                                '',
-                            )}"
+                                }"
                             )
                             if isinstance(_json(item.prompt_snapshot_json), dict)
                             else ""
@@ -1857,6 +1948,9 @@ def assemble_character_prompt(
     identity_fields = dict(content["identity_fields"])
     appearance_fields = dict(content["appearance_fields"])
     entity_kind = _entity_kind(identity_fields, appearance_fields)
+    is_newborn_or_infant = entity_kind == "HUMAN" and _is_newborn_or_infant(
+        identity_fields, appearance_fields
+    )
     if entity_kind == "DIGITAL_ENTITY":
         identity_fields["entity_kind"] = entity_kind
         identity_fields.setdefault("embodiment", "屏幕界面或数字视觉形态")
@@ -1921,11 +2015,29 @@ def assemble_character_prompt(
             f"{independence}；气质约束：{temperament.get('instruction', '')}"
         )
     negatives = "、".join(str(item) for item in content["negative_constraints"])
-    prompt_opening = (
-        "非人类数字实体视觉方案，展示其屏幕界面、投影、终端载体或抽象数字视觉形态；"
-        "除非角色设定明确要求，禁止生成人类脸孔、人体、服装或真人选角照"
-        if entity_kind == "DIGITAL_ENTITY"
-        else "单人角色选角照，正面胸像，视线平视镜头，统一 85mm 等效焦段和相机高度"
+    if entity_kind == "DIGITAL_ENTITY":
+        prompt_opening = (
+            "非人类数字实体视觉方案，展示其屏幕界面、投影、终端载体或抽象数字视觉形态；"
+            "除非角色设定明确要求，禁止生成人类脸孔、人体、服装或真人选角照"
+        )
+    elif is_newborn_or_infant:
+        prompt_opening = (
+            "新生儿或婴儿角色设定图，严格按照设定中的生命阶段、身体比例和体型呈现；"
+            "若设定为胚胎或刚出生，必须保持相应生命阶段；"
+            "禁止出现成年人、成人脸、成人身体、成人发型或成人服装，"
+            "也不得把亲属证据人物直接缩小、年轻化或复刻"
+        )
+    else:
+        prompt_opening = "单人角色选角照，正面胸像，视线平视镜头，统一 85mm 等效焦段和相机高度"
+    face_visibility_constraint = (
+        "面部可见性硬约束：角色设定要求不露出可识别面部时，必须完全遮蔽面部，"
+        "只展示设定允许出现的襁褓和身体部位"
+        if is_newborn_or_infant
+        and re.search(
+            r"不露出.*面|不显示.*面|遮(?:住|蔽).*面|no (?:visible|identifiable) face",
+            _as_text(appearance_fields.get("identifying_features"), "").casefold(),
+        )
+        else None
     )
     prompt = "。".join(
         [
@@ -1936,6 +2048,7 @@ def assemble_character_prompt(
                 else [f"选角规则：{CASTING_INFERENCE_GUARDRAIL}"]
             ),
             *fragments,
+            *([face_visibility_constraint] if face_visibility_constraint else []),
             f"负面约束：{negatives}",
             (
                 "画面只展示一个数字实体方案，不得出现可读文字、Logo、水印或无设定依据的人物"
@@ -2067,20 +2180,12 @@ def generate_character_candidates(
         )
         .limit(1)
     )
-    previous_prompt = (
-        _json(previous_batch.prompt_json)
-        if previous_batch is not None
-        else {}
-    )
+    previous_prompt = _json(previous_batch.prompt_json) if previous_batch is not None else {}
     previous_variants = (
-        previous_prompt.get("candidate_variants", [])
-        if isinstance(previous_prompt, dict)
-        else []
+        previous_prompt.get("candidate_variants", []) if isinstance(previous_prompt, dict) else []
     )
     previous_variant_keys = {
-        str(item["key"])
-        for item in previous_variants
-        if isinstance(item, dict) and item.get("key")
+        str(item["key"]) for item in previous_variants if isinstance(item, dict) and item.get("key")
     }
     selected_style_variants = _sample_candidate_variants(
         count,
@@ -2147,9 +2252,7 @@ def generate_character_candidates(
         if family_constraint is not None and family_constraint.status == "ACTIVE"
         else []
     )
-    reference_asset_ids = list(family_reference_asset_ids)
-    if source_candidate is not None and source_candidate.asset_id not in reference_asset_ids:
-        reference_asset_ids.append(source_candidate.asset_id)
+    reference_asset_ids = [source_candidate.asset_id] if source_candidate is not None else []
     for offset in range(count):
         ordinal = first_ordinal + offset
         variant = selected_variants[offset]
@@ -2157,8 +2260,7 @@ def generate_character_candidates(
             int(content_hash(f"{profile.content_hash}:{batch.version}:{ordinal}")[:8], 16)
         )
         refinement_instruction = (
-            "。严格保持参考候选中的同一人身份，仅按以下说明微调："
-            f"{refinement_note}"
+            f"。严格保持参考候选中的同一人身份，仅按以下说明微调：{refinement_note}"
             if source_candidate is not None and refinement_note
             else ""
         )
@@ -2169,10 +2271,7 @@ def generate_character_candidates(
                 f"{CHARACTER_CLEAN_FRAME_CONSTRAINT}"
             )
             if source_candidate is not None and custom_prompt
-            else (
-                f"{prompt['prompt']}。候选方向："
-                f"{variant['instruction']}{refinement_instruction}"
-            )
+            else (f"{prompt['prompt']}。候选方向：{variant['instruction']}{refinement_instruction}")
         )
         prompt_snapshot = {
             **prompt,
@@ -2201,6 +2300,7 @@ def generate_character_candidates(
                 "prompt_snapshot": prompt_snapshot,
                 "family_constraint_version_id": batch.family_constraint_version_id,
                 "reference_asset_ids": reference_asset_ids,
+                "family_reference_asset_ids": family_reference_asset_ids,
                 "source_candidate_id": source_candidate.id if source_candidate else None,
                 "refinement_note": refinement_note,
                 "custom_prompt": custom_prompt,
@@ -2266,9 +2366,7 @@ def materialize_visual_candidate(
         reused: bool,
     ) -> None:
         reference_asset_ids = [
-            item
-            for item in payload.get("reference_asset_ids", [])
-            if isinstance(item, str)
+            item for item in payload.get("reference_asset_ids", []) if isinstance(item, str)
         ]
         ensure_generation_record(
             session,
@@ -2291,6 +2389,11 @@ def materialize_visual_candidate(
                 "character_id": character.id,
                 "ordinal": ordinal,
                 "quality_status": quality_status,
+                "family_reference_asset_ids": [
+                    item
+                    for item in payload.get("family_reference_asset_ids", [])
+                    if isinstance(item, str)
+                ],
                 "reused_existing_output": reused,
             },
         )
@@ -2349,11 +2452,7 @@ def materialize_visual_candidate(
         ordinal=ordinal,
         asset_id=asset.id,
         seed=str(payload["seed"]),
-        status=(
-            "READY"
-            if quality_status != "FAILED"
-            else "QC_FAILED"
-        ),
+        status=("READY" if quality_status != "FAILED" else "QC_FAILED"),
         prompt_snapshot_json=canonical_json(payload["prompt_snapshot"]),
         review_status=(
             "PENDING_SELECTION"
@@ -2472,6 +2571,7 @@ def select_character_candidate(
     jobs: list[JobRead] = []
     dossier_views = _dossier_views(profile)
     digital_entity = dossier_views == DIGITAL_ENTITY_DOSSIER_VIEWS
+    infant = dossier_views == INFANT_DOSSIER_VIEWS
     for view_type, view_instruction in dossier_views:
         job, _ = enqueue_job(
             session,
@@ -2485,7 +2585,9 @@ def select_character_candidate(
                 "identity_version_id": identity.id,
                 "candidate_id": candidate.id,
                 "reference_asset_id": candidate.asset_id,
+                "reference_asset_ids": [candidate.asset_id],
                 "view_type": view_type,
+                "quality_context": f"INFANT_{view_type}" if infant else None,
                 "prompt": (
                     (
                         "严格保持参考图中同一数字实体的界面结构、配色、光效语言和核心识别符号。"
@@ -2684,9 +2786,7 @@ def generate_character_identity_view(
             .where(
                 CharacterIdentityVersion.character_id == character.id,
                 CharacterIdentityVersion.locked_at.is_(None),
-                CharacterIdentityVersion.status.in_(
-                    {"GENERATING_DOSSIER", "READY_FOR_REVIEW"}
-                ),
+                CharacterIdentityVersion.status.in_(EDITABLE_IDENTITY_REVIEW_STATUSES),
             )
             .order_by(CharacterIdentityVersion.version.desc())
         )
@@ -2761,7 +2861,7 @@ def generate_character_identity_view(
                 "actor": actor,
             },
         )
-    elif identity.status not in {"GENERATING_DOSSIER", "READY_FOR_REVIEW"}:
+    elif identity.status not in EDITABLE_IDENTITY_REVIEW_STATUSES:
         raise HTTPException(
             status_code=409,
             detail={
@@ -2774,6 +2874,7 @@ def generate_character_identity_view(
         raise ValueError("角色身份版本的视觉设定不存在")
     dossier_views = _dossier_views(profile)
     digital_entity = dossier_views == DIGITAL_ENTITY_DOSSIER_VIEWS
+    infant = dossier_views == INFANT_DOSSIER_VIEWS
     view_instructions = dict(dossier_views)
     view_instruction = view_instructions.get(view_type)
     if view_instruction is None:
@@ -2864,8 +2965,10 @@ def generate_character_identity_view(
             "identity_version_id": identity.id,
             "candidate_id": candidate.id,
             "reference_asset_id": reference_asset_id,
+            "reference_asset_ids": [reference_asset_id],
             "replace_identity_asset_id": existing.id,
             "view_type": view_type,
+            "quality_context": f"INFANT_{view_type}" if infant else None,
             "generation_mode": mode,
             "refinement_note": note,
             "prompt": (
@@ -2887,9 +2990,7 @@ def generate_character_identity_view(
                     else f"{CHARACTER_CLEAN_FRAME_CONSTRAINT}。"
                 )
             ),
-            "seed": normalize_ark_image_seed(
-                int(request_fingerprint[:8], 16)
-            ),
+            "seed": normalize_ark_image_seed(int(request_fingerprint[:8], 16)),
         },
         label=f"{character.name} · 身份档案 · {view_type} · {'细节调整' if note else '重新生成'}",
         stage="等待生成角色身份视角调整版" if note else "等待重新生成角色身份视角",
@@ -2942,10 +3043,14 @@ def materialize_identity_asset(
         quality_status: str,
         reused: bool,
     ) -> None:
+        raw_reference_asset_ids = payload.get("reference_asset_ids")
+        if not isinstance(raw_reference_asset_ids, list):
+            legacy_reference_asset_id = payload.get("reference_asset_id")
+            raw_reference_asset_ids = (
+                [legacy_reference_asset_id] if isinstance(legacy_reference_asset_id, str) else []
+            )
         reference_asset_ids = [
-            item
-            for item in payload.get("reference_asset_ids", [])
-            if isinstance(item, str)
+            item for item in raw_reference_asset_ids if isinstance(item, str)
         ]
         ensure_generation_record(
             session,
@@ -3021,11 +3126,7 @@ def materialize_identity_asset(
         }
     )
     quality_status = quality_report.status if quality_report is not None else "PASSED"
-    record_status = (
-        "READY"
-        if quality_status != "FAILED"
-        else "QC_FAILED"
-    )
+    record_status = "READY" if quality_status != "FAILED" else "QC_FAILED"
     if existing is not None:
         previous_asset_id = existing.asset_id
         existing.asset_id = asset.id
@@ -3085,9 +3186,7 @@ def materialize_identity_asset(
         character.updated_at = datetime.now(UTC)
         candidate = session.get(CharacterCandidate, identity.source_candidate_id)
         if candidate is not None:
-            candidate.review_status = (
-                "READY_FOR_REVIEW" if all_passed else "QC_REVIEW_REQUIRED"
-            )
+            candidate.review_status = "READY_FOR_REVIEW" if all_passed else "QC_REVIEW_REQUIRED"
         append_event(
             session,
             project_id=job.project_id,
@@ -3544,9 +3643,7 @@ def mark_character_generation_failed(session: Session, job: Job) -> None:
                 )
             )
             identity.status = (
-                "READY_FOR_REVIEW"
-                if asset_count >= len(DOSSIER_VIEWS)
-                else "GENERATING_DOSSIER"
+                "READY_FOR_REVIEW" if asset_count >= len(DOSSIER_VIEWS) else "GENERATING_DOSSIER"
             )
         character.status = (
             "REVIEW_REQUIRED"

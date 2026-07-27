@@ -33,6 +33,7 @@ def install_error_handlers(app: FastAPI) -> None:
         message = str(detail.get("message", "请求失败"))
         return JSONResponse(
             status_code=exc.status_code,
+            headers=exc.headers,
             content=error_payload(
                 code,
                 message,

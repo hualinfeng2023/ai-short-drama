@@ -36,6 +36,7 @@ import type {
   Shot,
   IdentityReviewDecision,
   IdentityReviewIssue,
+  ThemeMode,
   VisualMode,
 } from '../types'
 
@@ -46,6 +47,9 @@ interface StudioContextValue extends AppState {
   apiStatus: ApiStatus
   projectSummaries: ProjectSummary[]
   setVisualMode: (mode: VisualMode) => void
+  themeMode: ThemeMode
+  resolvedTheme: 'light' | 'dark'
+  setThemeMode: (mode: ThemeMode) => void
   createProject: (
     idea: string,
     idempotencyKey: string,
@@ -84,16 +88,34 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export interface StudioPreferences {
   visualMode: VisualMode
+  themeMode: ThemeMode
 }
 
 export function normalizeStudioPreferences(value: unknown): StudioPreferences {
-  if (!isRecord(value)) return { visualMode: initialAppState.visualMode }
+  if (!isRecord(value)) return { visualMode: initialAppState.visualMode, themeMode: 'system' }
   const visualMode = value.visualMode
+  const themeMode = value.themeMode
+  const restoredLegacyCinemaTheme = visualMode === 'cinema' && themeMode === undefined
   return {
     visualMode:
       visualMode === 'focus' || visualMode === 'cinema' || visualMode === 'standard'
         ? visualMode
         : initialAppState.visualMode,
+    themeMode: themeMode === 'light' || themeMode === 'dark' || themeMode === 'system'
+      ? themeMode
+      : restoredLegacyCinemaTheme ? 'dark' : 'system',
+  }
+}
+
+function loadStudioPreferences(): StudioPreferences {
+  try {
+    const saved = localStorage.getItem(PREFERENCES_KEY)
+    const legacy = localStorage.getItem(LEGACY_STORAGE_KEY)
+    return normalizeStudioPreferences(JSON.parse(saved ?? legacy ?? '{}'))
+  } catch {
+    localStorage.removeItem(PREFERENCES_KEY)
+    localStorage.removeItem(LEGACY_STORAGE_KEY)
+    return { visualMode: initialAppState.visualMode, themeMode: 'system' }
   }
 }
 
@@ -108,17 +130,7 @@ function summarizeCurrentProject(state: AppState): ProjectSummary {
 
 function loadInitialState(): AppState {
   const state = structuredClone(initialAppState)
-  try {
-    const saved = localStorage.getItem(PREFERENCES_KEY)
-    const legacy = localStorage.getItem(LEGACY_STORAGE_KEY)
-    const preferences = normalizeStudioPreferences(JSON.parse(saved ?? legacy ?? '{}'))
-    localStorage.removeItem(LEGACY_STORAGE_KEY)
-    return { ...state, visualMode: preferences.visualMode }
-  } catch {
-    localStorage.removeItem(PREFERENCES_KEY)
-    localStorage.removeItem(LEGACY_STORAGE_KEY)
-  }
-  return state
+  return { ...state, visualMode: loadStudioPreferences().visualMode }
 }
 
 function newJob(label: string, entity: string, stage: string): Job {
@@ -147,6 +159,8 @@ function newJob(label: string, entity: string, stage: string): Job {
 
 export function StudioProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AppState>(loadInitialState)
+  const [themeMode, setThemeModeState] = useState<ThemeMode>(() => loadStudioPreferences().themeMode)
+  const [systemTheme, setSystemTheme] = useState<'light' | 'dark'>('light')
   const [apiStatus, setApiStatus] = useState<ApiStatus>('loading')
   const [projectSummaries, setProjectSummaries] = useState<ProjectSummary[]>(() => [
     summarizeCurrentProject(initialAppState),
@@ -220,6 +234,14 @@ export function StudioProvider({ children }: { children: ReactNode }) {
       'domain.command.executed',
     ]
     eventTypes.forEach((type) => source.addEventListener(type, refresh))
+    const refreshProjectThumbnails = () => {
+      void fetchProjects()
+        .then((projects) => {
+          if (active) setProjectSummaries(projects)
+        })
+        .catch(() => undefined)
+    }
+    source.addEventListener('project.thumbnail_ready', refreshProjectThumbnails)
     return () => {
       active = false
       window.clearInterval(interval)
@@ -228,18 +250,33 @@ export function StudioProvider({ children }: { children: ReactNode }) {
   }, [apiStatus, state.project.id])
 
   useEffect(() => {
+    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
+    const syncSystemTheme = () => setSystemTheme(mediaQuery.matches ? 'dark' : 'light')
+    syncSystemTheme()
+    mediaQuery.addEventListener('change', syncSystemTheme)
+    return () => mediaQuery.removeEventListener('change', syncSystemTheme)
+  }, [])
+
+  const resolvedTheme = themeMode === 'system' ? systemTheme : themeMode
+
+  useEffect(() => {
     localStorage.setItem(
       PREFERENCES_KEY,
-      JSON.stringify({ visualMode: state.visualMode } satisfies StudioPreferences),
+      JSON.stringify({ visualMode: state.visualMode, themeMode } satisfies StudioPreferences),
     )
     localStorage.removeItem(LEGACY_STORAGE_KEY)
     document.documentElement.dataset.visualMode = state.visualMode
+    document.documentElement.dataset.theme = resolvedTheme
     const themeColor = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')
-    if (themeColor) themeColor.content = state.visualMode === 'cinema' ? '#090b10' : '#f5f5f7'
-  }, [state.visualMode])
+    if (themeColor) themeColor.content = resolvedTheme === 'dark' ? '#090b10' : '#f5f5f7'
+  }, [resolvedTheme, state.visualMode, themeMode])
 
   const setVisualMode = useCallback((visualMode: VisualMode) => {
     setState((current) => ({ ...current, visualMode }))
+  }, [])
+
+  const setThemeMode = useCallback((mode: ThemeMode) => {
+    setThemeModeState(mode)
   }, [])
 
   const refreshProjects = useCallback(async () => {
@@ -595,6 +632,7 @@ export function StudioProvider({ children }: { children: ReactNode }) {
     localStorage.removeItem(PREFERENCES_KEY)
     localStorage.removeItem(LEGACY_STORAGE_KEY)
     setState(structuredClone(initialAppState))
+    setThemeModeState('system')
   }, [])
 
   const value = useMemo<StudioContextValue>(
@@ -603,6 +641,9 @@ export function StudioProvider({ children }: { children: ReactNode }) {
       apiStatus,
       projectSummaries,
       setVisualMode,
+      themeMode,
+      resolvedTheme,
+      setThemeMode,
       createProject,
       refreshProjects,
       deleteProject,
@@ -625,6 +666,9 @@ export function StudioProvider({ children }: { children: ReactNode }) {
       apiStatus,
       projectSummaries,
       setVisualMode,
+      themeMode,
+      resolvedTheme,
+      setThemeMode,
       createProject,
       refreshProjects,
       deleteProject,

@@ -79,6 +79,7 @@ EXPECTED_JOB_TYPES = {
     "GENERATE_STORY_PACKAGE",
     "GENERATE_STORY_STRUCTURE",
     "GENERATE_SCRIPT_PACKAGE",
+    "GENERATE_PROJECT_THUMBNAIL",
     "GENERATE_CHARACTER_CANDIDATES",
     "GENERATE_CHARACTER_CANDIDATE",
     "GENERATE_CHARACTER_VISUAL_CANDIDATE",
@@ -976,13 +977,27 @@ async def test_story_directions_to_approved_script_flow(client: AsyncClient) -> 
 
     scene_revision = await client.patch(
         f"/api/v1/scripts/{script['id']}/scenes/{script['scenes'][0]['id']}",
-        json={"expected_version": 10, "emotion": "高度警觉", "sfx_intents": ["雷声"]},
+        json={
+            "expected_version": 10,
+            "emotion": "高度警觉",
+            "sfx_intents": ["雷声"],
+            "beat_description": "雷声切开黑场，旧照片成为所有人的共同证词。",
+        },
     )
     assert scene_revision.status_code == 200
     workspace = (await client.get(f"/api/v1/projects/{project_id}/story-workspace")).json()["data"]
     script = workspace["script_versions"][0]
     assert script["version"] == 3
     assert script["scenes"][0]["emotion"] == "高度警觉"
+    matching_beats = [
+        item for item in script["payload"]["short_drama_engine"]["beats"]
+        if item["scene_ordinal"] == script["scenes"][0]["ordinal"]
+    ]
+    assert matching_beats
+    assert all(
+        item["description"] == "雷声切开黑场，旧照片成为所有人的共同证词。"
+        for item in matching_beats
+    )
 
     episode_revision = await client.patch(
         f"/api/v1/scripts/{script['id']}",

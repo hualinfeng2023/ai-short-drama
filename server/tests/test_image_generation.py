@@ -1,26 +1,213 @@
 import asyncio
+import base64
 import json
 from dataclasses import replace
+from datetime import UTC, datetime
+from io import BytesIO
+from uuid import uuid4
 
 import httpx
 import pytest
 from httpx import AsyncClient
+from PIL import Image
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.db.models import Asset, AuditLog, GenerationRecord, Job, Take
+from app.db.models import (
+    Asset,
+    AuditLog,
+    EpisodeOutlineVersion,
+    GenerationRecord,
+    Job,
+    Project,
+    ScriptVersion,
+    StoryBibleVersion,
+    StoryVersion,
+    Take,
+)
 from app.db.session import get_engine
 from app.jobs.contracts import JobExecutionContext, JobExecutionError
 from app.jobs.handlers.production import _generate_character_image
 from app.jobs.worker import PersistentJobWorker
 from app.seed import PROJECT_ID, SHOT_IDS
-from app.services.character_image_qc import evaluate_character_image_quality
+from app.services.character_image_qc import (
+    CharacterImageCheck,
+    CharacterImageQualityReport,
+    apply_character_image_quality_policy,
+    evaluate_character_image_quality,
+)
 from app.services.character_visuals import CHARACTER_CLEAN_FRAME_CONSTRAINT
 from app.services.identity_consistency import evaluate_identity_consistency
 from app.services.image_provider import GeneratedImage, generate_image
+from app.services.project_thumbnails import enqueue_project_thumbnail
 
 pytestmark = pytest.mark.anyio
+
+
+async def test_project_thumbnail_job_persists_a_720p_cover(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    buffer = BytesIO()
+    Image.new("RGB", (1280, 720), (44, 67, 96)).save(buffer, format="PNG")
+
+    async def fake_generate(
+        _settings,
+        prompt: str,
+        *,
+        model: str | None = None,  # noqa: ANN001
+        size: str = "2K",
+        reference_images: list[str] | None = None,
+        seed: int | None = None,
+    ) -> GeneratedImage:
+        assert "电影感项目封面" in prompt
+        assert size == "1K"
+        assert reference_images == []
+        assert isinstance(seed, int)
+        return GeneratedImage(
+            content=buffer.getvalue(),
+            mime="image/png",
+            width=1280,
+            height=720,
+            model=model or "doubao-seedream-5-0-260128",
+            request_id="thumbnail-request",
+        )
+
+    monkeypatch.setattr("app.jobs.worker.generate_image", fake_generate)
+    with Session(get_engine(get_settings().database_url)) as session:
+        project = session.get(Project, PROJECT_ID)
+        assert project is not None
+        now = datetime.now(UTC)
+        story = StoryVersion(
+            id=str(uuid4()),
+            project_id=PROJECT_ID,
+            version=1,
+            proposal_version=1,
+            source_proposal_ids_json="[]",
+            parent_version_id=None,
+            schema_version="story-dna-v1",
+            provider="test",
+            model="test",
+            config_version="test",
+            title="缩略图测试故事",
+            logline="为剧本生成一张项目封面。",
+            payload_json="{}",
+            content_hash="thumbnail-test-story",
+            status="APPROVED",
+            approved_at=now,
+            approved_by="test",
+            created_at=now,
+        )
+        session.add(story)
+        session.flush()
+        bible = StoryBibleVersion(
+            id=str(uuid4()),
+            project_id=PROJECT_ID,
+            story_version_id=story.id,
+            version=1,
+            status="APPROVED",
+            payload_json="{}",
+            critic_json="{}",
+            content_hash="thumbnail-test-bible",
+            parent_version_id=None,
+            schema_version="story-bible-v1",
+            provider="test",
+            model="test",
+            config_version="test",
+            approved_at=now,
+            approved_by="test",
+            created_at=now,
+        )
+        session.add(bible)
+        session.flush()
+        outline = EpisodeOutlineVersion(
+            id=str(uuid4()),
+            project_id=PROJECT_ID,
+            story_bible_version_id=bible.id,
+            relationship_graph_version_id=None,
+            episode_ordinal=1,
+            version=1,
+            status="APPROVED",
+            payload_json="{}",
+            critic_json="{}",
+            content_hash="thumbnail-test-outline",
+            parent_version_id=None,
+            schema_version="episode-outline-v1",
+            provider="test",
+            model="test",
+            config_version="test",
+            approved_at=now,
+            approved_by="test",
+            created_at=now,
+        )
+        session.add(outline)
+        session.flush()
+        script = ScriptVersion(
+            id=str(uuid4()),
+            project_id=PROJECT_ID,
+            outline_version_id=outline.id,
+            relationship_graph_version_id=None,
+            episode_ordinal=1,
+            version=1,
+            status="READY_FOR_REVIEW",
+            payload_json=json.dumps(
+                {
+                    "scenes": [
+                        {
+                            "heading": "废弃产房",
+                            "purpose": "最后一个胚胎即将被销毁",
+                            "emotion": "紧张",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            critic_json="{}",
+            content_hash="thumbnail-test-script",
+            parent_version_id=None,
+            schema_version="script-v1",
+            canonical_language="zh-CN",
+            provider="test",
+            model="test",
+            config_version="test",
+            estimated_duration_ms=60_000,
+            approved_at=None,
+            approved_by=None,
+            created_at=now,
+        )
+        session.add(script)
+        session.flush()
+        job, replayed = enqueue_project_thumbnail(
+            session,
+            project=project,
+            script=script,
+            trace_id="thumbnail-test",
+        )
+        session.commit()
+        job_id = job.id
+        assert replayed is False
+
+    worker = PersistentJobWorker(get_settings())
+    assert await worker.run_once() is True
+
+    with Session(get_engine(get_settings().database_url)) as session:
+        project = session.get(Project, PROJECT_ID)
+        job = session.get(Job, job_id)
+        assert project is not None and project.thumbnail_asset_id is not None
+        assert job is not None and job.status == "SUCCEEDED"
+        asset = session.get(Asset, project.thumbnail_asset_id)
+        assert asset is not None
+        assert (asset.kind, asset.width, asset.height) == ("PROJECT_THUMBNAIL", 720, 1280)
+        thumbnail_url = f"/api/v1/assets/{asset.id}/content"
+
+    response = await client.get("/api/v1/projects")
+    assert response.status_code == 200
+    summary = next(item for item in response.json()["data"] if item["id"] == PROJECT_ID)
+    assert summary["thumbnail_url"] == thumbnail_url
+    image_response = await client.get(thumbnail_url)
+    with Image.open(BytesIO(image_response.content)) as thumbnail:
+        assert thumbnail.size == (720, 1280)
 
 
 @pytest.mark.parametrize(
@@ -636,6 +823,8 @@ async def test_character_generation_qc_records_four_independent_visual_checks() 
         assert payload["model"] == "doubao-seed-2-0-lite-260215"
         content = payload["input"][0]["content"]
         assert [item["type"] for item in content] == ["input_text", "input_image"]
+        assert "不得仅因腿脚未露出" in content[0]["text"]
+        assert "肢体从襁褓外异常突出、重复、融合、断裂" in content[0]["text"]
         return httpx.Response(
             200,
             json={
@@ -692,6 +881,7 @@ async def test_character_generation_qc_records_four_independent_visual_checks() 
             model="seedream-test",
             request_id=None,
         ),
+        quality_context="INFANT_FULL_BODY",
         transport=httpx.MockTransport(handler),
     )
 
@@ -708,6 +898,76 @@ async def test_character_generation_qc_records_four_independent_visual_checks() 
         "PASSED",
         "FAILED",
     ]
+
+
+def test_character_quality_policy_allows_subtle_contact_shadow() -> None:
+    report = apply_character_image_quality_policy(
+        CharacterImageQualityReport(
+            status="FAILED",
+            provider="volcengine-ark",
+            model="test-model",
+            checks=(
+                CharacterImageCheck(
+                    "PURE_WHITE_BACKGROUND",
+                    "FAILED",
+                    0.9,
+                    "人物脚下存在鞋子投射的阴影，背景并非完全均匀的纯白背景",
+                ),
+            ),
+        )
+    )
+
+    assert report.status == "PASSED"
+    assert report.checks[0].status == "PASSED"
+    assert "自然接触阴影" in report.checks[0].message
+
+
+def test_character_quality_policy_still_rejects_large_background_shadow() -> None:
+    report = apply_character_image_quality_policy(
+        CharacterImageQualityReport(
+            status="FAILED",
+            provider="volcengine-ark",
+            model="test-model",
+            checks=(
+                CharacterImageCheck(
+                    "PURE_WHITE_BACKGROUND",
+                    "FAILED",
+                    0.95,
+                    "人物脚部下方存在大面积明显阴影，并延伸为灰色渐变",
+                ),
+            ),
+        )
+    )
+
+    assert report.status == "FAILED"
+    assert report.checks[0].status == "FAILED"
+
+
+async def test_character_generation_qc_blocks_near_duplicate_family_reference() -> None:
+    buffer = BytesIO()
+    Image.new("RGB", (128, 128), (210, 180, 160)).save(buffer, format="PNG")
+    content = buffer.getvalue()
+    reference = f"data:image/png;base64,{base64.b64encode(content).decode()}"
+
+    result = await evaluate_character_image_quality(
+        replace(get_settings(), ark_api_key=""),
+        GeneratedImage(
+            content=content,
+            mime="image/png",
+            width=128,
+            height=128,
+            model="seedream-test",
+            request_id=None,
+        ),
+        distinct_identity_reference_images=[reference],
+    )
+
+    assert result.status == "FAILED"
+    distinct_identity = next(
+        item for item in result.checks if item.check_type == "DISTINCT_IDENTITY"
+    )
+    assert distinct_identity.status == "FAILED"
+    assert distinct_identity.score == 1.0
 
 
 async def test_shot_generation_job_persists_and_applies_take(

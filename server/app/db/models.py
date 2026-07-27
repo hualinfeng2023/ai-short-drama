@@ -36,6 +36,7 @@ class Project(Base):
     export_ready: Mapped[bool] = mapped_column(Boolean, default=False)
     current_story_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     current_timeline_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    thumbnail_asset_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
@@ -949,6 +950,30 @@ class ShotSpec(Base):
     status: Mapped[str] = mapped_column(String(32), index=True)
 
 
+class ShotSpecRevision(Base):
+    __tablename__ = "shot_spec_revisions"
+    __table_args__ = (UniqueConstraint("shot_spec_id", "version"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    shot_id: Mapped[str] = mapped_column(ForeignKey("shots.id"), index=True)
+    shot_spec_id: Mapped[str] = mapped_column(ForeignKey("shot_specs.id"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    parent_revision_id: Mapped[str | None] = mapped_column(
+        ForeignKey("shot_spec_revisions.id"), nullable=True
+    )
+    source_storyboard_version_id: Mapped[str] = mapped_column(String(36))
+    source_script_scene_id: Mapped[str] = mapped_column(String(36))
+    source_script_line_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    snapshot_json: Mapped[str] = mapped_column(Text)
+    change_json: Mapped[str] = mapped_column(Text, default="{}")
+    change_reason: Mapped[str] = mapped_column(Text)
+    actor: Mapped[str] = mapped_column(String(80))
+    content_hash: Mapped[str] = mapped_column(String(64))
+    trace_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class CharacterCandidate(Base):
     __tablename__ = "character_candidates"
     __table_args__ = (UniqueConstraint("character_id", "ordinal"),)
@@ -1026,6 +1051,10 @@ class GenerationRecord(Base):
     prompt_hash: Mapped[str] = mapped_column(String(64))
     seed: Mapped[str | None] = mapped_column(String(80), nullable=True)
     reference_asset_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    input_snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+    parameters_json: Mapped[str] = mapped_column(Text, default="{}")
+    rules_json: Mapped[str] = mapped_column(Text, default="{}")
+    director_intent_json: Mapped[str] = mapped_column(Text, default="{}")
     provider_request_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
     provider_task_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
     status: Mapped[str] = mapped_column(String(32), index=True)
@@ -1063,11 +1092,14 @@ class ReviewRecord(Base):
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
     entity_type: Mapped[str] = mapped_column(String(48), index=True)
     entity_id: Mapped[str] = mapped_column(String(36), index=True)
+    entity_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     gate_key: Mapped[str] = mapped_column(String(40), index=True)
     risk_level: Mapped[str] = mapped_column(String(24), default="LOW")
     status: Mapped[str] = mapped_column(String(32), index=True)
     decision: Mapped[str | None] = mapped_column(String(40), nullable=True)
     issues_json: Mapped[str] = mapped_column(Text, default="[]")
+    rules_json: Mapped[str] = mapped_column(Text, default="{}")
+    director_intent_json: Mapped[str] = mapped_column(Text, default="{}")
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     actor: Mapped[str | None] = mapped_column(String(80), nullable=True)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -1300,6 +1332,41 @@ class DependencyEdge(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class LineageEdge(Base):
+    __tablename__ = "lineage_edges"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "source_type",
+            "source_id",
+            "source_version_key",
+            "target_type",
+            "target_id",
+            "target_version_key",
+            "relation",
+            name="uq_lineage_edges_object_lineage",
+        ),
+        Index("ix_lineage_edges_project_source", "project_id", "source_type", "source_id"),
+        Index("ix_lineage_edges_project_target", "project_id", "target_type", "target_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"))
+    source_type: Mapped[str] = mapped_column(String(48))
+    source_id: Mapped[str] = mapped_column(String(36))
+    source_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    source_version_key: Mapped[str] = mapped_column(String(36), default="")
+    target_type: Mapped[str] = mapped_column(String(48))
+    target_id: Mapped[str] = mapped_column(String(36))
+    target_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    target_version_key: Mapped[str] = mapped_column(String(36), default="")
+    relation: Mapped[str] = mapped_column(String(64))
+    evidence: Mapped[str] = mapped_column(Text)
+    inferred: Mapped[bool] = mapped_column(Boolean, default=False)
+    trace_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class ChangeSet(Base):
     __tablename__ = "change_sets"
 
@@ -1418,7 +1485,14 @@ class AuditLog(Base):
     action: Mapped[str] = mapped_column(String(100), index=True)
     entity_type: Mapped[str] = mapped_column(String(48))
     entity_id: Mapped[str] = mapped_column(String(36))
+    target_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    actor_type: Mapped[str] = mapped_column(String(24), default="USER")
     before_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     after_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    command_payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    result_snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+    rules_json: Mapped[str] = mapped_column(Text, default="{}")
+    director_intent_json: Mapped[str] = mapped_column(Text, default="{}")
+    rejection_reasons_json: Mapped[str] = mapped_column(Text, default="[]")
     trace_id: Mapped[str] = mapped_column(String(36))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

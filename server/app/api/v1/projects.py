@@ -13,6 +13,8 @@ from app.schemas import (
     BriefAvoidancesSuggestionRequest,
     BriefBlockingQuestionsSuggestionRead,
     BriefBlockingQuestionsSuggestionRequest,
+    BriefEmotionalRewardSuggestionRead,
+    BriefEmotionalRewardSuggestionRequest,
     BriefRequirementsSuggestionRead,
     BriefRequirementsSuggestionRequest,
     BriefStoryRewriteRead,
@@ -39,6 +41,7 @@ from app.services.domain_commands import (
     dispatch_project_create_command,
     dispatch_project_delete_command,
 )
+from app.services.emotional_reward_suggestion import suggest_emotional_reward
 from app.services.project_naming import ProjectNamingError, suggest_project_name
 from app.services.project_readiness import get_project_readiness
 from app.services.projects import (
@@ -51,6 +54,7 @@ from app.services.workspace import (
     get_workspace,
     list_projects,
     project_or_404,
+    project_to_read,
     scene_or_404,
     shot_or_404,
     shot_to_read,
@@ -138,6 +142,19 @@ async def brief_requirement_suggestion(
     return success(result)
 
 
+@router.post("/projects/{project_id}/brief-emotional-reward-suggestions")
+async def brief_emotional_reward_suggestion(
+    project_id: str,
+    payload: BriefEmotionalRewardSuggestionRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    project_or_404(session, project_id)
+    result: BriefEmotionalRewardSuggestionRead = await suggest_emotional_reward(
+        payload.model_dump(mode="json")
+    )
+    return success(result)
+
+
 @router.post("/projects/{project_id}/brief-avoidance-suggestions")
 async def brief_avoidance_suggestion(
     project_id: str,
@@ -188,7 +205,7 @@ async def story_rewrite(
 
 @router.get("/projects/{project_id}")
 def project(project_id: str, session: Session = Depends(get_session)) -> dict[str, object]:
-    return success(ProjectRead.model_validate(project_or_404(session, project_id)))
+    return success(project_to_read(project_or_404(session, project_id)))
 
 
 @router.delete("/projects/{project_id}")

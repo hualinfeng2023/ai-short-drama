@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
 
+import truststore
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -34,6 +35,8 @@ from app.api.v1.takes import router as takes_router
 from app.api.v1.timelines import router as timelines_router
 from app.config import get_settings
 from app.jobs.worker import PersistentJobWorker
+
+truststore.inject_into_ssl()
 
 
 @asynccontextmanager

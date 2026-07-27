@@ -1281,7 +1281,27 @@ def revise_script(
         if scope == "SCENE" and source_scene.id == entity_id:
             target_found = True
             for key, value in changes.items():
+                if key == "beat_description":
+                    continue
                 scene_payload[key] = value
+            beat_description = changes.get("beat_description")
+            if beat_description is not None:
+                engine = payload.get("short_drama_engine")
+                beats = engine.get("beats") if isinstance(engine, dict) else None
+                matching_beats = [
+                    beat for beat in beats or []
+                    if isinstance(beat, dict) and beat.get("scene_ordinal") == source_scene.ordinal
+                ]
+                if not matching_beats:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "code": "SCRIPT_BEAT_LINEAGE_MISSING",
+                            "message": "当前场次没有可编辑的叙事节拍，请先刷新画布。",
+                        },
+                    )
+                for beat in matching_beats:
+                    beat["description"] = str(beat_description)
         source_lines = list(
             session.scalars(
                 select(ScriptLine)

@@ -82,6 +82,7 @@ interface ApiProject {
   timeline_version: number
   preview_approved: boolean
   export_ready: boolean
+  thumbnail_url?: string | null
   created_at: string
   updated_at: string
 }
@@ -109,8 +110,11 @@ interface ApiCanvasProjection {
     canonical_status: string
     approval_status: string
     label: string
+    content_summary: string | null
     group_key: string
     detail_route: string
+    thumbnail_url: string | null
+    operation_context?: Record<string, unknown>
     read_only: boolean
   }>
   edges: Array<{
@@ -144,8 +148,11 @@ export interface CanvasProjection {
     canonicalStatus: string
     approvalStatus: string
     label: string
+    contentSummary: string | null
     groupKey: string
     detailRoute: string
+    thumbnailUrl: string | null
+    operationContext: Record<string, unknown>
     readOnly: true
   }>
   edges: Array<{
@@ -633,6 +640,12 @@ export interface CharacterVisualRecord {
     seed: string
     status: string
     reviewStatus: string
+    qualityIssues: Array<{
+      type: string
+      status: string
+      score?: number
+      message: string
+    }>
     selected: boolean
     deletable: boolean
     deleteBlockReason?: string
@@ -658,6 +671,12 @@ export interface CharacterVisualRecord {
       assetId: string
       assetUrl: string
       status: string
+      qualityIssues: Array<{
+        type: string
+        status: string
+        score?: number
+        message: string
+      }>
     }>
     viewJobs: Array<{
       id: string
@@ -931,6 +950,19 @@ export interface BriefRequirementsSuggestion {
   warning?: string
 }
 
+export interface BriefEmotionalRewardSuggestionInput {
+  idea: string
+  genre: string
+}
+
+export interface BriefEmotionalRewardSuggestion {
+  reward: EmotionalReward
+  rationale: string
+  provider: string
+  model: string
+  warning?: string
+}
+
 export interface BriefAvoidancesSuggestionInput {
   idea: string
   genre: string
@@ -1142,6 +1174,7 @@ function mapProject(project: ApiProject): ProjectRecord {
     timelineVersion: project.timeline_version,
     previewApproved: project.preview_approved,
     exportReady: project.export_ready,
+    thumbnailUrl: project.thumbnail_url ?? null,
     createdAt: project.created_at,
     updatedAt: project.updated_at,
   }
@@ -1657,8 +1690,11 @@ export async function fetchCanvasProjection(
       canonicalStatus: node.canonical_status,
       approvalStatus: node.approval_status,
       label: node.label,
+      contentSummary: node.content_summary,
       groupKey: node.group_key,
       detailRoute: node.detail_route,
+      thumbnailUrl: node.thumbnail_url,
+      operationContext: node.operation_context ?? {},
       readOnly: true,
     })),
     edges: projection.edges.map((edge) => ({
@@ -1819,6 +1855,30 @@ export async function suggestBriefRequirements(
   })
   return {
     items: result.items,
+    provider: result.provider,
+    model: result.model,
+    warning: result.warning ?? undefined,
+  }
+}
+
+export async function suggestBriefEmotionalReward(
+  projectId: string,
+  input: BriefEmotionalRewardSuggestionInput,
+): Promise<BriefEmotionalRewardSuggestion> {
+  const result = await requestJson<{
+    reward: EmotionalReward
+    rationale: string
+    provider: string
+    model: string
+    warning: string | null
+  }>(`/api/v1/projects/${projectId}/brief-emotional-reward-suggestions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  return {
+    reward: result.reward,
+    rationale: result.rationale,
     provider: result.provider,
     model: result.model,
     warning: result.warning ?? undefined,
@@ -3814,6 +3874,46 @@ export async function approveScriptVersion(
   return mapJob(result.job)
 }
 
+export async function updateScriptScene(
+  scriptId: string,
+  sceneId: string,
+  input: {
+    expectedVersion: number
+    beatDescription?: string
+    purpose?: string
+    emotion?: string
+    bgmIntent?: string
+    sfxIntents?: string[]
+  },
+): Promise<{ id: string; version: number; status: string; projectLockVersion: number }> {
+  const result = await requestJson<{
+    id: string
+    version: number
+    status: string
+    project_lock_version: number
+  }>(`/api/v1/scripts/${scriptId}/scenes/${sceneId}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': crypto.randomUUID(),
+    },
+    body: JSON.stringify({
+      expected_version: input.expectedVersion,
+      beat_description: input.beatDescription,
+      purpose: input.purpose,
+      emotion: input.emotion,
+      bgm_intent: input.bgmIntent,
+      sfx_intents: input.sfxIntents,
+    }),
+  })
+  return {
+    id: result.id,
+    version: result.version,
+    status: result.status,
+    projectLockVersion: result.project_lock_version,
+  }
+}
+
 export async function approveDirectorProposal(
   projectId: string,
   proposalVersion: number,
@@ -4015,6 +4115,14 @@ export async function fetchCharacterVisuals(
           seed: String(item.seed),
           status: String(item.status),
           reviewStatus: String(item.review_status),
+          qualityIssues: (
+            (item.quality_issues ?? []) as Array<Record<string, unknown>>
+          ).map((issue) => ({
+            type: String(issue.type ?? 'UNKNOWN'),
+            status: String(issue.status ?? 'FAILED'),
+            ...(typeof issue.score === 'number' ? { score: issue.score } : {}),
+            message: String(issue.message ?? '该项质量检查未通过'),
+          })),
           selected: Boolean(item.selected),
           deletable: Boolean(item.deletable),
           ...(item.delete_block_reason == null
@@ -4050,6 +4158,14 @@ export async function fetchCharacterVisuals(
             assetId: String(asset.asset_id),
             assetUrl: String(asset.asset_url),
             status: String(asset.status),
+            qualityIssues: (
+              (asset.quality_issues ?? []) as Array<Record<string, unknown>>
+            ).map((issue) => ({
+              type: String(issue.type ?? 'UNKNOWN'),
+              status: String(issue.status ?? 'FAILED'),
+              ...(typeof issue.score === 'number' ? { score: issue.score } : {}),
+              message: String(issue.message ?? '该项质量检查未通过'),
+            })),
           })),
           viewJobs: ((item.view_jobs ?? []) as Array<Record<string, unknown>>).map((job) => ({
             id: String(job.id),

@@ -30,6 +30,10 @@ async def test_generation_record_is_idempotent_and_carries_job_trace(
             input_payload={
                 "prompt": "生成测试画面",
                 "command_id": "test-command-id",
+                "model": "deterministic-image-v1",
+                "resolution": "2K",
+                "quality_context": "CHARACTER_IDENTITY",
+                "refinement_note": "保持角色身份，只调整服装",
             },
             label="生成记录测试",
             stage="等待测试",
@@ -91,3 +95,14 @@ async def test_generation_record_is_idempotent_and_carries_job_trace(
         }
         assert first.status == "SUCCEEDED"
         assert first.completed_at is not None
+        assert json.loads(first.input_snapshot_json)["command_id"] == "test-command-id"
+        assert json.loads(first.parameters_json) == {
+            "model": "deterministic-image-v1",
+            "resolution": "2K",
+        }
+        assert json.loads(first.rules_json) == {
+            "quality_context": "CHARACTER_IDENTITY",
+        }
+        assert json.loads(first.director_intent_json) == {
+            "refinement_note": "保持角色身份，只调整服装",
+        }

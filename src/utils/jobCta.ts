@@ -97,7 +97,7 @@ export function getCompletedJobCta(
     case 'GENERATE_STORY_STRUCTURE':
       return { href: `/projects/${projectId}/story`, label: '查看' }
     case 'GENERATE_SCRIPT_PACKAGE':
-      return { href: `/projects/${projectId}/story`, label: '查看分集大纲与剧本' }
+      return { href: `/projects/${projectId}/story`, label: '查看' }
     case 'GENERATE_CHARACTER_CANDIDATES':
     case 'GENERATE_CHARACTER_CANDIDATE':
     case 'GENERATE_CHARACTER_LOOKS':
