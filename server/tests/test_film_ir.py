@@ -18,9 +18,46 @@ from app.db.models import (
     StoryVersion,
 )
 from app.db.session import get_engine
+from app.domain.film_ir import FilmIRObject, FilmIRProjection, FilmIRSource
 from app.seed import PROJECT_ID
+from app.services.canvas_projection import get_canvas_projection
 
 pytestmark = pytest.mark.anyio
+
+
+async def test_canvas_projection_exposes_dialogue_speaker_key() -> None:
+    projection = get_canvas_projection(
+        FilmIRProjection(
+            project_id=PROJECT_ID,
+            project_lock_version=1,
+            objects=[
+                FilmIRObject(
+                    type="DialogueLine",
+                    id="line-1",
+                    version_id="line-version-1",
+                    canonical_kind="CANONICAL",
+                    canonical_status="PENDING_REVIEW",
+                    approval_status="DRAFT",
+                    source=FilmIRSource(
+                        table="script_lines",
+                        row_id="line-version-1",
+                        id_strategy="VERSION_SCOPED_DERIVED",
+                    ),
+                    attributes={
+                        "line_type": "DIALOGUE",
+                        "speaker_key": "wife",
+                        "text": "等明天。",
+                    },
+                ),
+            ],
+            edges=[],
+        ),
+    )
+
+    assert projection.nodes[0].operation_context == {
+        "line_type": "DIALOGUE",
+        "speaker_key": "wife",
+    }
 
 
 async def test_film_ir_is_read_only_projection_of_existing_rows(
@@ -198,6 +235,14 @@ async def test_film_ir_links_a_character_to_a_beat_that_explicitly_mentions_them
     )
     assert script_node["label"] == "角色节拍联动剧本"
     assert script_node["content_summary"] == "角色必须在关键事件中推动冲突并作出选择。"
+
+    beat_node = next(
+        node
+        for node in canvas_response.json()["data"]["nodes"]
+        if node["ref"]["type"] == "Beat"
+    )
+    assert 0 < len(beat_node["label"]) <= 18
+    assert beat_node["content_summary"] == f"{character.name} 在此节拍中推进冲突"
 
 
 async def test_film_ir_unknown_project_is_not_found(client: AsyncClient) -> None:

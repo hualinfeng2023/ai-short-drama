@@ -2,7 +2,9 @@
 
 ## 结论
 
-当前系统有可用的 Director 审查基础，但没有完整的导演意图编译器。
+当前系统已经具备 DirectorIntent v1 的可确认编译链路。它复用现有
+Director Proposal / ChangeSet，不新增事实源；当前只把时间线继承做成了可验证
+回执，分镜、提示词和音频仍明确标记为 `NOT_INTEGRATED`。
 
 | 能力 | 当前状态 | 代码证据 |
 | --- | --- | --- |
@@ -11,14 +13,15 @@
 | 人工确认后执行，支持批准、拒绝、回滚 | 已实现 | `server/app/api/v1/director.py` |
 | 影响分析、`ChangeSet`、版本比较 | 已实现 | `server/app/services/domain_commands.py` |
 | 正式时间线只读预览 | 部分实现 | `_director_timeline_preview` 目前只覆盖对白、字幕和时长投影 |
-| 解析“这里”对应的情节点、人物目标和时间范围 | 缺失 | 当前 `_scene_context` 只有场景与台词上下文 |
-| 统一叙事、摄影、表演、声音、节奏意图 | 缺失 | 当前补丁白名单只覆盖 Scene / Line 字段 |
-| 分镜、提示词、音频、时间线继承同一意图版本 | 缺失 | 当前无 `intent_id` / `intent_version` / 消费回执 |
-| 电影术语的情境证据与冲突门禁 | 缺失 | 当前只有目标 ID 与字段白名单校验 |
+| 解析“这里”对应的情节点、人物目标和时间范围 | 已实现 | `server/app/services/director_intent.py` 的 context resolver |
+| 统一叙事、摄影、表演、声音、节奏意图 | 已实现 | `DirectorIntentCompilationOutput` 与五通道 preview |
+| 时间线继承同一意图版本 | 已实现 | 确认后写入 `TIMELINE / INHERITED` 消费回执 |
+| 分镜、提示词、音频继承同一意图版本 | 待接入 | 当前回执为 `NOT_INTEGRATED`，不伪报已生效 |
+| 电影术语的情境证据与冲突门禁 | 已实现 | evidence refs、置信度、blocking conflict 与 fail-closed |
+| 用户可见修改预览与确认 | 已实现 | `DirectorReviewCard` 的五通道、冲突和继承状态面板 |
 
-因此，`DirectorIntent` 应当建立在现有 canonical state、`ChangeSet` 和 Film IR
-之上，作为版本化的意图附着与变更预览；它不能成为新的 Story / Scene / Shot
-事实源。
+`DirectorIntent` 已建立在现有 canonical state、`ChangeSet` 和 Film IR 之上，
+作为版本化的意图附着与变更预览；它不是新的 Story / Scene / Shot 事实源。
 
 ## 首版承重原则
 
@@ -90,3 +93,15 @@
 - 不让模型仅靠术语风格判断可信度。
 - 不把摄影或声音意图偷偷塞入现有 Scene / Line 文本补丁。
 - 不因定义契约而触发图片、视频、配音或音乐生成。
+
+## 当前实现边界
+
+- `CharacterGoal` 由 canonical ScriptVersion payload 持有并投影进 Film IR；
+  缺少明确人物目标时，意图预览会阻断确认，不让模型补猜。
+- 确认令牌绑定 `intent_id`、`intent_version`、预览内容与
+  `context_fingerprint`；执行前重新解析上下文，上游变化会返回
+  `DIRECTOR_INTENT_STALE_CONTEXT`。
+- 意图编译成功与失败分别记录为 `DIRECTOR_INTENT_COMPILATION`；
+  provider 合同失败不会创建 ChangeSet。
+- 当前“继承”只对脚本执行产生的时间线只读投影提供真实回执。分镜、提示词、
+  音频消费者尚未接入，因此必须保持 `NOT_INTEGRATED`。

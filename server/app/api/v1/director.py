@@ -20,8 +20,8 @@ from app.domain.director import (
 )
 from app.services.director_proposals import (
     director_proposal_or_404,
-    list_director_generation_history,
     list_director_generation_failures,
+    list_director_generation_history,
     list_director_proposals,
     prepare_director_proposal,
     record_director_generation_failure,
@@ -453,6 +453,7 @@ def execute_director_proposal(
             payload={
                 "option_id": payload.option_id,
                 "confirmed": payload.confirmed,
+                "intent_confirmation_token": payload.intent_confirmation_token,
             },
             idempotency_key=idempotency_key,
         ),

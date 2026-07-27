@@ -460,6 +460,9 @@ describe('director review proposal client', () => {
       targetType: 'SCENE',
       targetId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
       issueTypes: ['STORY_LOGIC'],
+      instruction: '这里更紧张',
+      compileIntent: true,
+      intentSelection: { startMs: 2500, endMs: 5000 },
     })
 
     const request = fetchMock.mock.calls[0]![1] as RequestInit
@@ -468,6 +471,9 @@ describe('director review proposal client', () => {
       target_type: 'SCENE',
       target_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
       issue_types: ['STORY_LOGIC'],
+      instruction: '这里更紧张',
+      compile_intent: true,
+      intent_selection: { start_ms: 2500, end_ms: 5000 },
     })
     expect(request.headers).toMatchObject({ 'Idempotency-Key': expect.any(String) })
   })
@@ -572,6 +578,65 @@ describe('director review proposal client', () => {
           risk: 'DURATION_BUDGET_EXCEEDED',
           override_reason: '对白略超预算，但已确认下一场可以顺延。',
         },
+        director_intent_preview: {
+          schema_version: 'director-intent-change-preview-v1',
+          projection_mode: 'READ_ONLY',
+          canonical_source: 'FILM_IR',
+          intent: {
+            intent_id: 'intent-1',
+            intent_version: 1,
+            source_request: '这里更紧张',
+            scope: {
+              resolution_status: 'RESOLVED',
+              scene: {
+                type: 'ScriptScene',
+                id: '55555555-5555-4555-8555-555555555555',
+                version_id: '66666666-6666-4666-8666-666666666666',
+              },
+              plot_beat: { type: 'Beat', id: 'beat-1', version_id: 'beat-1:v1' },
+              character_goals: [{
+                type: 'CharacterGoal',
+                id: 'goal-1',
+                version_id: 'goal-1:v1',
+              }],
+              time_range: { start_ms: 2500, end_ms: 5000 },
+              resolution_reason: '命中当前场景的冲突情节点。',
+              context_fingerprint: 'a'.repeat(64),
+            },
+            evidence: [{ evidence_id: 'beat-1', claim: '冲突开始升级', confidence: 0.9 }],
+            rationale: '将压力更早显性化。',
+            overall_confidence: 0.86,
+            conflict_checks: [{
+              code: 'WORLD_RULE_PRESERVED',
+              category: 'WORLD_RULE',
+              severity: 'BLOCKING',
+              status: 'PASS',
+              message: '未改变世界规则。',
+            }],
+            state: 'PREVIEW_READY',
+            can_confirm: true,
+            blocked_reasons: [],
+          },
+          sections: [{
+            channel: 'PACING',
+            before: '镜头 4 秒',
+            after: '镜头压缩至 2.5 秒',
+            why: '缩短安全感建立时间。',
+            confidence: 0.88,
+            evidence_refs: ['beat-1'],
+          }],
+          preserved_invariants: ['角色身份不变'],
+          downstream_summary: ['确认后由时间线继承。'],
+        },
+        director_intent_confirmation_token: 'b'.repeat(64),
+        director_intent_inheritance: [{
+          consumer: 'TIMELINE',
+          status: 'INHERITED',
+          intent_version: 1,
+          source_fingerprint: 'a'.repeat(64),
+          applied_range: { start_ms: 2500, end_ms: 5000 },
+          output_version: 'timeline-v2',
+        }],
         created_at: '2026-07-25T00:00:00Z',
       }],
       trace_id: 'trace-director-review',
@@ -621,6 +686,32 @@ describe('director review proposal client', () => {
       risk: 'DURATION_BUDGET_EXCEEDED',
       overrideReason: '对白略超预算，但已确认下一场可以顺延。',
     })
+    expect(proposal.directorIntentPreview).toMatchObject({
+      canonicalSource: 'FILM_IR',
+      intent: {
+        intentId: 'intent-1',
+        sourceRequest: '这里更紧张',
+        scope: {
+          resolutionStatus: 'RESOLVED',
+          timeRange: { startMs: 2500, endMs: 5000 },
+        },
+        canConfirm: true,
+      },
+      sections: [{
+        channel: 'PACING',
+        after: '镜头压缩至 2.5 秒',
+        evidenceRefs: ['beat-1'],
+      }],
+    })
+    expect(proposal.directorIntentConfirmationToken).toBe('b'.repeat(64))
+    expect(proposal.directorIntentInheritance).toEqual([{
+      consumer: 'TIMELINE',
+      status: 'INHERITED',
+      intentVersion: 1,
+      sourceFingerprint: 'a'.repeat(64),
+      appliedRange: { startMs: 2500, endMs: 5000 },
+      outputVersion: 'timeline-v2',
+    }])
   })
 
   it('sends a trimmed override reason for risk-aware approval', async () => {

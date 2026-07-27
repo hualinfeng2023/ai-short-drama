@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import {
   AlertTriangle,
   Check,
@@ -8,7 +9,11 @@ import {
   WandSparkles,
   X,
 } from 'lucide-react'
-import type { DirectorReviewProposal } from '../../api/client'
+import type {
+  DirectorIntentChangePreview,
+  DirectorIntentInheritanceEvidence,
+  DirectorReviewProposal,
+} from '../../api/client'
 import { Button, StatusBadge } from '../ui'
 import { DirectorTimelinePreview } from './DirectorTimelinePreview'
 
@@ -61,7 +66,7 @@ interface DirectorReviewCardProps {
   error?: string
   selectedOptionId?: string
   targetLabel?: string
-  onReview: () => void
+  onReview: (instruction?: string) => void
   onSelectOption: (proposalId: string, optionId: string) => void
   onAction: (action: DirectorReviewAction) => void
 }
@@ -83,6 +88,137 @@ const DIRECTOR_FIELD_LABELS: Record<string, string> = {
   sfx_intents: '音效意图',
 }
 
+const DIRECTOR_INTENT_CHANNEL_LABELS: Record<
+  DirectorIntentChangePreview['sections'][number]['channel'],
+  string
+> = {
+  NARRATIVE: '叙事',
+  CAMERA: '摄影',
+  PERFORMANCE: '表演',
+  SOUND: '声音',
+  PACING: '节奏',
+}
+
+const DIRECTOR_INTENT_CONSUMER_LABELS: Record<
+  DirectorIntentInheritanceEvidence['consumer'],
+  string
+> = {
+  STORYBOARD: '分镜',
+  PROMPT: '提示词',
+  AUDIO: '音频',
+  TIMELINE: '时间线',
+}
+
+function formatIntentTime(milliseconds: number): string {
+  const seconds = milliseconds / 1000
+  return `${seconds.toFixed(Number.isInteger(seconds) ? 0 : 1)} 秒`
+}
+
+function DirectorIntentPreviewPanel({
+  inheritance = [],
+  preview,
+}: {
+  inheritance?: DirectorIntentInheritanceEvidence[]
+  preview: DirectorIntentChangePreview
+}) {
+  const { intent } = preview
+  const timeRange = intent.scope.timeRange
+  return (
+    <section className={`director-intent-preview director-intent-preview--${intent.state.toLowerCase()}`}>
+      <header>
+        <div>
+          <span>导演意图修改预览</span>
+          <strong>“{intent.sourceRequest}”</strong>
+        </div>
+        <StatusBadge status={intent.canConfirm ? intent.state : 'BLOCKED'} />
+      </header>
+
+      <div className="director-intent-preview__scope">
+        <article>
+          <span>作用范围</span>
+          <strong>
+            {intent.scope.resolutionStatus === 'RESOLVED' ? '已定位当前情境' : '需要补充定位'}
+          </strong>
+          <p>{intent.scope.resolutionReason}</p>
+        </article>
+        <article>
+          <span>时间段</span>
+          <strong>
+            {timeRange
+              ? `${formatIntentTime(timeRange.startMs)}–${formatIntentTime(timeRange.endMs)}`
+              : '尚未解析'}
+          </strong>
+          <p>
+            {intent.scope.characterGoals.length} 项角色目标 ·
+            {intent.scope.plotBeat ? ' 1 个剧情节拍' : ' 情节点未确定'}
+          </p>
+        </article>
+        <article>
+          <span>总体置信度</span>
+          <strong>{Math.round(intent.overallConfidence * 100)}%</strong>
+          <p>{intent.rationale}</p>
+        </article>
+      </div>
+
+      {!intent.canConfirm ? (
+        <div className="director-intent-preview__blocked" role="alert">
+          <AlertTriangle size={16} />
+          <div>
+            <strong>当前预览不能确认</strong>
+            <p>{intent.blockedReasons.join('；')}</p>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="director-intent-preview__channels">
+        {preview.sections.map((section) => (
+          <article key={section.channel}>
+            <header>
+              <strong>{DIRECTOR_INTENT_CHANNEL_LABELS[section.channel]}</strong>
+              <span>{Math.round(section.confidence * 100)}%</span>
+            </header>
+            <dl>
+              <div><dt>当前</dt><dd>{section.before}</dd></div>
+              <div><dt>修改后</dt><dd>{section.after}</dd></div>
+              <div><dt>为什么</dt><dd>{section.why}</dd></div>
+            </dl>
+          </article>
+        ))}
+      </div>
+
+      <div className="director-intent-preview__checks">
+        <strong>冲突检查</strong>
+        <ul>
+          {intent.conflictChecks.map((check) => (
+            <li data-status={check.status} key={check.code}>
+              {check.status === 'PASS' ? <Check size={14} /> : <AlertTriangle size={14} />}
+              <span>{check.message}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      {inheritance.length > 0 ? (
+        <div className="director-intent-preview__inheritance">
+          <strong>下游继承状态</strong>
+          <div>
+            {inheritance.map((item) => (
+              <span data-status={item.status} key={item.consumer}>
+                {DIRECTOR_INTENT_CONSUMER_LABELS[item.consumer]}
+                <small>{item.status === 'INHERITED' ? '已继承' : '尚未接入'}</small>
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <p className="director-intent-preview__downstream">
+          {preview.downstreamSummary.join(' ')}
+        </p>
+      )}
+    </section>
+  )
+}
+
 function directorValues(value: Record<string, unknown>): string {
   return Object.entries(value)
     .map(([key, item]) => {
@@ -102,22 +238,41 @@ export function DirectorReviewCard({
   onSelectOption,
   onAction,
 }: DirectorReviewCardProps) {
+  const [intentInstruction, setIntentInstruction] = useState('')
+
   if (!proposal) {
+    const normalizedInstruction = intentInstruction.trim()
     return (
       <section className="director-review-entry">
         <div>
           <span><WandSparkles size={14} />AI Director</span>
           <strong>审查{targetLabel}的逻辑、动机、对白与节奏</strong>
           <p>先给出导演判断和 2–3 个方案，不会自动修改剧本或触发媒体生成。</p>
+          <label className="director-review-entry__intent">
+            <span>导演意图</span>
+            <textarea
+              maxLength={1000}
+              onChange={(event) => setIntentInstruction(event.target.value)}
+              placeholder="例如：这里更紧张"
+              rows={2}
+              value={intentInstruction}
+            />
+            <small>系统会先定位情节点、角色目标和时间范围，再生成修改预览。</small>
+          </label>
           {error ? (
             <div className="director-review-error director-review-error--inline" role="alert">
               <AlertTriangle size={14} />{error}
             </div>
           ) : null}
         </div>
-        <Button disabled={busy} onClick={onReview} size="sm" variant="secondary">
+        <Button
+          disabled={busy}
+          onClick={() => onReview(normalizedInstruction || undefined)}
+          size="sm"
+          variant="secondary"
+        >
           {busy ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}
-          {busy ? '审查中…' : '开始审查'}
+          {busy ? '编译中…' : normalizedInstruction ? '生成修改预览' : '开始审查'}
         </Button>
       </section>
     )
@@ -163,6 +318,13 @@ export function DirectorReviewCard({
         ) : null}
       </div>
 
+      {proposal.directorIntentPreview ? (
+        <DirectorIntentPreviewPanel
+          inheritance={proposal.directorIntentInheritance}
+          preview={proposal.directorIntentPreview}
+        />
+      ) : null}
+
       {proposal.status === 'PROPOSED' ? (
         <>
           <div className="director-review__options" role="radiogroup" aria-label="Director 修复方案">
@@ -197,7 +359,11 @@ export function DirectorReviewCard({
               <X size={14} />拒绝建议
             </Button>
             <Button
-              disabled={busy || !selectedOption}
+              disabled={
+                busy
+                || !selectedOption
+                || proposal.directorIntentPreview?.intent.canConfirm === false
+              }
               onClick={() => selectedOption && onAction({
                 type: 'EXECUTE',
                 proposal,
@@ -205,7 +371,8 @@ export function DirectorReviewCard({
               })}
               size="sm"
             >
-              <Check size={14} />采用所选方案
+              <Check size={14} />
+              {proposal.directorIntentPreview ? '确认意图并采用方案' : '采用所选方案'}
             </Button>
           </footer>
         </>
@@ -264,7 +431,7 @@ export function DirectorReviewCard({
                 ? '恢复版本已创建，两个版本均可追溯。'
                 : '建议已拒绝，没有修改剧本。'}
           </span>
-          <Button disabled={busy} onClick={onReview} size="sm" variant="ghost">
+          <Button disabled={busy} onClick={() => onReview()} size="sm" variant="ghost">
             <RefreshCw size={14} />重新审查
           </Button>
         </footer>

@@ -389,6 +389,8 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
     beat_scene_links: list[tuple[str, str]] = []
     beat_ids_by_script_scene: dict[str, list[str]] = {}
     beat_summaries: list[tuple[str, str]] = []
+    goal_ids_by_script_scene: dict[str, list[str]] = {}
+    goal_character_links: list[tuple[str, str]] = []
     for script in scripts:
         script_id = script_logical_ids[script.id]
         payload = _json(script.payload_json, {})
@@ -471,6 +473,61 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
                 inferred=False,
                 evidence="script_scenes.script_version_id",
             )
+            scene_payloads = payload.get("scenes")
+            scene_payload = (
+                scene_payloads[script_scene.ordinal - 1]
+                if isinstance(scene_payloads, list)
+                and 0 < script_scene.ordinal <= len(scene_payloads)
+                and isinstance(scene_payloads[script_scene.ordinal - 1], dict)
+                else {}
+            )
+            character_goals = scene_payload.get("character_goals")
+            if isinstance(character_goals, list):
+                for goal_index, goal in enumerate(character_goals):
+                    if not isinstance(goal, dict):
+                        continue
+                    character_key = str(goal.get("character_key") or "").strip()
+                    objective = str(goal.get("objective") or "").strip()
+                    if not character_key or not objective:
+                        continue
+                    goal_id = (
+                        f"character-goal:{script.id}:{script_scene.ordinal}:{character_key}"
+                    )
+                    goal_ids_by_script_scene.setdefault(logical_id, []).append(goal_id)
+                    goal_character_links.append((character_key, goal_id))
+                    graph.add_object(
+                        object_type="CharacterGoal",
+                        object_id=goal_id,
+                        version_id=script.id,
+                        canonical_kind="CANONICAL",
+                        status=script.status,
+                        table=ScriptVersion.__tablename__,
+                        row_id=script.id,
+                        derived_id=True,
+                        attributes={
+                            "character_key": character_key,
+                            "objective": objective,
+                            "obstacle": goal.get("obstacle"),
+                            "stakes": goal.get("stakes"),
+                            "tactic": goal.get("tactic"),
+                            "scene_ordinal": script_scene.ordinal,
+                            "field_path": (
+                                f"scenes[{script_scene.ordinal - 1}]."
+                                f"character_goals[{goal_index}]"
+                            ),
+                        },
+                    )
+                    graph.add_edge(
+                        "ScriptScene",
+                        logical_id,
+                        "CharacterGoal",
+                        goal_id,
+                        "HAS_CHARACTER_GOAL",
+                        inferred=False,
+                        evidence=(
+                            "script_versions.payload_json.scenes[].character_goals"
+                        ),
+                    )
             lines = list(
                 session.scalars(
                     select(ScriptLine)
@@ -534,6 +591,7 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
                 attributes={
                     "episode_ordinal": script.episode_ordinal,
                     "sequence": sequence,
+                    "title": beat.get("title"),
                     "beat_type": beat.get("beat_type"),
                     "at_ms": beat.get("at_ms"),
                     "scene_ordinal": beat.get("scene_ordinal"),
@@ -586,6 +644,19 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
             inferred=True,
             evidence="script payload beat.scene_ordinal matched to script_scenes.ordinal",
         )
+        for goal_id in goal_ids_by_script_scene.get(script_scene_id, []):
+            graph.add_edge(
+                "Beat",
+                beat_id,
+                "CharacterGoal",
+                goal_id,
+                "GOAL_CONTEXT_FOR_BEAT",
+                inferred=True,
+                evidence=(
+                    "beat.scene_ordinal -> ScriptScene -> "
+                    "script payload scene.character_goals"
+                ),
+            )
 
     shots = list(
         session.scalars(
@@ -808,6 +879,32 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
                 # The selected identity version remains authoritative when it exists.
                 "thumbnail_asset_id": candidate.asset_id if candidate else None,
             },
+        )
+    characters_by_key = {item.character_key: item for item in characters}
+    for character_key, goal_id in goal_character_links:
+        character = characters_by_key.get(character_key)
+        if character is None:
+            graph.warnings.append(
+                FilmIRWarning(
+                    code="CHARACTER_GOAL_CHARACTER_MISSING",
+                    message="CharacterGoal 的 character_key 无法映射到当前 Character。",
+                    object_refs=[
+                        FilmIRReference(type="CharacterGoal", id=goal_id)
+                    ],
+                )
+            )
+            continue
+        graph.add_edge(
+            "Character",
+            character.id,
+            "CharacterGoal",
+            goal_id,
+            "HAS_GOAL_IN_SCENE",
+            inferred=False,
+            evidence=(
+                "characters.character_key -> "
+                "script_versions.payload_json.scenes[].character_goals.character_key"
+            ),
         )
 
     for beat_id, summary in beat_summaries:
@@ -1241,6 +1338,118 @@ def get_film_ir_projection(session: Session, project: Project) -> FilmIRProjecti
                 "rollback_script_version_id": impact.get("rollback_script_version_id"),
             },
         )
+        intent_preview = proposal.get("director_intent_preview")
+        intent_payload = (
+            intent_preview.get("intent")
+            if isinstance(intent_preview, dict)
+            else None
+        )
+        if isinstance(intent_payload, dict):
+            intent_id = str(intent_payload.get("intent_id") or "")
+            intent_version = intent_payload.get("intent_version")
+            if intent_id:
+                graph.add_object(
+                    object_type="DirectorIntent",
+                    object_id=intent_id,
+                    version_id=(
+                        f"{intent_id}:v{intent_version}"
+                        if isinstance(intent_version, int)
+                        else None
+                    ),
+                    canonical_kind="DERIVED",
+                    status=str(intent_payload.get("state") or change_set.status),
+                    table=ChangeSet.__tablename__,
+                    row_id=change_set.id,
+                    attributes={
+                        "source_request": intent_payload.get("source_request"),
+                        "overall_confidence": intent_payload.get("overall_confidence"),
+                        "can_confirm": intent_payload.get("can_confirm"),
+                        "context_fingerprint": (
+                            intent_payload.get("scope", {}).get("context_fingerprint")
+                            if isinstance(intent_payload.get("scope"), dict)
+                            else None
+                        ),
+                        "blocked_reasons": intent_payload.get("blocked_reasons", []),
+                        "inheritance": proposal.get(
+                            "director_intent_inheritance",
+                            [],
+                        ),
+                    },
+                )
+                graph.add_edge(
+                    "DirectorProposal",
+                    change_set.id,
+                    "DirectorIntent",
+                    intent_id,
+                    "COMPILES_TO_INTENT",
+                    inferred=False,
+                    evidence="change_sets.impact_json.proposal.director_intent_preview",
+                )
+                scope = intent_payload.get("scope")
+                if isinstance(scope, dict):
+                    refs: list[tuple[str, dict[str, Any]]] = []
+                    scene_ref = scope.get("scene")
+                    beat_ref = scope.get("plot_beat")
+                    goal_refs = scope.get("character_goals")
+                    if isinstance(scene_ref, dict):
+                        refs.append(("SCOPED_TO", scene_ref))
+                    if isinstance(beat_ref, dict):
+                        refs.append(("GROUNDED_IN", beat_ref))
+                    if isinstance(goal_refs, list):
+                        refs.extend(
+                            ("GROUNDED_IN", item)
+                            for item in goal_refs
+                            if isinstance(item, dict)
+                        )
+                    scope_scene_logical_id = (
+                        script_scene_logical_ids.get(str(scene_ref.get("id") or ""))
+                        if isinstance(scene_ref, dict)
+                        else None
+                    )
+                    for relation, ref in refs:
+                        target_type = str(ref.get("type") or "")
+                        target_id = str(ref.get("id") or "")
+                        if target_type == "ScriptScene":
+                            target_id = script_scene_logical_ids.get(target_id, target_id)
+                        elif target_type == "Beat" and scope_scene_logical_id:
+                            sequence = target_id.rsplit(":", 1)[-1]
+                            target_id = next(
+                                (
+                                    item
+                                    for item in beat_ids_by_script_scene.get(
+                                        scope_scene_logical_id,
+                                        [],
+                                    )
+                                    if item.rsplit(":", 1)[-1] == sequence
+                                ),
+                                target_id,
+                            )
+                        elif target_type == "CharacterGoal" and scope_scene_logical_id:
+                            character_key = target_id.rsplit(":", 1)[-1]
+                            target_id = next(
+                                (
+                                    item
+                                    for item in goal_ids_by_script_scene.get(
+                                        scope_scene_logical_id,
+                                        [],
+                                    )
+                                    if item.rsplit(":", 1)[-1] == character_key
+                                ),
+                                target_id,
+                            )
+                        if target_type and target_id:
+                            graph.add_edge(
+                                "DirectorIntent",
+                                intent_id,
+                                target_type,
+                                target_id,
+                                relation,
+                                inferred=False,
+                                evidence=(
+                                    "change_sets.impact_json.proposal."
+                                    "director_intent_preview.intent.scope"
+                                ),
+                            )
         for target in proposal.get("target_objects", []):
             if not isinstance(target, dict):
                 continue

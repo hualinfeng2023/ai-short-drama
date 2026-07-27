@@ -16,10 +16,11 @@ import {
 import '@xyflow/react/dist/base.css'
 import {
   AlertTriangle,
+  ArrowRight,
   ArrowUpRight,
   Check,
   Clapperboard,
-  FilePenLine,
+  Crosshair,
   GitBranch,
   GitMerge,
   LockKeyhole,
@@ -69,8 +70,12 @@ import {
   projectCanvasGraph,
   resolveDirectorReviewTarget,
   type FilmCanvasEdge,
+  type FilmCanvasEmptyLaneNode,
+  type FilmCanvasGraphNode,
   type FilmCanvasNode,
+  isFilmObjectNode,
 } from '../canvas/filmCanvasProjection'
+import { getFilmCanvasGuidance } from '../canvas/filmCanvasGuidance'
 import { ImpactConfirmModal } from '../components/ConfirmModal'
 import { DirectorFailureInspector } from '../components/director-review/DirectorFailureInspector'
 import { DirectorGenerationHistory } from '../components/director-review/DirectorGenerationHistory'
@@ -90,6 +95,7 @@ import {
   getStatusLabel,
 } from '../components/ui'
 import { useToast } from '../store/ToastContext'
+import { useProjectReadiness } from '../store/ProjectReadinessContext'
 
 const VIEW_STATE_KEY_PREFIX = 'film-canvas-view-state-v1'
 const DEFAULT_VIEWPORT: Viewport = { x: 0, y: 0, zoom: 1 }
@@ -116,6 +122,14 @@ const canonicalKindLabels: Record<string, string> = {
   CANONICAL: '正式事实',
   DERIVED: '推导事实',
   GENERATED: '生成事实',
+}
+
+function objectTypeLabel(item: CanvasProjection['nodes'][number]): string {
+  if (item.ref.type === 'DialogueLine') {
+    if (item.operationContext.line_type === 'ACTION') return '场景动作'
+    if (item.operationContext.line_type === 'VOICE_OVER') return '画外音'
+  }
+  return objectTypeLabels[item.ref.type] ?? item.ref.type
 }
 
 type CharacterEditDraft = {
@@ -213,9 +227,12 @@ function FilmObjectNode({ data, selected }: NodeProps<FilmCanvasNode>) {
         type="target"
       />
       <header>
-        <span>{objectTypeLabels[item.ref.type] ?? item.ref.type}</span>
+        <span>{objectTypeLabel(item)}</span>
         <StatusBadge status={item.canonicalStatus} />
       </header>
+      {data.speakerLabel ? (
+        <p className="film-canvas-node__speaker">说话人：<strong>{data.speakerLabel}</strong></p>
+      ) : null}
       <div className="film-canvas-node__content">
         {item.thumbnailUrl ? (
           <img
@@ -227,7 +244,10 @@ function FilmObjectNode({ data, selected }: NodeProps<FilmCanvasNode>) {
         <strong title={item.label}>{item.label}</strong>
       </div>
       {item.contentSummary ? (
-        <p className="film-canvas-node__summary" title={item.contentSummary}>{item.contentSummary}</p>
+        <div className="film-canvas-node__detail">
+          <small>详细描述</small>
+          <p className="film-canvas-node__summary" title={item.contentSummary}>{item.contentSummary}</p>
+        </div>
       ) : null}
       <footer>
         <small>{item.ref.versionId ? `版本 ${item.ref.versionId.slice(0, 8)}` : '无独立版本'}</small>
@@ -242,17 +262,33 @@ function FilmObjectNode({ data, selected }: NodeProps<FilmCanvasNode>) {
   )
 }
 
-const nodeTypes = { filmObject: FilmObjectNode }
+function FilmCanvasEmptyLaneNode({ data }: NodeProps<FilmCanvasEmptyLaneNode>) {
+  return (
+    <section className="film-canvas-empty-lane" aria-label={data.label}>
+      <span className="film-canvas-empty-lane__icon"><Clapperboard size={20} /></span>
+      <p className="eyebrow">后续制作区域</p>
+      <h3>{data.label}</h3>
+      <p>{data.description}</p>
+      <small>当前尚未生成分镜内容</small>
+    </section>
+  )
+}
+
+const nodeTypes = {
+  emptyLane: FilmCanvasEmptyLaneNode,
+  filmObject: FilmObjectNode,
+}
 
 export function FilmCanvasPage() {
   const { projectId } = useParams()
   const { notify } = useToast()
+  const { readiness } = useProjectReadiness()
   const [projection, setProjection] = useState<CanvasProjection | null>(null)
-  const [nodes, setNodes] = useState<FilmCanvasNode[]>([])
+  const [nodes, setNodes] = useState<FilmCanvasGraphNode[]>([])
   const [edges, setEdges] = useState<FilmCanvasEdge[]>([])
   const [viewport, setViewport] = useState<Viewport>(DEFAULT_VIEWPORT)
   const [hasSavedViewport, setHasSavedViewport] = useState(false)
-  const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance<FilmCanvasNode, FilmCanvasEdge> | null>(null)
+  const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance<FilmCanvasGraphNode, FilmCanvasEdge> | null>(null)
   const [isCanvasFullscreen, setCanvasFullscreen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -375,7 +411,7 @@ export function FilmCanvasPage() {
     if (!projection || !projectId) return
     const timer = window.setTimeout(() => {
       const selected = nodes
-        .filter((node) => node.selected)
+        .filter((node): node is FilmCanvasNode => node.selected === true && isFilmObjectNode(node))
         .map((node) => node.data.projection.ref)
       const viewState = createCanvasViewState(projection, nodes, viewport, selected)
       try {
@@ -387,17 +423,56 @@ export function FilmCanvasPage() {
     return () => window.clearTimeout(timer)
   }, [nodes, projectId, projection, viewport])
 
-  const onNodesChange = useCallback((changes: NodeChange<FilmCanvasNode>[]) => {
+  const onNodesChange = useCallback((changes: NodeChange<FilmCanvasGraphNode>[]) => {
     setNodes((current) => applyNodeChanges(changes, current))
   }, [])
 
   const selectedNode = useMemo(
-    () => nodes.find((node) => node.selected) ?? null,
+    () => nodes.find(
+      (node): node is FilmCanvasNode => node.selected === true && isFilmObjectNode(node),
+    ) ?? null,
     [nodes],
   )
 
+  const domainNodeCount = useMemo(
+    () => nodes.filter(isFilmObjectNode).length,
+    [nodes],
+  )
+
+  const canvasGuidance = useMemo(
+    () => readiness ? getFilmCanvasGuidance(readiness) : null,
+    [readiness],
+  )
+
+  const recommendedNode = useMemo(
+    () => canvasGuidance?.recommendedNodeType
+      ? nodes.find(
+        (node): node is FilmCanvasNode => isFilmObjectNode(node)
+          && node.data.projection.ref.type === canvasGuidance.recommendedNodeType,
+      ) ?? null
+      : null,
+    [canvasGuidance, nodes],
+  )
+
+  const focusRecommendedNode = useCallback(() => {
+    if (!recommendedNode) return
+    setNodes((current) => current.map((node) => ({
+      ...node,
+      selected: node.id === recommendedNode.id,
+    })))
+    window.requestAnimationFrame(() => {
+      void reactFlowInstance?.fitView({
+        duration: 240,
+        maxZoom: 1.1,
+        nodes: [{ id: recommendedNode.id }],
+      })
+    })
+  }, [reactFlowInstance, recommendedNode])
+
   const selectedReferences = useMemo<CanvasReference[]>(
-    () => nodes.filter((node) => node.selected).map((node) => node.data.projection.ref),
+    () => nodes
+      .filter((node): node is FilmCanvasNode => node.selected === true && isFilmObjectNode(node))
+      .map((node) => node.data.projection.ref),
     [nodes],
   )
 
@@ -426,6 +501,15 @@ export function FilmCanvasPage() {
       description: beat.contentSummary ?? '',
     }
   }, [projection, selectedNode])
+
+  useEffect(() => {
+    setBeatEditorError(null)
+    setBeatEditor(beatEditTarget)
+  }, [
+    beatEditTarget?.description,
+    beatEditTarget?.sceneId,
+    beatEditTarget?.scriptId,
+  ])
 
   const loadDirectorHistory = useCallback(async (
     scriptSceneId: string,
@@ -499,7 +583,7 @@ export function FilmCanvasPage() {
     }))
   }
 
-  async function reviewSelectedObject() {
+  async function reviewSelectedObject(intentInstruction?: string) {
     if (!projectId || !projection || !directorTarget || directorBusy) return
     setDirectorBusy(true)
     setDirectorError(null)
@@ -509,7 +593,9 @@ export function FilmCanvasPage() {
         targetType: directorTarget.targetType,
         targetId: directorTarget.targetId,
         issueTypes: ['STORY_LOGIC', 'CHARACTER_MOTIVATION', 'AI_DIALOGUE', 'PACING'],
-        instruction: '检查故事因果、人物当下目标、对白 AI 味和场景节奏。',
+        instruction: intentInstruction?.trim()
+          || '检查故事因果、人物当下目标、对白 AI 味和场景节奏。',
+        compileIntent: Boolean(intentInstruction?.trim()),
       })
       upsertDirectorProposal(proposal)
       await load(undefined, true)
@@ -564,9 +650,10 @@ export function FilmCanvasPage() {
     setDirectorError(null)
     try {
       const next = action.type === 'EXECUTE'
-        ? await executeDirectorReviewProposal(action.proposal.proposalId, {
+          ? await executeDirectorReviewProposal(action.proposal.proposalId, {
             expectedVersion: projection.projectLockVersion,
             optionId: action.optionId,
+            intentConfirmationToken: action.proposal.directorIntentConfirmationToken,
           })
         : await decideDirectorReviewProposal(action.proposal.proposalId, {
             expectedVersion: projection.projectLockVersion,
@@ -605,12 +692,6 @@ export function FilmCanvasPage() {
   function openDirectorAction(action: DirectorReviewAction) {
     setDirectorApprovalOverrideReason('')
     setDirectorAction(action)
-  }
-
-  function openBeatEditor() {
-    if (!beatEditTarget) return
-    setBeatEditorError(null)
-    setBeatEditor(beatEditTarget)
   }
 
   async function submitBeatRevision() {
@@ -936,15 +1017,63 @@ export function FilmCanvasPage() {
           </Button>
         }
       />
+      {canvasGuidance ? (
+        <Surface
+          className={`film-canvas-next-action film-canvas-next-action--${canvasGuidance.tone}`}
+        >
+          <div className="film-canvas-next-action__marker" aria-hidden="true">
+            {canvasGuidance.tone === 'blocked'
+              ? <AlertTriangle size={20} />
+              : <ArrowRight size={20} />}
+          </div>
+          <div className="film-canvas-next-action__copy">
+            <p className="eyebrow">下一步 · {canvasGuidance.activeStageLabel}</p>
+            <h2>{canvasGuidance.title}</h2>
+            {canvasGuidance.tone === 'blocked' ? <p>{canvasGuidance.description}</p> : null}
+          </div>
+          <div className="film-canvas-next-action__actions">
+            <Link
+              className="button button--primary button--md"
+              to={canvasGuidance.actionHref}
+            >
+              {canvasGuidance.actionLabel}<ArrowRight size={16} />
+            </Link>
+            {recommendedNode ? (
+              <Button onClick={focusRecommendedNode} variant="secondary">
+                <Crosshair size={16} />在画布中定位
+              </Button>
+            ) : null}
+          </div>
+          <div className="film-canvas-next-action__relay" aria-label="推进接力">
+            <span className="is-complete">
+              <Check size={14} />
+              <small>已完成</small>
+              <strong>{canvasGuidance.completedStageLabel ?? '前置准备'}</strong>
+            </span>
+            <i aria-hidden="true" />
+            <span className="is-current">
+              <ArrowRight size={14} />
+              <small>现在</small>
+              <strong>{canvasGuidance.activeStageLabel}</strong>
+            </span>
+            <i aria-hidden="true" />
+            <span>
+              <LockKeyhole size={14} />
+              <small>随后</small>
+              <strong>{canvasGuidance.nextStageLabel ?? '后续交付'}</strong>
+            </span>
+          </div>
+        </Surface>
+      ) : null}
       <section className="film-canvas-summary" aria-label="投影摘要">
-        <div><span>对象</span><strong>{nodes.length}</strong></div>
+        <div><span>对象</span><strong>{domainNodeCount}</strong></div>
         <div><span>依赖</span><strong>{edges.length}</strong></div>
         <div><span>项目版本</span><strong>{projection.projectLockVersion}</strong></div>
         <div><span>选择</span><strong>{selectedReferences.length}</strong></div>
       </section>
       <div className="film-canvas-workspace">
         <Surface className="film-canvas-stage" padding="none">
-          <ReactFlow<FilmCanvasNode, FilmCanvasEdge>
+          <ReactFlow<FilmCanvasGraphNode, FilmCanvasEdge>
             edges={edges}
             fitView={!hasSavedViewport}
             maxZoom={1.8}
@@ -979,8 +1108,43 @@ export function FilmCanvasPage() {
           {selectedNode ? (
             <>
               <div>
-                <p className="eyebrow">{objectTypeLabels[selectedNode.data.projection.ref.type] ?? selectedNode.data.projection.ref.type}</p>
-                <h2>{selectedNode.data.projection.label}</h2>
+                <p className="eyebrow">{objectTypeLabel(selectedNode.data.projection)}</p>
+                {beatEditTarget ? (
+                  <label className="film-canvas-inspector__title-editor">
+                    <span>详细描述</span>
+                    <textarea
+                      aria-label="剧情关键点详细描述"
+                      disabled={beatEditorBusy}
+                      maxLength={2000}
+                      onChange={(event) => setBeatEditor((current) => current
+                        ? { ...current, description: event.target.value }
+                        : { ...beatEditTarget, description: event.target.value })}
+                      rows={5}
+                      value={beatEditor?.description ?? beatEditTarget.description}
+                    />
+                    <span className="film-canvas-inspector__title-editor-meta">
+                      <small>{beatEditor?.description.length ?? beatEditTarget.description.length}/2000</small>
+                      <Button
+                        disabled={
+                          beatEditorBusy
+                          || !beatEditor?.description.trim()
+                          || beatEditor.description.trim() === beatEditTarget.description.trim()
+                        }
+                        onClick={() => void submitBeatRevision()}
+                        size="sm"
+                      >
+                        <Check size={14} />{beatEditorBusy ? '提交中…' : '提交修改版审核'}
+                      </Button>
+                    </span>
+                    {beatEditorError ? (
+                      <span className="film-canvas-inspector__action-error" role="alert">
+                        {beatEditorError}
+                      </span>
+                    ) : null}
+                  </label>
+                ) : (
+                  <h2>{selectedNode.data.projection.label}</h2>
+                )}
               </div>
               {selectedNode.data.projection.ref.type === 'Character'
                 && selectedNode.data.projection.thumbnailUrl ? (
@@ -1005,6 +1169,9 @@ export function FilmCanvasPage() {
                 <div><dt>版本编号</dt><dd>{selectedNode.data.projection.ref.versionId ?? '未单独版本化'}</dd></div>
                 <div><dt>事实类型</dt><dd>{canonicalKindLabels[selectedNode.data.projection.canonicalKind] ?? selectedNode.data.projection.canonicalKind}</dd></div>
                 <div><dt>状态</dt><dd>{getStatusLabel(selectedNode.data.projection.canonicalStatus)}</dd></div>
+                {selectedNode.data.speakerLabel ? (
+                  <div><dt>说话人</dt><dd>{selectedNode.data.speakerLabel}</dd></div>
+                ) : null}
               </dl>
               <section className="film-canvas-inspector__actions" aria-label="项目操作">
                 <div>
@@ -1022,11 +1189,6 @@ export function FilmCanvasPage() {
                       : '打开完整工作区'}
                   <ArrowUpRight size={16} />
                 </Link>
-                {beatEditTarget ? (
-                  <Button disabled={beatEditorBusy} onClick={openBeatEditor}>
-                    <FilePenLine size={16} />修改并提交审核
-                  </Button>
-                ) : null}
                 {selectedNode.data.projection.ref.type === 'Character' ? (
                   <>
                     <Button
@@ -1131,7 +1293,7 @@ export function FilmCanvasPage() {
               <DirectorReviewCard
                 busy={directorBusy}
                 onAction={openDirectorAction}
-                onReview={() => void reviewSelectedObject()}
+                onReview={(instruction) => void reviewSelectedObject(instruction)}
                 onSelectOption={(proposalId, optionId) => {
                   setDirectorSelections((current) => ({ ...current, [proposalId]: optionId }))
                 }}
@@ -1251,37 +1413,6 @@ export function FilmCanvasPage() {
           </label>
         ) : null}
       </ImpactConfirmModal>
-      <Modal
-        className="modal--beat-editor"
-        description="修改会创建新的剧本版本，并立即进入待审核；不会覆盖当前版本。"
-        footer={(
-          <>
-            <Button disabled={beatEditorBusy} onClick={() => setBeatEditor(null)} variant="secondary">取消</Button>
-            <Button disabled={beatEditorBusy || !beatEditor?.description.trim()} onClick={() => void submitBeatRevision()}>
-              <Check size={16} />{beatEditorBusy ? '提交中…' : '提交修改版审核'}
-            </Button>
-          </>
-        )}
-        onClose={() => { if (!beatEditorBusy) setBeatEditor(null) }}
-        open={beatEditor !== null}
-        title="修改叙事节拍"
-      >
-        <div className="beat-editor">
-          <label>
-            <span>叙事节拍</span>
-            <textarea
-              disabled={beatEditorBusy}
-              maxLength={2000}
-              onChange={(event) => setBeatEditor((current) => current
-                ? { ...current, description: event.target.value }
-                : current)}
-              value={beatEditor?.description ?? ''}
-            />
-            <small>{beatEditor?.description.length ?? 0}/2000</small>
-          </label>
-          {beatEditorError ? <p className="beat-editor__error" role="alert">{beatEditorError}</p> : null}
-        </div>
-      </Modal>
       <Modal
         className="modal--character-revision"
         description="先检查人物关系、分集大纲与剧本的影响，再创建同步修改版；当前正式版本不会被覆盖。"

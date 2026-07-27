@@ -5,6 +5,7 @@ const NODE_WIDTH = 232
 const NODE_HEIGHT = 108
 const COLUMN_GAP = 304
 const ROW_GAP = 148
+const EMPTY_LANE_HEIGHT = 552
 
 const TYPE_COLUMN: Record<string, number> = {
   Project: 0,
@@ -65,9 +66,17 @@ const relationLabels: Record<string, string> = {
 
 export interface FilmCanvasNodeData extends Record<string, unknown> {
   projection: CanvasProjection['nodes'][number]
+  speakerLabel: string | null
 }
 
 export type FilmCanvasNode = Node<FilmCanvasNodeData, 'filmObject'>
+export interface FilmCanvasEmptyLaneNodeData extends Record<string, unknown> {
+  description: string
+  label: string
+}
+
+export type FilmCanvasEmptyLaneNode = Node<FilmCanvasEmptyLaneNodeData, 'emptyLane'>
+export type FilmCanvasGraphNode = FilmCanvasNode | FilmCanvasEmptyLaneNode
 export type FilmCanvasEdge = Edge
 
 export interface FilmCanvasNodeViewState {
@@ -94,7 +103,7 @@ export interface FilmCanvasViewState {
 }
 
 export interface FilmCanvasGraph {
-  nodes: FilmCanvasNode[]
+  nodes: FilmCanvasGraphNode[]
   edges: FilmCanvasEdge[]
   viewport: Viewport | null
 }
@@ -107,6 +116,10 @@ export interface DirectorReviewTarget {
 
 export function canvasNodeId(ref: CanvasReference): string {
   return `${ref.type}:${ref.id}`
+}
+
+export function isFilmObjectNode(node: FilmCanvasGraphNode): node is FilmCanvasNode {
+  return node.type === 'filmObject'
 }
 
 export function getCanvasRelationLabel(relation: string): string {
@@ -122,6 +135,7 @@ export function canvasProjectionSignature(projection: CanvasProjection): string 
     node.approvalStatus,
     node.label,
     node.contentSummary,
+    node.operationContext,
   ])
   const edges = projection.edges.map((edge) => [
     edge.source.type,
@@ -257,19 +271,39 @@ export function projectCanvasGraph(
   viewState: FilmCanvasViewState | null,
 ): FilmCanvasGraph {
   const rowByColumn = new Map<number, number>()
-  const nodes = projection.nodes.map<FilmCanvasNode>((item) => {
+  const characterLabels = new Map(
+    projection.nodes
+      .filter((item) => item.ref.type === 'Character')
+      .map((item) => [item.operationContext.character_key, item.label])
+      .filter(
+        (entry): entry is [string, string] => typeof entry[0] === 'string' && Boolean(entry[0]),
+      ),
+  )
+  const objectNodes = projection.nodes.map<FilmCanvasNode>((item) => {
     const id = canvasNodeId(item.ref)
     const column = TYPE_COLUMN[item.ref.type] ?? 3
     const row = rowByColumn.get(column) ?? 0
     rowByColumn.set(column, row + 1)
     const saved = viewState?.nodes[id]
+    const lineType = item.ref.type === 'DialogueLine'
+      && typeof item.operationContext.line_type === 'string'
+      ? item.operationContext.line_type
+      : null
+    const speakerKey = item.ref.type === 'DialogueLine'
+      && ['DIALOGUE', 'VOICE_OVER'].includes(lineType ?? '')
+      && typeof item.operationContext.speaker_key === 'string'
+      ? item.operationContext.speaker_key
+      : null
     return {
       id,
       type: 'filmObject',
       position: saved
         ? { x: saved.x, y: saved.y }
         : { x: column * COLUMN_GAP, y: row * ROW_GAP },
-      data: { projection: item },
+      data: {
+        projection: item,
+        speakerLabel: speakerKey ? characterLabels.get(speakerKey) ?? speakerKey : null,
+      },
       draggable: true,
       connectable: false,
       deletable: false,
@@ -280,6 +314,28 @@ export function projectCanvasGraph(
       zIndex: saved?.z_index ?? 0,
     }
   })
+  const hasStoryboardContent = projection.nodes.some(
+    (item) => item.ref.type === 'Storyboard' || item.ref.type === 'Shot',
+  )
+  const nodes: FilmCanvasGraphNode[] = hasStoryboardContent
+    ? objectNodes
+    : [
+      ...objectNodes,
+      {
+        id: 'canvas-empty-lane:storyboard',
+        type: 'emptyLane',
+        position: { x: TYPE_COLUMN.Storyboard * COLUMN_GAP, y: 0 },
+        data: {
+          label: '分镜区域',
+          description: '剧本批准后，故事板与镜头会出现在这里。',
+        },
+        draggable: false,
+        connectable: false,
+        deletable: false,
+        selectable: false,
+        style: { width: NODE_WIDTH, height: EMPTY_LANE_HEIGHT },
+      },
+    ]
   const visibleNodeIds = new Set(nodes.map((node) => node.id))
   const edges = projection.edges
     .map<FilmCanvasEdge>((edge, index) => ({
@@ -303,7 +359,7 @@ export function projectCanvasGraph(
 
 export function createCanvasViewState(
   projection: CanvasProjection,
-  nodes: FilmCanvasNode[],
+  nodes: FilmCanvasGraphNode[],
   viewport: Viewport,
   selected: CanvasReference[],
 ): FilmCanvasViewState {
@@ -312,7 +368,7 @@ export function createCanvasViewState(
     project_id: projection.projectId,
     projection_lock_version: projection.projectLockVersion,
     viewport,
-    nodes: Object.fromEntries(nodes.map((node) => [
+    nodes: Object.fromEntries(nodes.filter(isFilmObjectNode).map((node) => [
       node.id,
       {
         x: node.position.x,

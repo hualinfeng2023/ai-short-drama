@@ -40,6 +40,7 @@ import {
   createScriptExcerptRewrite,
   decideDirectorReviewProposal,
   fetchBriefVersions,
+  fetchCharacterVisuals,
   fetchDirectorReviewProposals,
   fetchProject,
   fetchScriptExcerptRewrites,
@@ -52,6 +53,7 @@ import {
   reviewCharacterRevision,
   type CharacterRevisionChanges,
   type CharacterRevisionReview,
+  type CharacterVisualWorkspace,
   type DirectorReviewProposal,
   type StoryWorkspace,
   type StoryPackageEstimate,
@@ -76,6 +78,7 @@ import { directionKeyLabel, directionKeyTurns, isQuestionStyleHook } from '../ut
 import { localizeDisplayText } from '../utils/localizeDisplayText'
 import { diffText } from '../utils/textDiff'
 import { syncVisualNotesWithEthnicity } from '../utils/characterIdentityVisuals'
+import { resolveLockedCharacterReferenceImage } from '../utils/lockedCharacterReference'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -148,6 +151,34 @@ function characterInitials(character: Record<string, unknown>): string {
     return `${first}${last}`.toLocaleUpperCase('en-US')
   }
   return Array.from(name.replace(/\s+/g, '')).slice(0, 2).join('').toLocaleUpperCase('en-US') || '角色'
+}
+
+function StoryCharacterAvatar({
+  category,
+  character,
+  imageUrl,
+}: {
+  category: Exclude<CharacterFilter, 'all'>
+  character: Record<string, unknown>
+  imageUrl?: string
+}) {
+  const [imageFailed, setImageFailed] = useState(false)
+
+  useEffect(() => setImageFailed(false), [imageUrl])
+
+  const showImage = Boolean(imageUrl && !imageFailed)
+  return (
+    <span
+      aria-hidden="true"
+      className="story-character__avatar"
+      data-category={category}
+      data-has-image={showImage || undefined}
+    >
+      {showImage
+        ? <img alt="" onError={() => setImageFailed(true)} src={imageUrl} />
+        : <span className="story-character__avatar-monogram">{characterInitials(character)}</span>}
+    </span>
+  )
 }
 
 function characterOccupation(character: Record<string, unknown>): string {
@@ -280,6 +311,22 @@ const MARKET_FLAGS: Record<string, string> = {
   MY: '🇲🇾',
   US: '🇺🇸',
   GB: '🇬🇧',
+}
+
+function PlatformValues({ platforms }: { platforms: string[] }) {
+  if (!platforms.length) return <>未设置</>
+  return (
+    <span className="story-platform-values">
+      {platforms.map((platform) => (
+        <span className="story-platform-value" key={platform}>
+          {platform === 'douyin'
+            ? <img alt="" aria-hidden="true" className="story-platform-logo" src="/assets/platforms/douyin.svg" />
+            : null}
+          <span>{PLATFORM_LABELS[platform] ?? platform}</span>
+        </span>
+      ))}
+    </span>
+  )
 }
 
 function MarketValues({ markets }: { markets: string[] }) {
@@ -490,6 +537,7 @@ export function StoryPage() {
   const { notify } = useToast()
   const [project, setProject] = useState<ProjectRecord | null>(null)
   const [workspace, setWorkspace] = useState<StoryWorkspace | null>(null)
+  const [characterVisuals, setCharacterVisuals] = useState<CharacterVisualWorkspace | null>(null)
   const [brief, setBrief] = useState<BriefVersionRecord | null>(null)
   const [packageEstimate, setPackageEstimate] = useState<StoryPackageEstimate | null>(null)
   const [selected, setSelected] = useState<string[]>([])
@@ -540,22 +588,45 @@ export function StoryPage() {
     const [
       nextProject,
       nextWorkspace,
+      nextCharacterVisuals,
       briefVersions,
       nextPackageEstimate,
       nextDirectorReviewProposals,
     ] = await Promise.all([
       fetchProject(projectId, signal),
       fetchStoryWorkspace(projectId, signal),
+      fetchCharacterVisuals(projectId, signal).catch(() => null),
       fetchBriefVersions(projectId, signal),
       fetchStoryPackageEstimate(projectId, signal).catch(() => DEFAULT_PACKAGE_ESTIMATE),
       fetchDirectorReviewProposals(projectId, signal),
     ])
     setProject(nextProject)
     setWorkspace(nextWorkspace)
+    setCharacterVisuals(nextCharacterVisuals)
     setBrief(briefVersions[0] ?? null)
     setPackageEstimate(nextPackageEstimate)
     setDirectorReviewProposals(nextDirectorReviewProposals)
   }, [projectId])
+
+  const refreshCharacterVisuals = useCallback(async () => {
+    if (!projectId) return
+    const nextCharacterVisuals = await fetchCharacterVisuals(projectId)
+    setCharacterVisuals(nextCharacterVisuals)
+  }, [projectId])
+
+  useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshCharacterVisuals().catch(() => undefined)
+      }
+    }
+    window.addEventListener('focus', refreshWhenVisible)
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+    return () => {
+      window.removeEventListener('focus', refreshWhenVisible)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+    }
+  }, [refreshCharacterVisuals])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -671,7 +742,10 @@ export function StoryPage() {
     }))
   }
 
-  async function reviewScriptScene(scene: NonNullable<typeof latestScript>['scenes'][number]) {
+  async function reviewScriptScene(
+    scene: NonNullable<typeof latestScript>['scenes'][number],
+    intentInstruction?: string,
+  ) {
     if (!project || !projectId) return
     setDirectorReviewBusyScene(scene.ordinal)
     setDirectorReviewError(null)
@@ -685,7 +759,9 @@ export function StoryPage() {
           'AI_DIALOGUE',
           'PACING',
         ],
-        instruction: '检查故事因果、人物当下目标、对白 AI 味和场景节奏。',
+        instruction: intentInstruction?.trim()
+          || '检查故事因果、人物当下目标、对白 AI 味和场景节奏。',
+        compileIntent: Boolean(intentInstruction?.trim()),
       })
       upsertDirectorProposal(proposal)
       setNotice(`Director 已完成第 ${scene.ordinal} 场审查，请选择修复方案。`)
@@ -709,9 +785,10 @@ export function StoryPage() {
     setDirectorReviewError(null)
     try {
       const next = action.type === 'EXECUTE'
-        ? await executeDirectorReviewProposal(action.proposal.proposalId, {
+          ? await executeDirectorReviewProposal(action.proposal.proposalId, {
             expectedVersion: project.lockVersion,
             optionId: action.optionId,
+            intentConfirmationToken: action.proposal.directorIntentConfirmationToken,
           })
         : await decideDirectorReviewProposal(action.proposal.proposalId, {
             expectedVersion: project.lockVersion,
@@ -1036,6 +1113,12 @@ export function StoryPage() {
   ]))
   const outlinePayload = latestOutline?.payload ?? {}
   const characters = recordList(biblePayload.characters)
+  const lockedCharacterImages = new Map(
+    (characterVisuals?.characters ?? []).flatMap((character) => {
+      const imageUrl = resolveLockedCharacterReferenceImage(character)
+      return imageUrl ? [[character.characterKey, imageUrl] as const] : []
+    }),
+  )
   const characterTabs: Array<{ id: CharacterFilter; label: string; count: number }> = [
     { id: 'all', label: '全部', count: characters.length },
     { id: 'core', label: '核心角色', count: characters.filter((character) => characterCategory(character) === 'core').length },
@@ -1114,7 +1197,7 @@ export function StoryPage() {
             : undefined
         }
         onAction={openDirectorReviewAction}
-        onReview={() => void reviewScriptScene(scene)}
+        onReview={(instruction) => void reviewScriptScene(scene, instruction)}
         onSelectOption={(proposalId, optionId) => {
           setDirectorOptionSelections((current) => ({ ...current, [proposalId]: optionId }))
         }}
@@ -1262,7 +1345,7 @@ export function StoryPage() {
       {brief ? <section className="story-brief-baseline" aria-labelledby="story-brief-baseline-title">
         <header><h2 id="story-brief-baseline-title">本次创作基准</h2></header>
         <dl className="story-brief-baseline__facts">
-          <div><dt>平台</dt><dd>{labelValues(brief.platformTargets.map((item) => item.platform), PLATFORM_LABELS)}</dd></div>
+          <div><dt>平台</dt><dd><PlatformValues platforms={brief.platformTargets.map((item) => item.platform)} /></dd></div>
           <div><dt>市场</dt><dd><MarketValues markets={[brief.primaryMarket, ...brief.secondaryMarkets]} /></dd></div>
           <div><dt>核心观众</dt><dd>{labelValues([brief.primaryAudience, ...brief.secondaryAudiences], AUDIENCE_LABELS)}</dd></div>
           <div><dt>目标时长</dt><dd>{brief.targetDurationSec} 秒</dd></div>
@@ -1454,20 +1537,27 @@ export function StoryPage() {
           <div aria-live="polite" id="story-character-panel" role="tabpanel">{visibleCharacters.map((character) => {
             const ethnicity = characterEthnicity(character, stringValue(biblePayload.world, '')) || '未指定'
             const category = characterCategory(character)
+            const characterImageUrl = lockedCharacterImages.get(stringValue(character.key, ''))
             return <article className="story-character" data-character-category={category} key={stringValue(character.key)}>
               <header>
                 <div className="story-character__identity">
-                  <span aria-hidden="true" className="story-character__avatar" data-category={category}>
-                    <span className="story-character__avatar-monogram">{characterInitials(character)}</span>
-                    <span className="story-character__avatar-status" />
-                  </span>
-                  <div><span>{stringValue(character.role)}</span><strong>{stringValue(character.name)}</strong><small>{characterGenderLabel(character)} · {ethnicity}</small></div>
+                  <StoryCharacterAvatar category={category} character={character} imageUrl={characterImageUrl} />
+                  <div><span>{stringValue(character.role)}</span><strong>{stringValue(character.name)}</strong></div>
                 </div>
                 <button aria-label={`编辑${stringValue(character.name)}的角色信息`} onClick={() => openCharacterEditor(character)} type="button"><Pencil size={14} />编辑</button>
               </header>
               <p className="story-character__function">{stringValue(character.dramatic_function)}</p>
-              <dl className="story-character__profile"><div><dt>年龄</dt><dd>{characterAge(character)}</dd></div><div><dt>职业</dt><dd>{characterOccupation(character)}</dd></div><div className="story-character__fact--wide"><dt>性格</dt><dd>{characterPersonality(character)}</dd></div></dl>
+              <dl className="story-character__core-fact"><div><dt>年龄</dt><dd>{characterAge(character)}</dd></div></dl>
               <dl className="story-character__motivation"><div><dt>欲望</dt><dd>{stringValue(character.desire)}</dd></div><div><dt>秘密</dt><dd>{stringValue(character.secret)}</dd></div></dl>
+              <details className="story-character__details">
+                <summary>人物详情</summary>
+                <dl className="story-character__profile">
+                  <div><dt>性别</dt><dd>{characterGenderLabel(character)}</dd></div>
+                  <div><dt>文化背景</dt><dd>{ethnicity}</dd></div>
+                  <div><dt>职业</dt><dd>{characterOccupation(character)}</dd></div>
+                  <div><dt>性格</dt><dd>{characterPersonality(character)}</dd></div>
+                </dl>
+              </details>
             </article>
           })}</div>
         </section>

@@ -49,6 +49,10 @@ from app.db.models import (
 )
 from app.domain.commands import DirectorCommand
 from app.domain.director import DirectorReviewOutput, director_change_target_issues
+from app.domain.director_intent import (
+    DirectorIntentChangePreview,
+    DirectorIntentTimeRange,
+)
 from app.schemas import (
     CharacterCandidateDeleteRequest,
     CharacterCandidateGenerateRequest,
@@ -122,6 +126,7 @@ from app.services.dependency_analysis import (
     apply_dependency_invalidation,
     persist_dependency_edges,
 )
+from app.services.director_intent import resolve_director_intent_context
 from app.services.director_proposals import director_proposal_to_read, director_retry_source
 from app.services.events import append_event
 from app.services.exports import create_export
@@ -3865,6 +3870,37 @@ def _execute_create_director_proposal(
                 "details": {"issues": exc.errors(include_url=False)},
             },
         ) from exc
+    intent_preview_payload = payload.get("director_intent_preview")
+    intent_preview: DirectorIntentChangePreview | None = None
+    if intent_preview_payload is not None:
+        try:
+            intent_preview = DirectorIntentChangePreview.model_validate(intent_preview_payload)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "DIRECTOR_INTENT_CONTRACT_INVALID",
+                    "message": "DirectorIntent 变更预览不符合可执行契约",
+                    "details": {"issues": exc.errors(include_url=False)},
+                },
+            ) from exc
+        if intent_preview.intent.project_id != project.id:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "DIRECTOR_INTENT_PROJECT_MISMATCH",
+                    "message": "DirectorIntent 不属于当前项目",
+                },
+            )
+        token = payload.get("director_intent_confirmation_token")
+        if not isinstance(token, str) or len(token) != 64:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "DIRECTOR_INTENT_CONFIRMATION_TOKEN_INVALID",
+                    "message": "DirectorIntent 缺少有效确认凭证",
+                },
+            )
     line_ids = set(
         session.scalars(
             select(ScriptLine.id).where(ScriptLine.script_scene_id == scene.id)
@@ -3911,6 +3947,12 @@ def _execute_create_director_proposal(
         "retry_of_generation_record_id": payload.get("retry_of_generation_record_id"),
         "provider": provider,
     }
+    if intent_preview is not None:
+        proposal["director_intent_preview"] = intent_preview.model_dump(mode="json")
+        proposal["director_intent_confirmation_token"] = str(
+            payload["director_intent_confirmation_token"]
+        )
+        proposal["director_intent_provider"] = payload.get("director_intent_provider")
     stored_impact: dict[str, object] = {
         "proposal": proposal,
         "impact": impact_payload,
@@ -3994,6 +4036,64 @@ def _execute_create_director_proposal(
             completed_at=datetime.now(UTC),
         )
     )
+    intent_provider = payload.get("director_intent_provider")
+    if intent_preview is not None and isinstance(intent_provider, dict):
+        session.add(
+            GenerationRecord(
+                id=str(uuid4()),
+                project_id=project.id,
+                job_id=None,
+                entity_type="director_intent",
+                entity_id=intent_preview.intent.intent_id,
+                capability="DIRECTOR_INTENT_COMPILATION",
+                provider=str(intent_provider.get("provider", "unknown")),
+                model=str(intent_provider.get("model", "unknown")),
+                config_version="director-intent-v1",
+                prompt_hash=content_hash(
+                    {
+                        "source_request": intent_preview.intent.source_request,
+                        "context_fingerprint": (
+                            intent_preview.intent.scope.context_fingerprint
+                        ),
+                    }
+                ),
+                seed=None,
+                reference_asset_ids_json="[]",
+                provider_request_id=(
+                    str(intent_provider["request_id"])
+                    if intent_provider.get("request_id")
+                    else None
+                ),
+                provider_task_id=None,
+                status="SUCCEEDED",
+                latency_ms=(
+                    int(intent_provider["latency_ms"])
+                    if isinstance(intent_provider.get("latency_ms"), (int, float))
+                    else None
+                ),
+                input_units=None,
+                output_units=None,
+                estimated_cost_usd=0,
+                output_asset_id=None,
+                metadata_json=canonical_json(
+                    {
+                        "command_id": command.command_id,
+                        "target_script_version_id": script.id,
+                        "target_script_scene_id": scene.id,
+                        "intent_version": intent_preview.intent.intent_version,
+                        "context_fingerprint": (
+                            intent_preview.intent.scope.context_fingerprint
+                        ),
+                        "media_generation": False,
+                        "repair_attempts": int(
+                            intent_provider.get("repair_attempts", 0)
+                        ),
+                    }
+                ),
+                created_at=datetime.now(UTC),
+                completed_at=datetime.now(UTC),
+            )
+        )
     session.flush()
     return MutationResult(
         result=director_proposal_to_read(change_set),
@@ -4252,6 +4352,96 @@ def _current_director_change_target(
     return current_scene, current_line
 
 
+def _confirm_director_intent(
+    session: Session,
+    *,
+    project: Project,
+    proposal: dict[str, object],
+    command: DirectorCommand,
+    current_scene: ScriptScene,
+) -> None:
+    preview_payload = proposal.get("director_intent_preview")
+    if not isinstance(preview_payload, dict):
+        return
+    try:
+        preview = DirectorIntentChangePreview.model_validate(preview_payload)
+    except ValidationError as exc:  # pragma: no cover - creation validates persisted contract
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DIRECTOR_INTENT_CONTRACT_INVALID",
+                "message": "已保存的 DirectorIntent 预览无效，请重新编译",
+            },
+        ) from exc
+    if not preview.intent.can_confirm:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DIRECTOR_INTENT_BLOCKED",
+                "message": "DirectorIntent 存在未解决的作用域或冲突，不能确认",
+                "details": {"blocked_reasons": preview.intent.blocked_reasons},
+            },
+        )
+    expected_token = proposal.get("director_intent_confirmation_token")
+    provided_token = command.payload.get("intent_confirmation_token")
+    if not isinstance(expected_token, str) or provided_token != expected_token:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DIRECTOR_INTENT_CONFIRMATION_TOKEN_INVALID",
+                "message": "DirectorIntent 确认凭证无效，请重新查看修改预览",
+            },
+        )
+    try:
+        current_context = resolve_director_intent_context(
+            session,
+            project_id=project.id,
+            target_type="SCRIPT_SCENE",
+            target_id=current_scene.id,
+            selection=DirectorIntentTimeRange.model_validate(
+                preview.intent.scope.time_range.model_dump(mode="json")
+            )
+            if preview.intent.scope.time_range is not None
+            else None,
+        )
+    except HTTPException as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DIRECTOR_INTENT_STALE_CONTEXT",
+                "message": "DirectorIntent 的作用范围已变化，请重新生成预览",
+                "details": {"cause": exc.detail},
+            },
+        ) from exc
+    if (
+        current_context.scope.resolution_status != "RESOLVED"
+        or current_context.scope.context_fingerprint
+        != preview.intent.scope.context_fingerprint
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DIRECTOR_INTENT_STALE_CONTEXT",
+                "message": "剧情节拍、角色目标或时间范围已经变化，请重新生成预览",
+                "details": {
+                    "preview_context_fingerprint": preview.intent.scope.context_fingerprint,
+                    "current_context_fingerprint": current_context.scope.context_fingerprint,
+                    "current_resolution_status": current_context.scope.resolution_status,
+                },
+            },
+        )
+    confirmed_intent = preview.intent.model_copy(update={"state": "CONFIRMED"})
+    proposal["director_intent_preview"] = preview.model_copy(
+        update={"intent": confirmed_intent}
+    ).model_dump(mode="json")
+    proposal["director_intent_confirmation"] = {
+        "token_hash": content_hash(expected_token),
+        "actor": command.actor.id,
+        "confirmed_at": datetime.now(UTC).isoformat(),
+        "source_context_fingerprint": preview.intent.scope.context_fingerprint,
+    }
+
+
 def _execute_apply_director_proposal(
     session: Session,
     *,
@@ -4355,6 +4545,13 @@ def _execute_apply_director_proposal(
         current_base=current_base_script,
         change_scope=change_scope,
     )
+    _confirm_director_intent(
+        session,
+        project=project,
+        proposal=proposal,
+        command=command,
+        current_scene=current_scene,
+    )
     for field, expected in dict(change["before"]).items():
         if getattr(current_target_entity, field, object()) != expected:
             raise HTTPException(
@@ -4419,6 +4616,39 @@ def _execute_apply_director_proposal(
         revised_script_id=str(result["id"]),
         scene_ordinal=int(proposal["scene_ordinal"]),
     )
+    if isinstance(proposal.get("director_intent_preview"), dict):
+        intent = DirectorIntentChangePreview.model_validate(
+            proposal["director_intent_preview"]
+        ).intent
+        timeline_preview = dict(impact["comparison"]["timeline_preview"])
+        proposal["director_intent_inheritance"] = [
+            {
+                "consumer": "TIMELINE",
+                "status": "INHERITED",
+                "intent_version": intent.intent_version,
+                "source_fingerprint": intent.scope.context_fingerprint,
+                "applied_range": (
+                    intent.scope.time_range.model_dump(mode="json")
+                    if intent.scope.time_range is not None
+                    else None
+                ),
+                "output_version": timeline_preview.get("formal_timeline_version_id"),
+                "evidence": {
+                    "affected_tracks": timeline_preview.get("affected_tracks", []),
+                    "downstream_shift_ms": timeline_preview.get("downstream_shift_ms"),
+                    "validation_status": timeline_preview.get("validation_status"),
+                },
+            },
+            *[
+                {
+                    "consumer": consumer,
+                    "status": "NOT_INTEGRATED",
+                    "intent_version": intent.intent_version,
+                }
+                for consumer in ("STORYBOARD", "PROMPT", "AUDIO")
+            ],
+        ]
+    impact["proposal"] = proposal
     if proposal_base_script.id != current_base_script.id:
         impact["comparison"]["proposal_base_script_version_id"] = proposal_base_script.id
     impact["invalidated"] = downstream.get("affected_objects", [])

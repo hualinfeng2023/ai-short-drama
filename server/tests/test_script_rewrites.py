@@ -30,6 +30,10 @@ from app.db.session import get_engine
 from app.domain.director import DirectorProposalRequest
 from app.seed import PROJECT_ID
 from app.services import director_proposals
+from app.services.director_intent import (
+    prepare_director_intent_preview,
+    resolve_director_intent_context,
+)
 from app.services.director_proposals import DirectorProposalDraft
 from app.services.projects import canonical_json, content_hash
 from app.services.text_provider import TextGenerationResult, TextProviderError
@@ -50,6 +54,19 @@ def prepare_script() -> int:
     script_payload = {
         "title": "第一集",
         "estimated_duration_ms": 8_000,
+        "short_drama_engine": {
+            "protagonist_desire": "迫使对方停止回避并面对分歧",
+            "beats": [
+                {
+                    "sequence": 1,
+                    "scene_ordinal": 1,
+                    "beat_type": "ESCALATION",
+                    "at_ms": 0,
+                    "description": "主角阻止对方离开，冲突从解释转为直接对抗。",
+                    "story_state_change": "双方的分歧公开化。",
+                }
+            ],
+        },
         "scenes": [
             {
                 "heading": "走廊对峙",
@@ -60,6 +77,15 @@ def prepare_script() -> int:
                 "duration_ms": 8_000,
                 "bgm_intent": "低频压迫",
                 "sfx_intents": ["雨声"],
+                "character_goals": [
+                    {
+                        "character_key": "lead",
+                        "objective": "阻止对方离开并迫使其正面回应",
+                        "obstacle": "对方持续回避核心分歧",
+                        "stakes": "对方一旦离开，关系真相会继续被掩盖",
+                        "tactic": "用直接语言行动封住退路",
+                    }
+                ],
                 "lines": [
                     {
                         "speaker_key": "lead",
@@ -117,9 +143,19 @@ def prepare_script() -> int:
                 story_version_id=STORY_ID,
                 version=1,
                 status="APPROVED",
-                payload_json="{}",
+                payload_json=canonical_json(
+                    {
+                        "rules": ["人物不能凭空获得未在场景中出现的信息"],
+                        "continuity_rules": ["旧公寓外的雨声在本场持续存在"],
+                    }
+                ),
                 critic_json="{}",
-                content_hash=content_hash({}),
+                content_hash=content_hash(
+                    {
+                        "rules": ["人物不能凭空获得未在场景中出现的信息"],
+                        "continuity_rules": ["旧公寓外的雨声在本场持续存在"],
+                    }
+                ),
                 parent_version_id=None,
                 schema_version="story-bible-v1",
                 provider="test",
@@ -315,6 +351,177 @@ def add_second_script_scene() -> None:
             )
         )
         session.commit()
+
+
+@pytest.mark.anyio
+async def test_director_intent_context_resolves_scene_beat_goal_and_time_range(
+    client: AsyncClient,
+) -> None:
+    prepare_script()
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        context = resolve_director_intent_context(
+            session,
+            project_id=PROJECT_ID,
+            target_type="SCRIPT_SCENE",
+            target_id=SCENE_ID,
+        )
+
+    assert context.scope.resolution_status == "RESOLVED"
+    assert context.scope.scene.id == SCENE_ID
+    assert context.scope.plot_beat is not None
+    assert context.scope.character_goals[0].type == "CharacterGoal"
+    assert context.scope.time_range is not None
+    assert context.scope.time_range.model_dump() == {"start_ms": 0, "end_ms": 8_000}
+    assert {item.evidence_id for item in context.evidence} == {
+        "scene-context",
+        "world-rules",
+        "beat-1",
+        "goal-lead",
+    }
+    assert len(context.scope.context_fingerprint) == 64
+
+
+@pytest.mark.anyio
+async def test_director_intent_context_returns_ambiguous_beat_candidates(
+    client: AsyncClient,
+) -> None:
+    prepare_script()
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        script = session.get(ScriptVersion, SCRIPT_ID)
+        assert script is not None
+        payload = json.loads(script.payload_json)
+        payload["short_drama_engine"]["beats"].append(
+            {
+                "sequence": 2,
+                "scene_ordinal": 1,
+                "beat_type": "REVERSAL",
+                "at_ms": 4_000,
+                "description": "对方反过来质问主角隐瞒了什么。",
+                "story_state_change": "施压方短暂失去主动权。",
+            }
+        )
+        script.payload_json = canonical_json(payload)
+        script.content_hash = content_hash(payload)
+        session.commit()
+
+        context = resolve_director_intent_context(
+            session,
+            project_id=PROJECT_ID,
+            target_type="SCRIPT_SCENE",
+            target_id=SCENE_ID,
+        )
+
+    assert context.scope.resolution_status == "AMBIGUOUS"
+    assert context.scope.plot_beat is None
+    assert len(context.scope.candidate_targets) == 2
+    assert "缩小时间范围" in context.scope.resolution_reason
+
+
+@pytest.mark.anyio
+async def test_director_intent_context_fails_closed_without_character_goal(
+    client: AsyncClient,
+) -> None:
+    prepare_script()
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        script = session.get(ScriptVersion, SCRIPT_ID)
+        assert script is not None
+        payload = json.loads(script.payload_json)
+        payload["scenes"][0]["character_goals"] = []
+        script.payload_json = canonical_json(payload)
+        script.content_hash = content_hash(payload)
+        session.commit()
+
+        context = resolve_director_intent_context(
+            session,
+            project_id=PROJECT_ID,
+            target_type="SCRIPT_SCENE",
+            target_id=SCENE_ID,
+        )
+
+    assert context.scope.resolution_status == "UNRESOLVED"
+    assert context.scope.character_goals == []
+    assert "尚未定义角色级目标" in context.scope.resolution_reason
+
+
+@pytest.mark.anyio
+async def test_director_intent_context_bounds_verbose_world_rule_evidence(
+    client: AsyncClient,
+) -> None:
+    prepare_script()
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        bible = session.get(StoryBibleVersion, BIBLE_ID)
+        assert bible is not None
+        payload = json.loads(bible.payload_json)
+        payload["rules"] = ["必须保持当前世界规则。" * 120]
+        bible.payload_json = canonical_json(payload)
+        bible.content_hash = content_hash(payload)
+        session.commit()
+
+        context = resolve_director_intent_context(
+            session,
+            project_id=PROJECT_ID,
+            target_type="SCRIPT_SCENE",
+            target_id=SCENE_ID,
+        )
+
+    world_rule_evidence = next(
+        item for item in context.evidence if item.evidence_id == "world-rules"
+    )
+    assert len(world_rule_evidence.claim) == 1000
+    assert world_rule_evidence.claim.endswith("…")
+    assert context.scope.resolution_status == "RESOLVED"
+
+
+@pytest.mark.anyio
+async def test_director_intent_preview_compiles_grounded_five_channel_change(
+    client: AsyncClient,
+) -> None:
+    prepare_script()
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        prepared = await prepare_director_intent_preview(
+            session,
+            get_settings(),
+            project_id=PROJECT_ID,
+            target_type="SCRIPT_SCENE",
+            target_id=SCENE_ID,
+            instruction="这里更紧张",
+        )
+
+    preview = prepared.preview
+    assert preview.projection_mode == "READ_ONLY"
+    assert preview.canonical_source == "FILM_IR"
+    assert preview.intent.can_confirm is True
+    assert preview.intent.state == "PREVIEW_READY"
+    assert len(prepared.confirmation_token) == 64
+    assert {item.channel for item in preview.sections} == {
+        "NARRATIVE",
+        "CAMERA",
+        "PERFORMANCE",
+        "SOUND",
+        "PACING",
+    }
+    assert all(item.evidence_refs for item in preview.sections)
+    assert all(item.status == "PASS" for item in preview.intent.conflict_checks)
 
 
 @pytest.mark.anyio
@@ -547,7 +754,8 @@ async def test_director_proposal_review_execute_compare_and_rollback(
         "target_type": "SCRIPT_SCENE",
         "target_id": SCENE_ID,
         "issue_types": ["AI_DIALOGUE", "CHARACTER_MOTIVATION", "PACING"],
-        "instruction": "检查人物是否在解释剧情，而不是采取行动。",
+        "instruction": "这里更紧张",
+        "compile_intent": True,
         "actor": "test-director",
     }
     proposed = await client.post(
@@ -568,6 +776,13 @@ async def test_director_proposal_review_execute_compare_and_rollback(
     assert proposal["estimated_cost_usd"] == 0
     assert proposal["provider"]["model"] == "deterministic-director-evaluator-v1"
     assert proposal["preserved_objects"]
+    intent_preview = proposal["director_intent_preview"]
+    assert intent_preview["schema_version"] == "director-intent-change-preview-v1"
+    assert intent_preview["projection_mode"] == "READ_ONLY"
+    assert intent_preview["intent"]["can_confirm"] is True
+    assert intent_preview["intent"]["scope"]["resolution_status"] == "RESOLVED"
+    assert len(intent_preview["sections"]) == 5
+    assert len(proposal["director_intent_confirmation_token"]) == 64
 
     proposal_list = await client.get(f"/api/v1/projects/{PROJECT_ID}/director-review-proposals")
     assert proposal_list.status_code == 200
@@ -612,6 +827,7 @@ async def test_director_proposal_review_execute_compare_and_rollback(
             "option_id": proposal["recommended_option"],
             "actor": "test-director",
             "confirmed": True,
+            "intent_confirmation_token": proposal["director_intent_confirmation_token"],
         },
         headers={"Idempotency-Key": "director-proposal-apply-v1"},
     )
@@ -622,6 +838,17 @@ async def test_director_proposal_review_execute_compare_and_rollback(
     assert result["script"]["version"] == 2
     assert result["proposal"]["comparison"]["media_generation"] is False
     assert result["proposal"]["comparison"]["base_script_version_id"] == SCRIPT_ID
+    assert (
+        result["proposal"]["director_intent_preview"]["intent"]["state"] == "CONFIRMED"
+    )
+    assert result["proposal"]["director_intent_confirmation"]["actor"] == "test-director"
+    inheritance = {
+        item["consumer"]: item for item in result["proposal"]["director_intent_inheritance"]
+    }
+    assert inheritance["TIMELINE"]["status"] == "INHERITED"
+    assert inheritance["STORYBOARD"]["status"] == "NOT_INTEGRATED"
+    assert inheritance["PROMPT"]["status"] == "NOT_INTEGRATED"
+    assert inheritance["AUDIO"]["status"] == "NOT_INTEGRATED"
     timeline_preview = result["proposal"]["comparison"]["timeline_preview"]
     assert timeline_preview["schema_version"] == "director-timeline-preview-v1"
     assert timeline_preview["projection_mode"] == "READ_ONLY"
@@ -639,6 +866,8 @@ async def test_director_proposal_review_execute_compare_and_rollback(
     )
     revised_script_id = result["script"]["id"]
     film_ir = (await client.get(f"/api/v1/projects/{PROJECT_ID}/film-ir")).json()["data"]
+    film_ir_types = {item["type"] for item in film_ir["objects"]}
+    assert {"CharacterGoal", "DirectorIntent"} <= film_ir_types
     proposal_node = next(
         item
         for item in film_ir["objects"]
@@ -647,6 +876,24 @@ async def test_director_proposal_review_execute_compare_and_rollback(
     assert proposal_node["canonical_kind"] == "DERIVED"
     assert proposal_node["canonical_status"] == "APPLIED_PENDING_APPROVAL"
     film_ir_edges = film_ir["edges"]
+    intent_id = proposal["director_intent_preview"]["intent"]["intent_id"]
+    assert any(
+        edge["relation"] == "COMPILES_TO_INTENT"
+        and edge["source"]["id"] == proposal["proposal_id"]
+        and edge["target"] == {
+            "type": "DirectorIntent",
+            "id": intent_id,
+            "version_id": f"{intent_id}:v1",
+        }
+        for edge in film_ir_edges
+    )
+    assert any(
+        edge["relation"] == "GROUNDED_IN"
+        and edge["source"]["type"] == "DirectorIntent"
+        and edge["source"]["id"] == intent_id
+        and edge["target"]["type"] == "CharacterGoal"
+        for edge in film_ir_edges
+    )
     assert ("PRESERVES", False) in {
         (edge["relation"], edge["inferred"]) for edge in film_ir_edges
     }
@@ -681,6 +928,7 @@ async def test_director_proposal_review_execute_compare_and_rollback(
             "option_id": proposal["recommended_option"],
             "actor": "test-director",
             "confirmed": True,
+            "intent_confirmation_token": proposal["director_intent_confirmation_token"],
         },
         headers={"Idempotency-Key": "director-proposal-apply-v1"},
     )
@@ -730,6 +978,20 @@ async def test_director_proposal_review_execute_compare_and_rollback(
         )
         assert len(generation_records) == 1
         assert generation_records[0].output_asset_id is None
+        intent_generation = session.scalar(
+            select(GenerationRecord).where(
+                GenerationRecord.project_id == PROJECT_ID,
+                GenerationRecord.capability == "DIRECTOR_INTENT_COMPILATION",
+            )
+        )
+        assert intent_generation is not None
+        assert intent_generation.status == "SUCCEEDED"
+        assert intent_generation.entity_type == "director_intent"
+        assert intent_generation.entity_id == intent_id
+        assert intent_generation.output_asset_id is None
+        intent_generation_metadata = json.loads(intent_generation.metadata_json)
+        assert intent_generation_metadata["intent_version"] == 1
+        assert intent_generation_metadata["media_generation"] is False
         reservation = session.scalar(
             select(IdempotencyKey).where(
                 IdempotencyKey.scope == director_api._request_reservation_scope(PROJECT_ID),
@@ -756,6 +1018,142 @@ async def test_director_proposal_review_execute_compare_and_rollback(
             )
         )
         assert len(command_audits) == 3
+
+
+@pytest.mark.anyio
+async def test_director_intent_confirmation_rejects_wrong_preview_token(
+    client: AsyncClient,
+) -> None:
+    prepare_script()
+    proposed = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json={
+            "expected_version": 8,
+            "target_type": "SCRIPT_SCENE",
+            "target_id": SCENE_ID,
+            "issue_types": ["PACING"],
+            "instruction": "这里更紧张",
+            "compile_intent": True,
+            "actor": "test-director",
+        },
+        headers={"Idempotency-Key": "director-intent-token-create-v1"},
+    )
+    assert proposed.status_code == 201, proposed.text
+    proposal = proposed.json()["data"]
+
+    response = await client.post(
+        f"/api/v1/director-review-proposals/{proposal['proposal_id']}/execute",
+        json={
+            "expected_version": 8,
+            "option_id": proposal["recommended_option"],
+            "actor": "test-director",
+            "confirmed": True,
+            "intent_confirmation_token": "0" * 64,
+        },
+        headers={"Idempotency-Key": "director-intent-token-apply-v1"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "DIRECTOR_INTENT_CONFIRMATION_TOKEN_INVALID"
+
+
+@pytest.mark.anyio
+async def test_director_intent_confirmation_rejects_stale_context(
+    client: AsyncClient,
+) -> None:
+    prepare_script()
+    proposed = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json={
+            "expected_version": 8,
+            "target_type": "SCRIPT_SCENE",
+            "target_id": SCENE_ID,
+            "issue_types": ["PACING"],
+            "instruction": "这里更紧张",
+            "compile_intent": True,
+            "actor": "test-director",
+        },
+        headers={"Idempotency-Key": "director-intent-stale-create-v1"},
+    )
+    assert proposed.status_code == 201, proposed.text
+    proposal = proposed.json()["data"]
+
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        scene = session.get(ScriptScene, SCENE_ID)
+        assert scene is not None
+        scene.purpose = "让主角暂时退让并隐藏真实目标"
+        session.commit()
+
+    response = await client.post(
+        f"/api/v1/director-review-proposals/{proposal['proposal_id']}/execute",
+        json={
+            "expected_version": 8,
+            "option_id": proposal["recommended_option"],
+            "actor": "test-director",
+            "confirmed": True,
+            "intent_confirmation_token": proposal["director_intent_confirmation_token"],
+        },
+        headers={"Idempotency-Key": "director-intent-stale-apply-v1"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "DIRECTOR_INTENT_STALE_CONTEXT"
+
+
+@pytest.mark.anyio
+async def test_director_intent_confirmation_fails_closed_when_scope_is_unresolved(
+    client: AsyncClient,
+) -> None:
+    prepare_script()
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        script = session.get(ScriptVersion, SCRIPT_ID)
+        assert script is not None
+        payload = json.loads(script.payload_json)
+        payload["scenes"][0]["character_goals"] = []
+        script.payload_json = canonical_json(payload)
+        script.content_hash = content_hash(payload)
+        session.commit()
+
+    proposed = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json={
+            "expected_version": 8,
+            "target_type": "SCRIPT_SCENE",
+            "target_id": SCENE_ID,
+            "issue_types": ["PACING"],
+            "instruction": "这里更紧张",
+            "compile_intent": True,
+            "actor": "test-director",
+        },
+        headers={"Idempotency-Key": "director-intent-blocked-create-v1"},
+    )
+    assert proposed.status_code == 201, proposed.text
+    proposal = proposed.json()["data"]
+    assert proposal["director_intent_preview"]["intent"]["can_confirm"] is False
+    assert proposal["director_intent_preview"]["intent"]["state"] == "BLOCKED"
+
+    response = await client.post(
+        f"/api/v1/director-review-proposals/{proposal['proposal_id']}/execute",
+        json={
+            "expected_version": 8,
+            "option_id": proposal["recommended_option"],
+            "actor": "test-director",
+            "confirmed": True,
+            "intent_confirmation_token": proposal["director_intent_confirmation_token"],
+        },
+        headers={"Idempotency-Key": "director-intent-blocked-apply-v1"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "DIRECTOR_INTENT_BLOCKED"
 
 
 @pytest.mark.anyio
@@ -1370,6 +1768,75 @@ async def test_director_provider_failure_is_audited_without_changeset(
     assert failures[0]["provider_request_id"] == "request-3"
     assert failures[0]["attempt_count"] == 3
     assert failures[0]["repair_attempts"] == 2
+
+
+@pytest.mark.anyio
+async def test_director_intent_provider_failure_is_audited_without_changeset(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepare_script()
+
+    async def fake_compile(*_args, **_kwargs) -> TextGenerationResult:
+        raise TextProviderError(
+            "DIRECTOR_INTENT_SCHEMA_INVALID",
+            "导演意图未通过语义校验",
+            retryable=False,
+            details={
+                "validator": "DirectorIntentCompilationOutput",
+                "request_id": "intent-request-1",
+                "attempts": [{"attempt": 1, "error_type": "validation_error"}],
+            },
+        )
+
+    monkeypatch.setattr(
+        "app.services.director_intent.generate_director_intent_compilation",
+        fake_compile,
+    )
+    response = await client.post(
+        f"/api/v1/projects/{PROJECT_ID}/director-review-proposals",
+        json={
+            "expected_version": 8,
+            "target_type": "SCRIPT_SCENE",
+            "target_id": SCENE_ID,
+            "issue_types": ["PACING"],
+            "instruction": "这里更紧张",
+            "compile_intent": True,
+            "actor": "test-director",
+        },
+        headers={"Idempotency-Key": "director-intent-provider-failure-v1"},
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "DIRECTOR_INTENT_SCHEMA_INVALID"
+
+    factory = sessionmaker(
+        bind=get_engine(get_settings().database_url),
+        expire_on_commit=False,
+    )
+    with factory() as session:
+        assert session.scalars(select(ChangeSet)).all() == []
+        failure = session.scalar(
+            select(GenerationRecord).where(
+                GenerationRecord.project_id == PROJECT_ID,
+                GenerationRecord.capability == "DIRECTOR_INTENT_COMPILATION",
+            )
+        )
+        assert failure is not None
+        assert failure.status == "FAILED"
+        assert failure.entity_type == "script_scene"
+        assert failure.entity_id == SCENE_ID
+        assert failure.provider_request_id == "intent-request-1"
+        metadata = json.loads(failure.metadata_json)
+        assert metadata["failure_stage"] == "INTENT_PROVIDER_VALIDATION"
+        assert metadata["error"]["retryable"] is False
+        audit = session.scalar(
+            select(AuditLog).where(
+                AuditLog.project_id == PROJECT_ID,
+                AuditLog.action == "DIRECTOR_INTENT_COMPILATION_FAILED",
+            )
+        )
+        assert audit is not None
+        assert audit.trace_id == failure.id
 
 
 @pytest.mark.anyio

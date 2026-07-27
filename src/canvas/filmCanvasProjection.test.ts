@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import type { CanvasProjection } from '../api/client'
+import type { FilmCanvasNode } from './filmCanvasProjection'
 import {
   canvasProjectionSignature,
   canvasNodeId,
   createCanvasViewState,
   getCanvasRelationLabel,
+  isFilmObjectNode,
   parseCanvasViewState,
   projectCanvasGraph,
   resolveDirectorReviewTarget,
@@ -60,10 +62,18 @@ const projection: CanvasProjection = {
 describe('Film Canvas projection adapter', () => {
   it('projects canonical references without copying business payloads into nodes', () => {
     const graph = projectCanvasGraph(projection, null)
+    const objectNodes = graph.nodes.filter(isFilmObjectNode)
+    const emptyStoryboardLane = graph.nodes.find(
+      (node) => node.type === 'emptyLane' && node.id === 'canvas-empty-lane:storyboard',
+    )
 
-    expect(graph.nodes).toHaveLength(2)
+    expect(objectNodes).toHaveLength(2)
     expect(graph.edges).toHaveLength(1)
-    expect(graph.nodes[0]?.data.projection).toBe(projection.nodes[0])
+    expect(objectNodes[0]?.data.projection).toBe(projection.nodes[0])
+    expect(emptyStoryboardLane?.data).toMatchObject({
+      label: '分镜区域',
+      description: '剧本批准后，故事板与镜头会出现在这里。',
+    })
     expect(graph.edges[0]).toMatchObject({
       source: 'Project:project-1',
       target: 'Scene:scene-1',
@@ -76,6 +86,46 @@ describe('Film Canvas projection adapter', () => {
     expect(getCanvasRelationLabel('APPEARS_IN_BEAT')).toBe('出场')
     expect(getCanvasRelationLabel('PROPOSES_CHANGE_TO')).toBe('建议修改')
     expect(getCanvasRelationLabel('UNKNOWN_RELATION')).toBe('UNKNOWN_RELATION')
+  })
+
+  it('resolves a dialogue speaker through the canonical character key', () => {
+    const withDialogue: CanvasProjection = {
+      ...projection,
+      nodes: [
+        ...projection.nodes,
+        {
+          ref: { type: 'Character', id: 'character-wife', versionId: 'character-v3' },
+          canonicalKind: 'CANONICAL',
+          canonicalStatus: 'LOCKED',
+          approvalStatus: 'APPROVED',
+          label: '妻子',
+          contentSummary: null,
+          groupKey: 'world',
+          detailRoute: '/projects/project-1/characters',
+          thumbnailUrl: null,
+          operationContext: { character_key: 'wife' },
+          readOnly: true,
+        },
+        {
+          ref: { type: 'DialogueLine', id: 'line-1', versionId: 'line-v1' },
+          canonicalKind: 'CANONICAL',
+          canonicalStatus: 'PENDING_REVIEW',
+          approvalStatus: 'DRAFT',
+          label: '等明天。',
+          contentSummary: null,
+          groupKey: 'episode:1',
+          detailRoute: '/projects/project-1/story',
+          thumbnailUrl: null,
+          operationContext: { line_type: 'DIALOGUE', speaker_key: 'wife' },
+          readOnly: true,
+        },
+      ],
+    }
+
+    const graph = projectCanvasGraph(withDialogue, null)
+    const dialogue = graph.nodes.find((node) => node.id === 'DialogueLine:line-1')
+
+    expect(dialogue?.data.speakerLabel).toBe('妻子')
   })
 
   it('keeps stale layout by stable id while taking canonical data from the latest projection', () => {
@@ -101,7 +151,11 @@ describe('Film Canvas projection adapter', () => {
     }), 'project-1')
 
     const graph = projectCanvasGraph(projection, saved)
-    const scene = graph.nodes.find((node) => node.id === 'Scene:scene-1')
+    const scene = graph.nodes.find(
+      (node): node is FilmCanvasNode => (
+        node.id === 'Scene:scene-1' && isFilmObjectNode(node)
+      ),
+    )
 
     expect(scene?.position).toEqual({ x: 480, y: 320 })
     expect(scene?.data.projection.ref.versionId).toBe('scene-v2')
@@ -126,6 +180,7 @@ describe('Film Canvas projection adapter', () => {
 
     expect(viewState.projection_lock_version).toBe(7)
     expect(viewState.nodes['Scene:scene-1']?.x).toBe(600)
+    expect(viewState.nodes).not.toHaveProperty('canvas-empty-lane:storyboard')
     expect(viewState.selected).toEqual([{
       type: sceneRef.type,
       id: sceneRef.id,
@@ -160,6 +215,17 @@ describe('Film Canvas projection adapter', () => {
 
     expect(canvasProjectionSignature(unchanged)).toBe(canvasProjectionSignature(projection))
     expect(canvasProjectionSignature(statusChanged)).not.toBe(canvasProjectionSignature(projection))
+  })
+
+  it('changes the projection signature when dialogue operation context changes', () => {
+    const withSpeaker: CanvasProjection = {
+      ...projection,
+      nodes: projection.nodes.map((node, index) => index === 1
+        ? { ...node, operationContext: { speaker_key: 'wife' } }
+        : node),
+    }
+
+    expect(canvasProjectionSignature(withSpeaker)).not.toBe(canvasProjectionSignature(projection))
   })
 
   it('resolves ScriptScene and Scene review targets through explicit lineage only', () => {
