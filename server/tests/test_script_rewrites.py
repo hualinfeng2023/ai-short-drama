@@ -1185,6 +1185,21 @@ async def test_director_provider_failure_is_audited_without_changeset(
         and edge["relation"] == "RETRY_OF"
         for edge in film_ir["edges"]
     )
+    failures_response = await client.get(
+        f"/api/v1/projects/{PROJECT_ID}/director-generation-failures",
+        params={"script_scene_id": SCENE_ID},
+    )
+    assert failures_response.status_code == 200, failures_response.text
+    failures = failures_response.json()["data"]
+    assert [item["generation_record_id"] for item in failures] == [
+        retry_failure_id,
+        failure_id,
+    ]
+    assert failures[0]["retry_of_generation_record_id"] == failure_id
+    assert failures[0]["error_code"] == "ARK_TEXT_SCHEMA_INVALID"
+    assert failures[0]["provider_request_id"] == "request-3"
+    assert failures[0]["attempt_count"] == 3
+    assert failures[0]["repair_attempts"] == 2
 
 
 @pytest.mark.anyio

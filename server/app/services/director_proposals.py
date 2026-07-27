@@ -421,3 +421,63 @@ def list_director_proposals(session: Session, *, project_id: str) -> list[dict[s
         if isinstance(impact, dict) and "proposal" in impact:
             proposals.append(director_proposal_to_read(change_set))
     return proposals
+
+
+def list_director_generation_failures(
+    session: Session,
+    *,
+    project_id: str,
+    script_scene_id: str | None = None,
+) -> list[dict[str, object]]:
+    def metadata_count(metadata: dict[str, object], key: str) -> int:
+        value = metadata.get(key, 0)
+        try:
+            return int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 0
+
+    project_or_404(session, project_id)
+    query = (
+        select(GenerationRecord)
+        .where(
+            GenerationRecord.project_id == project_id,
+            GenerationRecord.capability == "DIRECTOR_SCENE_REVIEW",
+            GenerationRecord.entity_type == "script_scene",
+            GenerationRecord.status == "FAILED",
+        )
+        .order_by(GenerationRecord.created_at.desc())
+    )
+    if script_scene_id is not None:
+        query = query.where(GenerationRecord.entity_id == script_scene_id)
+    records = list(session.scalars(query))
+    failures: list[dict[str, object]] = []
+    for record in records:
+        try:
+            metadata = json.loads(record.metadata_json)
+        except json.JSONDecodeError:
+            metadata = {}
+        metadata = metadata if isinstance(metadata, dict) else {}
+        error = metadata.get("error")
+        error = error if isinstance(error, dict) else {}
+        failures.append(
+            {
+                "generation_record_id": record.id,
+                "script_scene_id": record.entity_id,
+                "status": record.status,
+                "provider": record.provider,
+                "model": record.model,
+                "provider_request_id": record.provider_request_id,
+                "latency_ms": record.latency_ms,
+                "attempt_count": metadata_count(metadata, "attempt_count"),
+                "repair_attempts": metadata_count(metadata, "repair_attempts"),
+                "failure_stage": metadata.get("failure_stage"),
+                "error_code": error.get("code"),
+                "error_message": error.get("message"),
+                "retryable": bool(error.get("retryable", False)),
+                "retry_of_generation_record_id": metadata.get(
+                    "retry_of_generation_record_id"
+                ),
+                "created_at": record.created_at,
+            }
+        )
+    return failures

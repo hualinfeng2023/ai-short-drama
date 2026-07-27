@@ -3,7 +3,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from uuid import NAMESPACE_URL, uuid5
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -20,6 +20,7 @@ from app.domain.director import (
 )
 from app.services.director_proposals import (
     director_proposal_or_404,
+    list_director_generation_failures,
     list_director_proposals,
     prepare_director_proposal,
     record_director_generation_failure,
@@ -385,6 +386,21 @@ def get_project_director_proposals(
     session: Session = Depends(get_session),
 ) -> dict[str, object]:
     return success(list_director_proposals(session, project_id=project_id))
+
+
+@router.get("/projects/{project_id}/director-generation-failures")
+def get_project_director_generation_failures(
+    project_id: str,
+    script_scene_id: str | None = Query(default=None, min_length=36, max_length=36),
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return success(
+        list_director_generation_failures(
+            session,
+            project_id=project_id,
+            script_scene_id=script_scene_id,
+        )
+    )
 
 
 @router.post("/director-review-proposals/{proposal_id}/execute")

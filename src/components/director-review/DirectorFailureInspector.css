@@ -1,0 +1,94 @@
+.director-failure-inspector {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  color: var(--color-text-primary);
+  background: color-mix(in srgb, var(--color-state-danger) 7%, var(--color-surface));
+  border: 1px solid color-mix(in srgb, var(--color-state-danger) 32%, var(--color-border));
+  border-radius: var(--radius-control);
+}
+
+.director-failure-inspector > header,
+.director-failure-inspector > header > span,
+.director-failure-inspector > footer {
+  display: flex;
+  align-items: center;
+}
+
+.director-failure-inspector > header {
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.director-failure-inspector > header > span {
+  gap: var(--space-2);
+  color: var(--color-state-danger);
+  font-size: var(--font-size-control);
+  font-weight: 750;
+}
+
+.director-failure-inspector code {
+  padding: var(--space-1) var(--space-2);
+  color: var(--color-state-danger);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control-sm);
+  font-size: var(--font-size-caption);
+}
+
+.director-failure-inspector > p {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-caption);
+  line-height: 1.6;
+}
+
+.director-failure-inspector dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.director-failure-inspector dl > div {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-2);
+  background: color-mix(in srgb, var(--color-surface) 72%, transparent);
+  border-radius: var(--radius-control-sm);
+}
+
+.director-failure-inspector dt,
+.director-failure-inspector footer small {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-caption);
+}
+
+.director-failure-inspector dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: var(--font-size-caption);
+  font-weight: 650;
+}
+
+.director-failure-inspector > footer {
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.director-failure-inspector footer small {
+  max-width: 620px;
+  line-height: 1.55;
+}
+
+@media (max-width: 760px) {
+  .director-failure-inspector > header,
+  .director-failure-inspector > footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .director-failure-inspector dl {
+    grid-template-columns: 1fr;
+  }
+}

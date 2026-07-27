@@ -27,6 +27,11 @@ import {
   type DirectorReviewProposal,
 } from '../api/client'
 import {
+  fetchDirectorGenerationFailures,
+  retryDirectorGeneration,
+  type DirectorGenerationFailure,
+} from '../api/directorFailures'
+import {
   canvasProjectionSignature,
   createCanvasViewState,
   parseCanvasViewState,
@@ -36,6 +41,7 @@ import {
   type FilmCanvasNode,
 } from '../canvas/filmCanvasProjection'
 import { ImpactConfirmModal } from '../components/ConfirmModal'
+import { DirectorFailureInspector } from '../components/director-review/DirectorFailureInspector'
 import {
   DirectorReviewCard,
   directorApprovalRequiresOverride,
@@ -113,6 +119,7 @@ export function FilmCanvasPage() {
   const [error, setError] = useState<string | null>(null)
   const [directorProposals, setDirectorProposals] = useState<DirectorReviewProposal[]>([])
   const [directorSelections, setDirectorSelections] = useState<Record<string, string>>({})
+  const [directorFailures, setDirectorFailures] = useState<DirectorGenerationFailure[]>([])
   const [directorBusy, setDirectorBusy] = useState(false)
   const [directorError, setDirectorError] = useState<string | null>(null)
   const [directorAction, setDirectorAction] = useState<DirectorReviewAction | null>(null)
@@ -230,6 +237,28 @@ export function FilmCanvasPage() {
     [projection, selectedNode],
   )
 
+  const loadDirectorFailures = useCallback(async (
+    scriptSceneId: string,
+    signal?: AbortSignal,
+  ) => {
+    if (!projectId) return
+    const failures = await fetchDirectorGenerationFailures(projectId, scriptSceneId, signal)
+    setDirectorFailures(failures)
+  }, [projectId])
+
+  useEffect(() => {
+    const scriptSceneId = directorTarget?.scriptSceneId
+    setDirectorFailures([])
+    setDirectorError(null)
+    if (!scriptSceneId) return
+    const controller = new AbortController()
+    void loadDirectorFailures(scriptSceneId, controller.signal).catch((reason: unknown) => {
+      if (reason instanceof DOMException && reason.name === 'AbortError') return
+      setDirectorError(reason instanceof Error ? reason.message : 'Director 失败记录读取失败')
+    })
+    return () => controller.abort()
+  }, [directorTarget?.scriptSceneId, loadDirectorFailures])
+
   const selectedDirectorProposal = useMemo(() => {
     if (!projection || !directorTarget || !selectedNode) return null
     const selectedRef = selectedNode.data.projection.ref
@@ -287,6 +316,38 @@ export function FilmCanvasPage() {
           ? '项目版本已经变化，请等待画布刷新后重新审查。'
           : reason instanceof Error ? reason.message : 'Director 审查失败',
       )
+      await loadDirectorFailures(directorTarget.scriptSceneId).catch(() => undefined)
+    } finally {
+      setDirectorBusy(false)
+    }
+  }
+
+  async function retryFailedDirector(failure: DirectorGenerationFailure) {
+    if (!projectId || !projection || !directorTarget || directorBusy) return
+    setDirectorBusy(true)
+    setDirectorError(null)
+    try {
+      const proposal = await retryDirectorGeneration(projectId, failure, {
+        expectedVersion: projection.projectLockVersion,
+        targetType: directorTarget.targetType,
+        targetId: directorTarget.targetId,
+        issueTypes: ['STORY_LOGIC', 'CHARACTER_MOTIVATION', 'AI_DIALOGUE', 'PACING'],
+        instruction: '重新检查故事因果、人物当下目标、对白 AI 味和场景节奏。',
+      })
+      upsertDirectorProposal(proposal)
+      await Promise.all([
+        load(undefined, true),
+        loadDirectorProposals(),
+        loadDirectorFailures(directorTarget.scriptSceneId),
+      ])
+      notify('Director 已创建新的审查记录；原失败记录保持可追溯。')
+    } catch (reason) {
+      setDirectorError(
+        reason instanceof ApiError && reason.code === 'VERSION_CONFLICT'
+          ? '项目版本已经变化，请等待画布刷新后重新审查。'
+          : reason instanceof Error ? reason.message : 'Director 重新审查失败',
+      )
+      await loadDirectorFailures(directorTarget.scriptSceneId).catch(() => undefined)
     } finally {
       setDirectorBusy(false)
     }
@@ -461,21 +522,30 @@ export function FilmCanvasPage() {
             </div>
           ) : null}
           {directorTarget ? (
-            <DirectorReviewCard
-              busy={directorBusy}
-              onAction={openDirectorAction}
-              onReview={() => void reviewSelectedObject()}
-              onSelectOption={(proposalId, optionId) => {
-                setDirectorSelections((current) => ({ ...current, [proposalId]: optionId }))
-              }}
-              proposal={selectedDirectorProposal}
-              selectedOptionId={
-                selectedDirectorProposal
-                  ? directorSelections[selectedDirectorProposal.proposalId]
-                  : undefined
-              }
-              targetLabel={`“${selectedNode.data.projection.label}”`}
-            />
+            <>
+              {directorFailures[0] ? (
+                <DirectorFailureInspector
+                  busy={directorBusy}
+                  failure={directorFailures[0]}
+                  onRetry={(failure) => void retryFailedDirector(failure)}
+                />
+              ) : null}
+              <DirectorReviewCard
+                busy={directorBusy}
+                onAction={openDirectorAction}
+                onReview={() => void reviewSelectedObject()}
+                onSelectOption={(proposalId, optionId) => {
+                  setDirectorSelections((current) => ({ ...current, [proposalId]: optionId }))
+                }}
+                proposal={selectedDirectorProposal}
+                selectedOptionId={
+                  selectedDirectorProposal
+                    ? directorSelections[selectedDirectorProposal.proposalId]
+                    : undefined
+                }
+                targetLabel={`“${selectedNode.data.projection.label}”`}
+              />
+            </>
           ) : (
             <div className="film-canvas-director__unavailable">
               <AlertTriangle size={18} />
