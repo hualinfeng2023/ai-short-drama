@@ -552,6 +552,7 @@ export interface PreproductionWorkspace {
     version: number
     provider: string
     voiceKey: string
+    payload: Record<string, unknown>
     consentStatus: string
     cloningEnabled: boolean
     status: string
@@ -4729,6 +4730,7 @@ export async function fetchPreproduction(
       version: number
       provider: string
       voice_key: string
+      payload: Record<string, unknown>
       consent_status: string
       cloning_enabled: boolean
       status: string
@@ -4776,6 +4778,7 @@ export async function fetchPreproduction(
       version: item.version,
       provider: item.provider,
       voiceKey: item.voice_key,
+      payload: item.payload,
       consentStatus: item.consent_status,
       cloningEnabled: item.cloning_enabled,
       status: item.status,
