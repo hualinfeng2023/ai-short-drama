@@ -532,6 +532,9 @@ export interface PreproductionWorkspace {
       styleLabel?: string
       sourceAssetId?: string
       adjustmentPrompt?: string
+      generationPrompt?: string
+      characterIds?: string[]
+      aspectRatio?: string
     }>
     status: string
     contentHash: string
@@ -553,6 +556,9 @@ export interface PreproductionWorkspace {
       styleLabel?: string
       sourceAssetId?: string
       adjustmentPrompt?: string
+      generationPrompt?: string
+      characterIds?: string[]
+      aspectRatio?: string
     }>
     status: string
     contentHash: string
@@ -4723,6 +4729,9 @@ export async function fetchPreproduction(
         style_label?: string | null
         source_asset_id?: string | null
         adjustment_prompt?: string | null
+        generation_prompt?: string | null
+        character_ids?: string[] | null
+        aspect_ratio?: string | null
       }>
       status: string
       content_hash: string
@@ -4744,6 +4753,9 @@ export async function fetchPreproduction(
         style_label?: string | null
         source_asset_id?: string | null
         adjustment_prompt?: string | null
+        generation_prompt?: string | null
+        character_ids?: string[] | null
+        aspect_ratio?: string | null
       }>
       status: string
       content_hash: string
@@ -4787,6 +4799,9 @@ export async function fetchPreproduction(
         styleLabel: candidate.style_label ?? undefined,
         sourceAssetId: candidate.source_asset_id ?? undefined,
         adjustmentPrompt: candidate.adjustment_prompt ?? undefined,
+        generationPrompt: candidate.generation_prompt ?? undefined,
+        characterIds: candidate.character_ids ?? undefined,
+        aspectRatio: candidate.aspect_ratio ?? undefined,
       })),
       contentHash: item.content_hash,
     })),
@@ -4803,6 +4818,9 @@ export async function fetchPreproduction(
         styleLabel: candidate.style_label ?? undefined,
         sourceAssetId: candidate.source_asset_id ?? undefined,
         adjustmentPrompt: candidate.adjustment_prompt ?? undefined,
+        generationPrompt: candidate.generation_prompt ?? undefined,
+        characterIds: candidate.character_ids ?? undefined,
+        aspectRatio: candidate.aspect_ratio ?? undefined,
       })),
       contentHash: item.content_hash,
     })),
@@ -4879,6 +4897,7 @@ export async function generateWorldAssetReference(
   options?: {
     characterIds?: string[]
     customBasePrompt?: string
+    aspectRatio?: string
   },
 ): Promise<Job[]> {
   const result = await requestJson<{ job: ApiJob; jobs: ApiJob[] }>(
@@ -4896,6 +4915,7 @@ export async function generateWorldAssetReference(
         adjustment_prompt: adjustmentPrompt,
         character_ids: options?.characterIds ?? [],
         custom_base_prompt: options?.customBasePrompt,
+        aspect_ratio: options?.aspectRatio ?? '16:9',
         actor: 'demo-user',
       }),
     },
@@ -4918,6 +4938,26 @@ export async function lockWorldAssetReference(
       body: JSON.stringify({
         expected_version: expectedVersion,
         asset_id: assetId,
+        actor: 'demo-user',
+      }),
+    },
+  )
+}
+
+export async function deleteWorldAssetReference(
+  projectId: string,
+  assetType: 'location' | 'prop',
+  versionId: string,
+  assetId: string,
+  expectedVersion: number,
+): Promise<void> {
+  await requestJson(
+    `/api/v1/projects/${projectId}/preproduction/${assetType}/${versionId}/reference-images/${assetId}`,
+    {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        expected_version: expectedVersion,
         actor: 'demo-user',
       }),
     },

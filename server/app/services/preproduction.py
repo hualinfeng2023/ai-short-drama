@@ -7,12 +7,13 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.config import Settings
+from app.config import ARK_IMAGE_ASPECT_RATIOS, Settings, get_settings
 from app.db.models import (
     Asset,
     Character,
     CharacterCandidate,
     CharacterLookVersion,
+    GenerationRecord,
     Job,
     LocationVersion,
     Project,
@@ -24,7 +25,7 @@ from app.db.models import (
     VoiceProfile,
 )
 from app.schemas import CharacterRead, JobRead
-from app.services.assets import register_file
+from app.services.assets import register_file, resolve_asset_path
 from app.services.character_image_qc import CharacterImageQualityReport
 from app.services.events import append_event
 from app.services.generation_records import ensure_generation_record
@@ -669,6 +670,7 @@ def request_world_asset_image_generation(
     count: int = 1,
     character_ids: list[str] | None = None,
     custom_base_prompt: str | None = None,
+    aspect_ratio: str = "16:9",
     source_asset_id: str | None = None,
     adjustment_prompt: str | None = None,
     actor: str,
@@ -685,6 +687,15 @@ def request_world_asset_image_generation(
             detail={
                 "code": "PREPRODUCTION_NOT_READY",
                 "message": "当前阶段不能生成场景或道具参考图",
+            },
+        )
+    if aspect_ratio not in ARK_IMAGE_ASPECT_RATIOS:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "UNSUPPORTED_IMAGE_ASPECT_RATIO",
+                "message": "所选画面比例不受支持",
+                "details": {"aspect_ratio": aspect_ratio},
             },
         )
     record = _world_asset_record(
@@ -721,7 +732,10 @@ def request_world_asset_image_generation(
     for style_slot, variant in enumerate(built["variants"], start=1):
         style_id = str(variant["style_id"])
         style_label = str(variant["style_label"])
-        prompt = str(variant["prompt"])
+        prompt = (
+            f"{str(variant['prompt']).rstrip('。')}。"
+            f"严格使用 {aspect_ratio} 画面比例。"
+        )
         job, replayed = enqueue_job(
             session,
             project_id=project_id,
@@ -741,6 +755,7 @@ def request_world_asset_image_generation(
                 "style_slot": style_slot,
                 "style_id": style_id,
                 "style_label": style_label,
+                "aspect_ratio": aspect_ratio,
                 "source_asset_id": source_asset.id if source_asset is not None else None,
                 "adjustment_prompt": adjustment_prompt.strip() if adjustment_prompt else None,
                 "character_ids": resolved_character_ids,
@@ -820,6 +835,8 @@ def materialize_world_asset_image(
             "character_ids": character_ids,
             "character_reference_asset_ids": character_reference_asset_ids,
             "custom_base_prompt": payload.get("custom_base_prompt"),
+            "prompt": payload.get("prompt"),
+            "aspect_ratio": payload.get("aspect_ratio") or "16:9",
         }
     )
     ensure_generation_record(
@@ -937,6 +954,114 @@ def lock_world_asset_reference(
         "version_id": record.id,
         "asset_id": asset.id,
         "locked": True,
+        "project_lock_version": project.lock_version,
+    }
+
+
+def delete_world_asset_reference(
+    session: Session,
+    *,
+    project_id: str,
+    asset_type: str,
+    version_id: str,
+    asset_id: str,
+    expected_version: int,
+    actor: str,
+    settings: Settings | None = None,
+    commit: bool = True,
+) -> dict[str, object]:
+    """删除场景/道具参考图候选；已锁定图不可删。"""
+    project = project_or_404(session, project_id)
+    if project.lock_version != expected_version:
+        raise version_conflict(project, expected_version)
+    record = _world_asset_record(
+        session,
+        project_id=project_id,
+        asset_type=asset_type,
+        version_id=version_id,
+    )
+    asset = session.get(Asset, asset_id)
+    if (
+        asset is None
+        or asset.project_id != project_id
+        or asset.kind != "world_asset_reference"
+        or asset.source_entity_type != f"{asset_type}_version"
+        or asset.source_entity_id != record.id
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "NOT_FOUND", "message": "参考图候选不存在或不属于当前资产"},
+        )
+    locked_ids = json.loads(record.reference_asset_ids_json or "[]")
+    if asset.id in locked_ids:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "WORLD_ASSET_REFERENCE_LOCKED",
+                "message": "已锁定的参考图不能删除",
+                "user_action": "请先锁定其他候选图，再删除此图",
+                "retryable": False,
+            },
+        )
+    active_jobs = session.scalars(
+        select(Job).where(
+            Job.project_id == project_id,
+            Job.status.in_({"PENDING", "RETRY_WAIT", "RUNNING", "CANCEL_REQUESTED"}),
+        )
+    ).all()
+    for job in active_jobs:
+        payload = json.loads(job.input_json or "{}")
+        if not isinstance(payload, dict):
+            continue
+        if (
+            payload.get("source_asset_id") == asset.id
+            or payload.get("asset_id") == asset.id
+            or asset.id in (payload.get("reference_asset_ids") or [])
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "WORLD_ASSET_GENERATION_ACTIVE",
+                    "message": "该参考图正在被生成任务使用，暂时不能删除",
+                    "user_action": "请等待相关生成任务结束后重试",
+                    "retryable": True,
+                },
+            )
+    runtime_settings = settings or get_settings()
+    shared = session.scalar(
+        select(Asset).where(Asset.storage_key == asset.storage_key, Asset.id != asset.id)
+    )
+    cleanup_path: Path | None = None
+    if shared is None:
+        try:
+            cleanup_path = resolve_asset_path(runtime_settings, asset)
+        except HTTPException:
+            cleanup_path = None
+    session.delete(asset)
+    project.lock_version += 1
+    project.updated_at = datetime.now(UTC)
+    append_event(
+        session,
+        project_id=project_id,
+        job_id=None,
+        event_type="world_asset.reference_deleted",
+        payload={
+            "asset_type": asset_type,
+            "version_id": record.id,
+            "asset_id": asset_id,
+            "actor": actor,
+        },
+    )
+    session.flush()
+    if commit:
+        session.commit()
+        if cleanup_path is not None:
+            cleanup_path.unlink(missing_ok=True)
+    return {
+        "asset_type": asset_type,
+        "version_id": record.id,
+        "asset_id": asset_id,
+        "deleted": True,
         "project_lock_version": project.lock_version,
     }
 
@@ -1114,9 +1239,30 @@ def preproduction_workspace(session: Session, project_id: str) -> dict[str, obje
         )
         .order_by(Asset.created_at.desc())
     ).all()
+    generation_prompt_by_asset: dict[str, str] = {}
+    asset_ids = [asset.id for asset in world_reference_assets]
+    if asset_ids:
+        for record in session.scalars(
+            select(GenerationRecord).where(GenerationRecord.output_asset_id.in_(asset_ids))
+        ).all():
+            if not record.output_asset_id:
+                continue
+            try:
+                snapshot = json.loads(record.input_snapshot_json or "{}")
+            except json.JSONDecodeError:
+                snapshot = {}
+            prompt = snapshot.get("prompt") if isinstance(snapshot, dict) else None
+            if isinstance(prompt, str) and prompt.strip():
+                generation_prompt_by_asset[record.output_asset_id] = prompt.strip()
     reference_candidates_by_entity: dict[str, list[dict[str, object]]] = {}
     for asset in world_reference_assets:
         asset_metadata = json.loads(asset.metadata_json or "{}")
+        metadata_prompt = asset_metadata.get("prompt")
+        generation_prompt = (
+            metadata_prompt.strip()
+            if isinstance(metadata_prompt, str) and metadata_prompt.strip()
+            else generation_prompt_by_asset.get(asset.id)
+        )
         reference_candidates_by_entity.setdefault(asset.source_entity_id, []).append(
             {
                 "id": asset.id,
@@ -1128,6 +1274,9 @@ def preproduction_workspace(session: Session, project_id: str) -> dict[str, obje
                 "style_label": asset_metadata.get("style_label"),
                 "source_asset_id": asset_metadata.get("source_asset_id"),
                 "adjustment_prompt": asset_metadata.get("adjustment_prompt"),
+                "character_ids": asset_metadata.get("character_ids"),
+                "aspect_ratio": asset_metadata.get("aspect_ratio") or "16:9",
+                "generation_prompt": generation_prompt,
             }
         )
     voices = session.scalars(

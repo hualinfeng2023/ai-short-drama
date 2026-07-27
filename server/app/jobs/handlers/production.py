@@ -317,6 +317,7 @@ async def generate_world_asset_image(
     asset_type = str(payload["asset_type"])
     label = "场景" if asset_type == "location" else "道具"
     await context.checkpoint(session, job, 18, f"组装{label}视觉设定")
+    aspect_ratio = str(payload.get("aspect_ratio") or "16:9")
     source_asset_id = payload.get("source_asset_id")
     character_reference_asset_ids = [
         item
@@ -345,7 +346,7 @@ async def generate_world_asset_image(
         )
     except ImageProviderError as exc:
         raise JobExecutionError(exc.code, exc.message, retryable=exc.retryable) from exc
-    await context.checkpoint(session, job, 82, f"登记{label}参考图候选")
+    await context.checkpoint(session, job, 82, f"登记{label}参考图候选 · {aspect_ratio}")
     asset = materialize_world_asset_image(
         session,
         context.settings,
@@ -356,6 +357,7 @@ async def generate_world_asset_image(
         "asset_id": asset.id,
         "asset_type": asset_type,
         "version_id": str(payload["version_id"]),
+        "aspect_ratio": aspect_ratio,
         "model": image.model,
     }
 
