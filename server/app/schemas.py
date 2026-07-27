@@ -838,12 +838,18 @@ class WorldAssetImagePromptPreviewRequest(BaseModel):
 
 class WorldAssetImageGenerateRequest(WorldAssetImagePromptPreviewRequest):
     custom_base_prompt: str | None = Field(default=None, min_length=20, max_length=4000)
+    aspect_ratio: Literal["1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "21:9"] = "16:9"
     actor: str = Field(default="demo-user", min_length=1, max_length=80)
 
 
 class WorldAssetReferenceLockRequest(BaseModel):
     expected_version: int = Field(ge=1)
     asset_id: str = Field(min_length=36, max_length=36)
+    actor: str = Field(default="demo-user", min_length=1, max_length=80)
+
+
+class WorldAssetReferenceDeleteRequest(BaseModel):
+    expected_version: int = Field(ge=1)
     actor: str = Field(default="demo-user", min_length=1, max_length=80)
 
 

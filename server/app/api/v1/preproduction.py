@@ -10,10 +10,12 @@ from app.schemas import (
     StoryPackageGenerateRequest,
     WorldAssetImageGenerateRequest,
     WorldAssetImagePromptPreviewRequest,
+    WorldAssetReferenceDeleteRequest,
     WorldAssetReferenceLockRequest,
 )
 from app.services.domain_commands import dispatch_domain_command
 from app.services.preproduction import (
+    delete_world_asset_reference,
     lock_world_asset_reference,
     preproduction_workspace,
     preview_world_asset_image_prompts,
@@ -79,6 +81,7 @@ def generate_world_asset_reference(
         count=payload.count,
         character_ids=payload.character_ids,
         custom_base_prompt=payload.custom_base_prompt,
+        aspect_ratio=payload.aspect_ratio,
         source_asset_id=payload.source_asset_id,
         adjustment_prompt=payload.adjustment_prompt,
         actor=payload.actor,
@@ -106,6 +109,30 @@ def lock_world_asset_reference_image(
             asset_type=asset_type,
             version_id=version_id,
             asset_id=payload.asset_id,
+            expected_version=payload.expected_version,
+            actor=payload.actor,
+        )
+    )
+
+
+@router.delete(
+    "/projects/{project_id}/preproduction/{asset_type}/{version_id}/reference-images/{asset_id}",
+)
+def delete_world_asset_reference_image(
+    project_id: str,
+    asset_type: str,
+    version_id: str,
+    asset_id: str,
+    payload: WorldAssetReferenceDeleteRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    return success(
+        delete_world_asset_reference(
+            session,
+            project_id=project_id,
+            asset_type=asset_type,
+            version_id=version_id,
+            asset_id=asset_id,
             expected_version=payload.expected_version,
             actor=payload.actor,
         )
