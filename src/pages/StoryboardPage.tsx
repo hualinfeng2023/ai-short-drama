@@ -1,20 +1,36 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AlertTriangle, ArrowLeft, Ban, Check, Eye, Film, GitBranch, LoaderCircle, LockKeyhole, Maximize2, RefreshCw, Save, Sparkles, UnlockKeyhole, ZoomIn, ZoomOut } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, Ban, Check, Eye, Film, LoaderCircle, LockKeyhole, Maximize2, RefreshCw, Save, Sparkles, UnlockKeyhole, ZoomIn, ZoomOut } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router'
 import {
   approveStoryboardVersion,
   cancelPersistedJob,
   fetchProject,
   fetchStoryboardWorkspace,
+  recommendShotDuration,
   regenerateStoryboardShot,
+  rewriteShotAction,
+  rewriteShotEndState,
   updateShotLock,
   updateStructuredShotSpec,
   type ShotLockScope,
+  type ShotDurationRecommendation,
   type ShotPromptAdapter,
   type StructuredShotSpec,
   type StoryboardWorkspace,
 } from '../api/client'
-import { Button, EmptyState, Modal, PageHeader, StatusBadge, Surface } from '../components/ui'
+import {
+  Button,
+  DurationSlider,
+  EmptyState,
+  HintTooltip,
+  Modal,
+  PageHeader,
+  StatusBadge,
+  Surface,
+  Tab,
+  TabList,
+  Tabs,
+} from '../components/ui'
 import { ImpactConfirmModal } from '../components/ConfirmModal'
 import { PageLoadingSkeleton } from '../components/PageLoadingSkeleton'
 import { ServiceRequiredState } from '../components/ServiceRequiredState'
@@ -22,6 +38,12 @@ import { useStudio } from '../store/StudioContext'
 import { useToast } from '../store/ToastContext'
 import type { JobStatus, ProjectRecord } from '../types'
 import { localizeDisplayText } from '../utils/localizeDisplayText'
+import {
+  getEndActionState,
+  getShotFieldReviewStatus,
+  getShotIssuePresentation,
+  getStoryboardReviewSummary,
+} from '../utils/storyboardReview'
 
 const ACTIVE_JOB_STATUSES = new Set<JobStatus>([
   'PENDING',
@@ -33,20 +55,6 @@ const ACTIVE_JOB_STATUSES = new Set<JobStatus>([
 /** 与后端 StoryboardShotRegenerateRequest.note max_length 对齐 */
 const REGEN_NOTE_MAX = 500
 
-function workflowNodeLabel(value: string): string {
-  if (value === 'storyboard.plan') return '分镜规划'
-  if (value === 'animatic.render' || value.startsWith('animatic.render.')) return '节奏样片渲染'
-  const take = value.match(/^storyboard\.take\.(\d+)(?:\.regen\..+)?$/)
-  if (take) return `分镜版本 ${take[1]}`
-  const keyframe = value.match(/^keyframe\.(\d+)\.(\d+)$/)
-  if (keyframe) return `镜头 ${keyframe[1]} · 关键帧候选 ${keyframe[2]}`
-  const video = value.match(/^video\.(\d+)$/)
-  if (video) return `镜头 ${video[1]} · 视频`
-  if (value === 'audio.pipeline') return '音频流程'
-  if (value === 'timeline.multitrack') return '多轨时间线'
-  return localizeDisplayText(value)
-}
-
 /** 卡片已单独展示镜头号，去掉标题里重复的 code 前缀/后缀。 */
 function displayShotTitle(title: string, code: string): string {
   let next = title.trim()
@@ -54,6 +62,7 @@ function displayShotTitle(title: string, code: string): string {
   if (next.endsWith(suffix)) next = next.slice(0, -suffix.length).trim()
   const prefix = `${code} `
   if (next.startsWith(prefix)) next = next.slice(prefix.length).trim()
+  next = next.replace(/^S\d+\s+/i, '').trim()
   return next || title
 }
 
@@ -136,6 +145,491 @@ function audioSummary(spec: StructuredShotSpec): string {
 
 function fieldValue(spec: StructuredShotSpec, fieldPath: string): unknown {
   return spec[fieldPath as keyof StructuredShotSpec]
+}
+
+function updateShotDuration(spec: StructuredShotSpec, durationSec: number): StructuredShotSpec {
+  const pacing = /^\d+(?:\.\d+)?\s*秒/.test(spec.technique.pacing)
+    ? spec.technique.pacing.replace(/^\d+(?:\.\d+)?\s*秒/, `${durationSec} 秒`)
+    : spec.technique.pacing
+  return {
+    ...spec,
+    duration_sec: durationSec,
+    technique: { ...spec.technique, pacing },
+  }
+}
+
+function FocusedShotReview({
+  shot,
+  canEdit,
+  saving,
+  onPreview,
+  onRegenerate,
+  onRewriteApplied,
+  onSave,
+}: {
+  shot: StoryboardWorkspace['shots'][number]
+  canEdit: boolean
+  saving: boolean
+  onPreview: () => void
+  onRegenerate: () => void
+  onRewriteApplied: () => Promise<void>
+  onSave: (spec: StructuredShotSpec, adapter: ShotPromptAdapter) => Promise<void>
+}) {
+  const [draft, setDraft] = useState<StructuredShotSpec>(() => structuredClone(shot.shotSpec))
+  const [dirty, setDirty] = useState(false)
+  const [editorError, setEditorError] = useState<string | null>(null)
+  const [durationRecommendation, setDurationRecommendation] =
+    useState<ShotDurationRecommendation | null>(null)
+  const [durationRecommendationBusy, setDurationRecommendationBusy] = useState(false)
+  const [durationRecommendationError, setDurationRecommendationError] = useState<string | null>(null)
+  const [actionRewriteBusy, setActionRewriteBusy] = useState(false)
+  const [actionRewriteFeedback, setActionRewriteFeedback] = useState<string | null>(null)
+  const [actionRewriteError, setActionRewriteError] = useState<string | null>(null)
+  const [endStateRewriteBusy, setEndStateRewriteBusy] = useState(false)
+  const [endStateRewriteFeedback, setEndStateRewriteFeedback] = useState<string | null>(null)
+  const [endStateRewriteError, setEndStateRewriteError] = useState<string | null>(null)
+  const issues = shot.validationReport.issues
+  const effectiveLocks = shot.lockSnapshot.effective_fields ?? {}
+  const actionReviewStatus = getShotFieldReviewStatus(
+    issues,
+    'visual_content.action',
+    draft.visual_content.action !== shot.shotSpec.visual_content.action,
+    '画面动作',
+  )
+  const durationReviewStatus = getShotFieldReviewStatus(
+    issues,
+    'duration_sec',
+    draft.duration_sec !== shot.shotSpec.duration_sec,
+    '镜头时长',
+  )
+  const endStateReviewStatus = getShotFieldReviewStatus(
+    issues,
+    'end_state.action_state',
+    getEndActionState(draft) !== getEndActionState(shot.shotSpec),
+    '结尾状态',
+  )
+
+  useEffect(() => {
+    if (dirty) return
+    setDraft(structuredClone(shot.shotSpec))
+  }, [dirty, shot.shotSpec])
+
+  function updateEndActionState(value: string) {
+    setDraft((current) => ({
+      ...current,
+      end_state: { ...current.end_state, action_state: value },
+    }))
+    setDurationRecommendation(null)
+    setDirty(true)
+  }
+
+  async function requestDurationRecommendation() {
+    setDurationRecommendationBusy(true)
+    setDurationRecommendationError(null)
+    try {
+      setDurationRecommendation(await recommendShotDuration(shot.shotSpecId, draft))
+    } catch (reason) {
+      setDurationRecommendationError(
+        reason instanceof Error ? reason.message : '暂时无法生成推荐时长',
+      )
+    } finally {
+      setDurationRecommendationBusy(false)
+    }
+  }
+
+  async function rewriteActionAndRevalidate() {
+    setActionRewriteBusy(true)
+    setActionRewriteError(null)
+    setActionRewriteFeedback(null)
+    try {
+      if (dirty) {
+        await onSave(draft, shot.promptAdapter)
+      }
+      const result = await rewriteShotAction(shot.shotSpecId, draft)
+      setDraft(result.shotSpec)
+      setDurationRecommendation(null)
+      setDirty(false)
+      setActionRewriteFeedback(
+        result.provider === 'deterministic'
+          ? '已用本地规则精简动作，并重新运行镜头检查。'
+          : `AI 已精简动作：${result.reason}`,
+      )
+      await onRewriteApplied()
+    } catch (reason) {
+      setActionRewriteError(
+        reason instanceof Error ? reason.message : 'AI 改写失败，请稍后重试',
+      )
+    } finally {
+      setActionRewriteBusy(false)
+    }
+  }
+
+  async function rewriteEndStateAndRevalidate() {
+    setEndStateRewriteBusy(true)
+    setEndStateRewriteError(null)
+    setEndStateRewriteFeedback(null)
+    try {
+      if (dirty) {
+        await onSave(draft, shot.promptAdapter)
+      }
+      const result = await rewriteShotEndState(shot.shotSpecId, draft)
+      setDraft(result.shotSpec)
+      setDirty(false)
+      setEndStateRewriteFeedback(
+        result.provider === 'deterministic'
+          ? '已补全结尾状态，并重新运行镜头检查。'
+          : `AI 已优化结尾状态：${result.reason}`,
+      )
+      await onRewriteApplied()
+    } catch (reason) {
+      setEndStateRewriteError(
+        reason instanceof Error ? reason.message : 'AI 优化失败，请稍后重试',
+      )
+    } finally {
+      setEndStateRewriteBusy(false)
+    }
+  }
+
+  async function save() {
+    setEditorError(null)
+    try {
+      await onSave(draft, shot.promptAdapter)
+      setDirty(false)
+    } catch (reason) {
+      setEditorError(reason instanceof Error ? reason.message : '镜头保存失败')
+    }
+  }
+
+  const conceptImageIsCurrent = Boolean(
+    shot.imageUrl && shot.imageStatus !== 'SUSPECT',
+  )
+  const conceptImagePlaceholder = shot.status === 'QUEUED'
+    ? '概念图生成中'
+    : shot.imageStatus === 'SUSPECT'
+      ? '概念图待重新生成'
+      : '暂无概念图'
+
+  return (
+    <section className="storyboard-focus" aria-labelledby="storyboard-focus-title">
+      <header className="storyboard-focus__header">
+        <div>
+          <span className="storyboard-focus__code">{shot.code}</span>
+          <div>
+            <h2 id="storyboard-focus-title">{displayShotTitle(shot.title, shot.code)}</h2>
+            <p>{shot.shotSpec.narrative_goal || shot.description}</p>
+          </div>
+        </div>
+        <div className="storyboard-focus__actions">
+          <Button
+            disabled={!conceptImageIsCurrent}
+            onClick={onPreview}
+            size="sm"
+            variant="secondary"
+          >
+            <Eye size={14} />查看画面
+          </Button>
+          {canEdit ? (
+            <Button onClick={onRegenerate} size="sm" variant="secondary">
+              <RefreshCw size={14} />重生成
+            </Button>
+          ) : null}
+        </div>
+      </header>
+
+      <div className="storyboard-focus__review-overview">
+        <button
+          aria-label={`查看 ${shot.code} 分镜概念图`}
+          className="storyboard-focus__concept-preview"
+          disabled={!conceptImageIsCurrent}
+          onClick={onPreview}
+          type="button"
+        >
+          {conceptImageIsCurrent ? (
+            <img
+              alt={`${shot.code} 分镜概念图`}
+              draggable={false}
+              loading="lazy"
+              src={shot.imageUrl}
+            />
+          ) : (
+            <span className="storyboard-focus__concept-empty">
+              <Film aria-hidden size={22} />
+              {conceptImagePlaceholder}
+            </span>
+          )}
+          <span className="storyboard-focus__concept-caption">
+            <strong>分镜概念图</strong>
+            <small>
+              {conceptImageIsCurrent ? '点击查看原图' : '修改后需重新生成'}
+            </small>
+          </span>
+        </button>
+
+        {issues.length > 0 ? (
+          <section className="storyboard-focus__diagnostics" aria-label="镜头检查结果">
+          <header>
+            <div>
+              <strong>检查结果</strong>
+              <span>
+                {issues.some((issue) => issue.severity === 'BLOCKER')
+                  ? '先处理阻断项，再保存并重新验证。'
+                  : '确认提醒内容后，可以继续审核。'}
+              </span>
+            </div>
+            <span>
+              {issues.filter((issue) => issue.severity === 'BLOCKER').length} 阻断
+              {' · '}
+              {issues.filter((issue) => issue.severity === 'WARNING').length} 提醒
+            </span>
+          </header>
+          <div className="storyboard-focus__issue-list">
+            {issues.map((issue) => {
+              const presentation = getShotIssuePresentation(issue, draft)
+              return (
+                <article
+                  data-severity={issue.severity}
+                  key={`${issue.code}:${issue.field_path}`}
+                >
+                  <span className="storyboard-focus__issue-icon" aria-hidden>
+                    <AlertTriangle size={16} />
+                  </span>
+                  <div className="storyboard-focus__issue-content">
+                    <div>
+                      <strong>{presentation.fieldLabel}</strong>
+                      <span>{issue.severity === 'BLOCKER' ? '阻断' : '提醒'}</span>
+                    </div>
+                    <p>{presentation.guidance}</p>
+                    <details>
+                      <summary>技术详情</summary>
+                      <p>{issue.message}</p>
+                      <code>{issue.field_path}</code>
+                    </details>
+                  </div>
+                </article>
+              )
+            })}
+          </div>
+          </section>
+        ) : (
+          <div className="storyboard-focus__passed">
+            <Check size={17} />
+            <div>
+              <strong>这个镜头已通过检查</strong>
+              <span>可以继续检查其他镜头，或查看画面确认导演意图。</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="storyboard-focus__form">
+        <div className="storyboard-focus__field storyboard-focus__field--duration">
+          <div className="storyboard-focus__duration-main">
+            <div className="storyboard-focus__field-copy">
+              <span className="storyboard-focus__field-title">
+                <span>镜头时长</span>
+                <HintTooltip label="查看镜头时长填写说明">
+                  为主要动作留出足够的生成时间。
+                </HintTooltip>
+                <StatusBadge {...durationReviewStatus} size="sm" variant="inline" />
+              </span>
+              {effectiveLocks.duration_sec ? <em>该字段已锁定，请在专业质检中管理。</em> : null}
+            </div>
+            <Button
+              aria-label={durationRecommendation ? '重新生成 AI 推荐时长范围' : '生成 AI 推荐时长范围'}
+              disabled={durationRecommendationBusy}
+              onClick={() => void requestDurationRecommendation()}
+              size="sm"
+              variant="ai"
+            >
+              {durationRecommendationBusy
+                ? <LoaderCircle aria-hidden className="spin" size={14} />
+                : <Sparkles aria-hidden size={14} />}
+              {durationRecommendationBusy
+                ? '正在分析…'
+                : durationRecommendation
+                  ? '重新推荐'
+                  : 'AI 推荐'}
+            </Button>
+          </div>
+          <DurationSlider
+            disabled={!canEdit || Boolean(effectiveLocks.duration_sec)}
+            label="镜头时长"
+            max={12}
+            min={0.5}
+            onChange={(value) => {
+              setDraft((current) => updateShotDuration(current, value))
+              setDirty(true)
+            }}
+            recommendedMax={durationRecommendation?.recommendedMaxSec}
+            recommendedMin={durationRecommendation?.recommendedMinSec}
+            recommendedValue={durationRecommendation?.recommendedDurationSec}
+            step={0.5}
+            value={draft.duration_sec}
+          />
+          {durationRecommendationError ? (
+            <p className="storyboard-focus__duration-error" role="alert">
+              {durationRecommendationError}
+            </p>
+          ) : null}
+          {durationRecommendation ? (
+            <div className="storyboard-focus__duration-recommendation" role="status">
+              <Sparkles aria-hidden size={15} />
+              <div>
+                <span>
+                  {durationRecommendation.provider === 'deterministic'
+                    ? '智能建议（本地规则）'
+                    : 'AI 建议'}
+                </span>
+                <strong>
+                  推荐范围 {durationRecommendation.recommendedMinSec}–{durationRecommendation.recommendedMaxSec} 秒
+                </strong>
+                <small>建议时长 {durationRecommendation.recommendedDurationSec} 秒</small>
+                <p>{durationRecommendation.reason}</p>
+              </div>
+              <Button
+                disabled={
+                  !canEdit
+                  || Boolean(effectiveLocks.duration_sec)
+                  || draft.duration_sec === durationRecommendation.recommendedDurationSec
+                }
+                onClick={() => {
+                  setDraft((current) => (
+                    updateShotDuration(current, durationRecommendation.recommendedDurationSec)
+                  ))
+                  setDirty(true)
+                }}
+                size="sm"
+                variant="secondary"
+              >
+                {draft.duration_sec === durationRecommendation.recommendedDurationSec
+                  ? <><Check aria-hidden size={14} />已采用</>
+                  : '采用建议'}
+              </Button>
+            </div>
+          ) : null}
+        </div>
+        <div className="storyboard-focus__field storyboard-focus__wide">
+          <div className="storyboard-focus__field-heading">
+            <span className="storyboard-focus__field-title">
+              <label htmlFor={`shot-action-${shot.shotSpecId}`}>画面动作</label>
+              <HintTooltip label="查看画面动作填写说明">
+                只描述这个镜头中最重要、最适合被看见的动作。
+              </HintTooltip>
+              <StatusBadge
+                {...actionReviewStatus}
+                size="sm"
+                variant="inline"
+              />
+            </span>
+            <Button
+              disabled={
+                actionRewriteBusy
+                || saving
+                || !canEdit
+                || Boolean(effectiveLocks.visual_content)
+              }
+              onClick={() => void rewriteActionAndRevalidate()}
+              size="sm"
+              variant="ai"
+            >
+              {actionRewriteBusy
+                ? <LoaderCircle aria-hidden className="spin" size={14} />
+                : <Sparkles aria-hidden size={14} />}
+              {actionRewriteBusy ? '正在优化…' : 'AI 优化'}
+            </Button>
+          </div>
+          <textarea
+            disabled={!canEdit || Boolean(effectiveLocks.visual_content)}
+            id={`shot-action-${shot.shotSpecId}`}
+            onChange={(event) => {
+              setDraft((current) => ({
+                ...current,
+                visual_content: {
+                  ...current.visual_content,
+                  action: event.target.value,
+                },
+              }))
+              setDurationRecommendation(null)
+              setDirty(true)
+            }}
+            rows={4}
+            value={draft.visual_content.action}
+          />
+          {effectiveLocks.visual_content ? <em>该字段已锁定，请在专业质检中管理。</em> : null}
+          {actionRewriteFeedback ? (
+            <p className="storyboard-focus__rewrite-feedback" role="status">
+              <Check aria-hidden size={14} />{actionRewriteFeedback}
+            </p>
+          ) : null}
+          {actionRewriteError ? (
+            <p className="storyboard-focus__rewrite-error" role="alert">
+              {actionRewriteError}
+            </p>
+          ) : null}
+        </div>
+        <div className="storyboard-focus__field storyboard-focus__wide">
+          <div className="storyboard-focus__field-heading">
+            <span className="storyboard-focus__field-title">
+              <label htmlFor={`shot-end-state-${shot.shotSpecId}`}>结尾状态</label>
+              <HintTooltip label="查看结尾状态填写说明">
+                说明动作完成后，人物、物体或环境发生了什么变化。
+              </HintTooltip>
+              <StatusBadge
+                {...endStateReviewStatus}
+                size="sm"
+                variant="inline"
+              />
+            </span>
+            <Button
+              disabled={
+                endStateRewriteBusy
+                || saving
+                || !canEdit
+                || Boolean(effectiveLocks.end_state)
+              }
+              onClick={() => void rewriteEndStateAndRevalidate()}
+              size="sm"
+              variant="ai"
+            >
+              {endStateRewriteBusy
+                ? <LoaderCircle aria-hidden className="spin" size={14} />
+                : <Sparkles aria-hidden size={14} />}
+              {endStateRewriteBusy ? '正在优化…' : 'AI 优化'}
+            </Button>
+          </div>
+          <textarea
+            disabled={!canEdit || Boolean(effectiveLocks.end_state)}
+            id={`shot-end-state-${shot.shotSpecId}`}
+            onChange={(event) => updateEndActionState(event.target.value)}
+            rows={3}
+            value={getEndActionState(draft)}
+          />
+          {effectiveLocks.end_state ? <em>该字段已锁定，请在专业质检中管理。</em> : null}
+          {endStateRewriteFeedback ? (
+            <p className="storyboard-focus__rewrite-feedback" role="status">
+              <Check aria-hidden size={14} />{endStateRewriteFeedback}
+            </p>
+          ) : null}
+          {endStateRewriteError ? (
+            <p className="storyboard-focus__rewrite-error" role="alert">
+              {endStateRewriteError}
+            </p>
+          ) : null}
+        </div>
+      </div>
+
+      {editorError ? (
+        <p className="brief-save-message brief-save-message--error" role="alert">{editorError}</p>
+      ) : null}
+      <footer className="storyboard-focus__save">
+        <span>{dirty ? '有未保存的修改' : '修改后将重新运行镜头检查'}</span>
+        <Button disabled={!canEdit || !dirty || saving} onClick={() => void save()}>
+          {saving ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}
+          保存并重新验证
+        </Button>
+      </footer>
+    </section>
+  )
 }
 
 function ShotSpecEditorRow({
@@ -414,7 +908,11 @@ export function StoryboardPage() {
   const [regenTarget, setRegenTarget] = useState<DetailShotState | null>(null)
   const [regenNote, setRegenNote] = useState('')
   const [regenError, setRegenError] = useState<string | null>(null)
+  const [selectedShotId, setSelectedShotId] = useState<string | null>(null)
+  const [reviewFilter, setReviewFilter] = useState<'ALL' | 'ISSUES'>('ALL')
+  const [workspaceMode, setWorkspaceMode] = useState<'REVIEW' | 'QUALITY'>('REVIEW')
   const regenOpenRef = useRef(false)
+  const reviewWorkspaceRef = useRef<HTMLDivElement | null>(null)
   regenOpenRef.current = regenTarget !== null
 
   function openRegen(shot: DetailShotState) {
@@ -609,14 +1107,55 @@ export function StoryboardPage() {
   const canRegenerate =
     workspace.storyboard.status !== 'APPROVED'
     && project.status !== 'STORYBOARD_APPROVED'
-  const hasNeedsReview = workspace.shots.some(
-    (shot) => shot.reviewStatus === 'NEEDS_REVIEW',
+  const reviewSummary = getStoryboardReviewSummary(
+    workspace.shots,
+    workspace.storyboard.status === 'APPROVED' || project.status === 'STORYBOARD_APPROVED',
   )
+  const issueShots = workspace.shots.filter(
+    (shot) => shot.validationReport.issues.length > 0,
+  )
+  const selectedShot = workspace.shots.find(
+    (shot) => shot.shotSpecId === selectedShotId,
+  ) ?? issueShots[0] ?? workspace.shots[0]
+  const visibleShots = reviewFilter === 'ISSUES' ? issueShots : workspace.shots
+  const totalDurationSeconds = Math.round(
+    workspace.shots.reduce((sum, shot) => sum + shot.durationMs, 0) / 1000,
+  )
+
+  const phaseCopy = {
+    APPROVED: {
+      description: '这一版分镜已经锁定，正式制作将使用当前镜头规范。',
+      title: '第 4 阶段已批准',
+    },
+    BLOCKED: {
+      description: `先修复阻断项；全片另有 ${reviewSummary.warningCount} 条提醒可继续确认。`,
+      title: `${reviewSummary.blockerCount} 个阻断问题待修复`,
+    },
+    READY: {
+      description: '所有镜头均已通过检查，可以进行最终确认并进入正式制作。',
+      title: '动态分镜已准备好批准',
+    },
+    WARNINGS: {
+      description: `没有阻断问题，仍有 ${reviewSummary.warningCount} 个提醒需要确认。`,
+      title: '检查提醒后即可批准',
+    },
+  }[reviewSummary.phase]
+
+  function focusFirstIssue() {
+    const target = issueShots[0] ?? selectedShot
+    if (!target) return
+    setWorkspaceMode('REVIEW')
+    setReviewFilter('ISSUES')
+    setSelectedShotId(target.shotSpecId)
+    window.requestAnimationFrame(() => {
+      reviewWorkspaceRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+  }
 
   return <div className="page page--storyboard" data-aspect={project.aspectRatio}>
     <PageHeader
       title="动态分镜审核"
-      description="镜头数由批准后的剧本动态决定；不满意的镜头可单独重生成，再批准进入正式制作。"
+      description="按成片顺序检查镜头，优先修复阻断问题，确认后进入正式制作。"
       actions={
         <>
           <Link className="button button--secondary button--md" to={`/projects/${projectId}/preproduction`}>
@@ -625,96 +1164,255 @@ export function StoryboardPage() {
           <Button onClick={() => void refresh()} variant="secondary">
             <RefreshCw size={16} />刷新
           </Button>
-          <Button disabled={busy || hasNeedsReview || project.status !== 'STORYBOARD_READY'} onClick={() => setApproveOpen(true)}>
-            {busy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}
-            批准第 4 阶段
-          </Button>
         </>
       }
     />
     {error ? <div className="brief-save-message brief-save-message--error" role="alert">{error}</div> : null}
-    {hasNeedsReview ? (
-      <div className="brief-save-message brief-save-message--error" role="alert">
-        有镜头未通过 ShotValidator。修正阻断项并保存后，才能批准第 4 阶段。
+    <Surface
+      className={`storyboard-review-status is-${reviewSummary.phase.toLowerCase()}`}
+      outline={reviewSummary.phase === 'BLOCKED' ? 'danger' : reviewSummary.phase === 'WARNINGS' ? 'warning' : 'none'}
+      padding="md"
+      tone={reviewSummary.phase === 'BLOCKED' ? 'danger' : reviewSummary.phase === 'WARNINGS' ? 'warning' : reviewSummary.phase === 'READY' ? 'success' : 'subtle'}
+    >
+      <div className="storyboard-review-status__message">
+        {reviewSummary.phase === 'BLOCKED' || reviewSummary.phase === 'WARNINGS'
+          ? <AlertTriangle size={20} />
+          : <Check size={20} />}
+        <div>
+          <strong>{phaseCopy.title}</strong>
+          <span>{phaseCopy.description}</span>
+        </div>
       </div>
-    ) : null}
-    <section className="story-gate-summary"><div><span>分镜</span><strong>第 {workspace.storyboard.version} 版</strong></div><div><span>镜头</span><strong>{workspace.shots.length}</strong></div><div><span>总时长</span><strong>{Math.round(workspace.shots.reduce((sum, shot) => sum + shot.durationMs, 0) / 1000)} 秒</strong></div><div><span>审批阶段</span><StatusBadge status={workspace.gate?.status ?? workspace.storyboard.status} /></div></section>
-    <div className="storyboard-layout">
-      <Surface className="story-section storyboard-board">
-        <div className="section-heading">
-          <div>
-            <p className="eyebrow">导演级分镜表</p>
-            <h2>ShotSpec 镜头序列</h2>
-            <p>默认查看导演决策；展开任一镜头可编辑全部结构化字段、管理三层锁并重新编译 Prompt。</p>
+      <div className="storyboard-review-status__meta" aria-label="分镜版本信息">
+        <span>第 {workspace.storyboard.version} 版</span>
+        <span>{workspace.shots.length} 个镜头</span>
+        <span>{totalDurationSeconds} 秒</span>
+      </div>
+      {reviewSummary.phase === 'BLOCKED' || reviewSummary.phase === 'WARNINGS' ? (
+        <Button
+          onClick={focusFirstIssue}
+          variant={reviewSummary.phase === 'BLOCKED' ? 'danger' : 'secondary'}
+        >
+          <AlertTriangle size={16} />
+          {reviewSummary.phase === 'BLOCKED' ? '修复阻断项' : '检查提醒'}
+        </Button>
+      ) : reviewSummary.phase === 'READY' ? (
+        <Button
+          disabled={busy || project.status !== 'STORYBOARD_READY'}
+          onClick={() => setApproveOpen(true)}
+        >
+          {busy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}
+          批准进入正式制作
+        </Button>
+      ) : (
+        <StatusBadge status={workspace.gate?.status ?? workspace.storyboard.status} />
+      )}
+    </Surface>
+
+    <Surface className="storyboard-review-shell" padding="none">
+      <div className="storyboard-review-toolbar">
+        <div>
+          <p className="eyebrow">审核工作台</p>
+          <h2>按镜头完成检查与修复</h2>
+        </div>
+        <Tabs>
+          <TabList aria-label="分镜审核视图">
+            <Tab
+              controls="storyboard-review-panel"
+              onClick={() => setWorkspaceMode('REVIEW')}
+              selected={workspaceMode === 'REVIEW'}
+            >
+              导演审核
+            </Tab>
+            <Tab
+              controls="storyboard-quality-panel"
+              onClick={() => setWorkspaceMode('QUALITY')}
+              selected={workspaceMode === 'QUALITY'}
+            >
+              专业质检
+            </Tab>
+          </TabList>
+        </Tabs>
+      </div>
+
+      {workspaceMode === 'REVIEW' ? (
+        <div
+          className="storyboard-review-workspace"
+          id="storyboard-review-panel"
+          ref={reviewWorkspaceRef}
+          role="tabpanel"
+        >
+          <aside className="storyboard-shot-navigator" aria-label="镜头导航">
+            <div className="storyboard-shot-navigator__heading">
+              <div>
+                <strong>镜头顺序</strong>
+                <span>{reviewFilter === 'ISSUES' ? `${issueShots.length} 个需要处理` : `${workspace.shots.length} 个镜头`}</span>
+              </div>
+              <div className="storyboard-shot-navigator__filters">
+                <button
+                  aria-pressed={reviewFilter === 'ALL'}
+                  onClick={() => setReviewFilter('ALL')}
+                  type="button"
+                >
+                  全部
+                </button>
+                <button
+                  aria-pressed={reviewFilter === 'ISSUES'}
+                  onClick={() => setReviewFilter('ISSUES')}
+                  type="button"
+                >
+                  只看问题
+                </button>
+              </div>
+            </div>
+            <div className="storyboard-shot-navigator__list">
+              {visibleShots.map((shot) => {
+                const blockers = shot.validationReport.issues.filter(
+                  (issue) => issue.severity === 'BLOCKER',
+                ).length
+                const warnings = shot.validationReport.issues.filter(
+                  (issue) => issue.severity === 'WARNING',
+                ).length
+                return (
+                  <button
+                    aria-current={selectedShot?.shotSpecId === shot.shotSpecId ? 'true' : undefined}
+                    key={shot.shotSpecId}
+                    onClick={() => setSelectedShotId(shot.shotSpecId)}
+                    type="button"
+                  >
+                    <span className="storyboard-shot-navigator__code">{shot.code}</span>
+                    <span className="storyboard-shot-navigator__title">
+                      <strong>{displayShotTitle(shot.title, shot.code)}</strong>
+                      <small>{shot.shotSpec.duration_sec.toFixed(1)} 秒 · {shot.shotSpec.visual_content.description}</small>
+                    </span>
+                    <span
+                      className={[
+                        'storyboard-shot-navigator__state',
+                        blockers ? 'is-blocking' : warnings ? 'is-warning' : 'is-passed',
+                      ].join(' ')}
+                    >
+                      {blockers ? `阻断 ${blockers}` : warnings ? `提醒 ${warnings}` : '通过'}
+                    </span>
+                  </button>
+                )
+              })}
+              {visibleShots.length === 0 ? (
+                <div className="storyboard-shot-navigator__empty">
+                  <Check size={18} />
+                  <span>当前没有需要处理的问题</span>
+                </div>
+              ) : null}
+            </div>
+          </aside>
+          <main>
+            {selectedShot ? (
+              <FocusedShotReview
+                canEdit={canRegenerate}
+                key={selectedShot.shotSpecId}
+                onPreview={() => {
+                  setPreviewShot(openShotDetail(selectedShot))
+                  setPreviewZoom(100)
+                }}
+                onRegenerate={() => openRegen(openShotDetail(selectedShot))}
+                onRewriteApplied={async () => {
+                  setError(null)
+                  setSelectedShotId(selectedShot.shotSpecId)
+                  await refresh()
+                }}
+                onSave={async (spec, adapter) => {
+                  setSelectedShotId(selectedShot.shotSpecId)
+                  await saveStructuredShot(selectedShot, spec, adapter)
+                }}
+                saving={saveBusyId === selectedShot.shotSpecId}
+                shot={selectedShot}
+              />
+            ) : (
+              <EmptyState
+                title="没有可审核的镜头"
+                description="刷新页面，或返回第 3 阶段检查分镜生成任务。"
+              />
+            )}
+          </main>
+        </div>
+      ) : (
+        <div
+          className="storyboard-quality-panel"
+          id="storyboard-quality-panel"
+          role="tabpanel"
+        >
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">完整镜头规范</p>
+              <h2>ShotSpec 专业质检</h2>
+              <p>用于逐字段排查、管理三层锁和查看 Prompt 编译结果。所有修改与导演审核共用同一份 ShotSpec。</p>
+            </div>
+          </div>
+          <div className="director-shot-table">
+            <div className="director-shot-table__head" aria-hidden>
+              <span>镜头</span>
+              <span>时长</span>
+              <span>画面内容</span>
+              <span>灯光</span>
+              <span>运镜</span>
+              <span>画风</span>
+              <span>手法</span>
+              <span>声音</span>
+            </div>
+            {workspace.shots.map((shot) => (
+              <ShotSpecEditorRow
+                canEdit={canRegenerate}
+                key={shot.shotSpecId}
+                lockBusy={lockBusy}
+                onPreview={() => {
+                  setPreviewShot(openShotDetail(shot))
+                  setPreviewZoom(100)
+                }}
+                onRegenerate={() => openRegen(openShotDetail(shot))}
+                onSave={(spec, adapter) => saveStructuredShot(shot, spec, adapter)}
+                onToggleLock={(scope, fieldPath, value, locked) => (
+                  toggleShotLock(shot, scope, fieldPath, value, locked)
+                )}
+                saving={saveBusyId === shot.shotSpecId}
+                shot={shot}
+              />
+            ))}
           </div>
         </div>
-        <div className="director-shot-table">
-          <div className="director-shot-table__head" aria-hidden>
-            <span>镜头</span>
-            <span>时长</span>
-            <span>画面内容</span>
-            <span>灯光</span>
-            <span>运镜</span>
-            <span>画风</span>
-            <span>手法</span>
-            <span>声音</span>
-          </div>
-          {workspace.shots.map((shot) => (
-            <ShotSpecEditorRow
-              canEdit={canRegenerate}
-              key={shot.shotSpecId}
-              lockBusy={lockBusy}
-              onPreview={() => {
-                setPreviewShot(openShotDetail(shot))
-                setPreviewZoom(100)
-              }}
-              onRegenerate={() => openRegen(openShotDetail(shot))}
-              onSave={(spec, adapter) => saveStructuredShot(shot, spec, adapter)}
-              onToggleLock={(scope, fieldPath, value, locked) => (
-                toggleShotLock(shot, scope, fieldPath, value, locked)
-              )}
-              saving={saveBusyId === shot.shotSpecId}
-              shot={shot}
-            />
-          ))}
+      )}
+    </Surface>
+
+    <Surface className="approval-card">
+      <p className="eyebrow">节奏样片</p>
+      <h2>低成本节奏样片</h2>
+      {workspace.storyboard.animaticUrl && !activeAnimaticJob ? (
+        <video controls preload="metadata" src={workspace.storyboard.animaticUrl} />
+      ) : activeAnimaticJob ? (
+        <div className="preview-media-wait">
+          <LoaderCircle className="spin" size={20} />
+          <span>
+            {activeAnimaticJob.status === 'CANCEL_REQUESTED'
+              ? '正在停止'
+              : activeAnimaticJob.stage || '正在装配'}
+          </span>
+          <Button
+            disabled={animaticCancelBusy || activeAnimaticJob.status === 'CANCEL_REQUESTED'}
+            onClick={() => void stopAnimatic()}
+            size="sm"
+            variant="secondary"
+          >
+            {animaticCancelBusy || activeAnimaticJob.status === 'CANCEL_REQUESTED'
+              ? <LoaderCircle className="spin" size={14} />
+              : <Ban size={14} />}
+            {activeAnimaticJob.status === 'CANCEL_REQUESTED' ? '停止中' : '停止'}
+          </Button>
         </div>
-      </Surface>
-      <aside>
-        <Surface className="approval-card">
-          <p className="eyebrow">节奏样片</p>
-          <h2>低成本节奏样片</h2>
-          {workspace.storyboard.animaticUrl && !activeAnimaticJob ? (
-            <video controls preload="metadata" src={workspace.storyboard.animaticUrl} />
-          ) : activeAnimaticJob ? (
-            <div className="preview-media-wait">
-              <LoaderCircle className="spin" size={20} />
-              <span>
-                {activeAnimaticJob.status === 'CANCEL_REQUESTED'
-                  ? '正在停止'
-                  : activeAnimaticJob.stage || '正在装配'}
-              </span>
-              <Button
-                disabled={animaticCancelBusy || activeAnimaticJob.status === 'CANCEL_REQUESTED'}
-                onClick={() => void stopAnimatic()}
-                size="sm"
-                variant="secondary"
-              >
-                {animaticCancelBusy || activeAnimaticJob.status === 'CANCEL_REQUESTED'
-                  ? <LoaderCircle className="spin" size={14} />
-                  : <Ban size={14} />}
-                {activeAnimaticJob.status === 'CANCEL_REQUESTED' ? '停止中' : '停止'}
-              </Button>
-            </div>
-          ) : (
-            <div className="preview-media-wait">
-              <span>尚未生成</span>
-            </div>
-          )}
-          <p>包含分镜、临时音轨、字幕与逐镜头时长。装配中可随时停止。</p>
-        </Surface>
-        <Surface className="approval-card"><p className="eyebrow">生成进度</p><h2><GitBranch size={18} />任务顺序</h2><div className="workflow-node-list">{workspace.workflow?.nodes.map((node) => <div key={node.id}><span>{workflowNodeLabel(node.nodeKey)}</span><StatusBadge status={node.status} /><small>{node.dependencies.map(workflowNodeLabel).join(' → ') || '起始步骤'}</small></div>)}</div></Surface>
-      </aside>
-    </div>
+      ) : (
+        <div className="preview-media-wait">
+          <span>尚未生成</span>
+        </div>
+      )}
+      <p>包含分镜、临时音轨、字幕与逐镜头时长。装配中可随时停止。</p>
+    </Surface>
 
     <ImpactConfirmModal
       confirmLabel="批准第 4 阶段"

@@ -827,6 +827,27 @@ export interface ShotValidationReport {
   issues: ShotValidationIssue[]
 }
 
+export interface ShotDurationRecommendation {
+  recommendedDurationSec: number
+  recommendedMinSec: number
+  recommendedMaxSec: number
+  reason: string
+  confidence: 'HIGH' | 'MEDIUM' | 'LOW'
+  factors: string[]
+  provider: string
+  model: string
+}
+
+export interface ShotActionRewriteResult {
+  shotSpec: StructuredShotSpec
+  reason: string
+  resolvedIssueCodes: string[]
+  provider: string
+  model: string
+}
+
+export interface ShotEndStateRewriteResult extends ShotActionRewriteResult {}
+
 export interface ShotLockSnapshot {
   project?: Record<string, unknown>
   scene?: Record<string, unknown>
@@ -877,6 +898,7 @@ export interface StoryboardWorkspace {
     propVersionIds: string[]
     status: string
     imageUrl?: string
+    imageStatus?: string
     imagePrompt?: string
     shotSpec: StructuredShotSpec
     promptCompiled: string
@@ -5147,6 +5169,7 @@ export async function fetchStoryboardWorkspace(
       prop_version_ids: string[]
       status: string
       image_url: string | null
+      image_status: string | null
       image_prompt?: string | null
       shot_spec: StructuredShotSpec
       prompt_compiled: string
@@ -5214,6 +5237,7 @@ export async function fetchStoryboardWorkspace(
       propVersionIds: item.prop_version_ids,
       status: item.status,
       ...(item.image_url === null ? {} : { imageUrl: item.image_url }),
+      ...(item.image_status === null ? {} : { imageStatus: item.image_status }),
       ...(item.image_prompt ? { imagePrompt: item.image_prompt } : {}),
       shotSpec: item.shot_spec,
       promptCompiled: item.prompt_compiled,
@@ -5319,6 +5343,95 @@ export async function updateStructuredShotSpec(
       }),
     },
   )
+}
+
+export async function recommendShotDuration(
+  shotSpecId: string,
+  shotSpec: StructuredShotSpec,
+): Promise<ShotDurationRecommendation> {
+  const result = await requestJson<{
+    recommendation: {
+      recommended_duration_sec: number
+      recommended_min_sec: number
+      recommended_max_sec: number
+      reason: string
+      confidence: 'HIGH' | 'MEDIUM' | 'LOW'
+      factors: string[]
+    }
+    provider: string
+    model: string
+  }>(
+    `/api/v1/shot-specs/${shotSpecId}/duration-recommendation`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ shot_spec: shotSpec }),
+    },
+  )
+  return {
+    recommendedDurationSec: result.recommendation.recommended_duration_sec,
+    recommendedMinSec: result.recommendation.recommended_min_sec,
+    recommendedMaxSec: result.recommendation.recommended_max_sec,
+    reason: result.recommendation.reason,
+    confidence: result.recommendation.confidence,
+    factors: result.recommendation.factors,
+    provider: result.provider,
+    model: result.model,
+  }
+}
+
+export async function rewriteShotAction(
+  shotSpecId: string,
+  shotSpec: StructuredShotSpec,
+): Promise<ShotActionRewriteResult> {
+  const result = await requestJson<{
+    shot_spec: StructuredShotSpec
+    reason: string
+    resolved_issue_codes: string[]
+    provider: string
+    model: string
+  }>(
+    `/api/v1/shot-specs/${shotSpecId}/action-rewrite`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ shot_spec: shotSpec }),
+    },
+  )
+  return {
+    shotSpec: result.shot_spec,
+    reason: result.reason,
+    resolvedIssueCodes: result.resolved_issue_codes,
+    provider: result.provider,
+    model: result.model,
+  }
+}
+
+export async function rewriteShotEndState(
+  shotSpecId: string,
+  shotSpec: StructuredShotSpec,
+): Promise<ShotEndStateRewriteResult> {
+  const result = await requestJson<{
+    shot_spec: StructuredShotSpec
+    reason: string
+    resolved_issue_codes: string[]
+    provider: string
+    model: string
+  }>(
+    `/api/v1/shot-specs/${shotSpecId}/end-state-rewrite`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ shot_spec: shotSpec }),
+    },
+  )
+  return {
+    shotSpec: result.shot_spec,
+    reason: result.reason,
+    resolvedIssueCodes: result.resolved_issue_codes,
+    provider: result.provider,
+    model: result.model,
+  }
 }
 
 export async function updateShotLock(

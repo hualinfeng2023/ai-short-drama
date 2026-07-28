@@ -21,7 +21,10 @@ import {
   generateShotTake,
   mapWorkspace,
   recoverPersistedJob,
+  recommendShotDuration,
+  rewriteShotEndState,
   reviewPersistedCandidateIdentity,
+  rewriteShotAction,
   rewriteBriefStory,
   saveProviderSettings,
   saveRelationshipGraph,
@@ -176,6 +179,112 @@ const apiRelationshipGraph = {
 
 afterEach(() => {
   vi.unstubAllGlobals()
+})
+
+describe('shot duration recommendation client', () => {
+  it('uses the current unsaved shot draft and maps the recommendation', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        recommendation: {
+          recommended_duration_sec: 4.5,
+          recommended_min_sec: 4,
+          recommended_max_sec: 5.5,
+          reason: '为动作和结尾状态留出稳定呈现时间。',
+          confidence: 'HIGH',
+          factors: ['3 个可见动作或节拍'],
+        },
+        provider: 'volcengine-ark',
+        model: 'doubao-text',
+      },
+      trace_id: 'trace-duration',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const draft = { duration_sec: 2, visual_content: { action: '起身，转身，开门' } }
+
+    const result = await recommendShotDuration('shot-spec-1', draft as never)
+
+    expect(result).toMatchObject({
+      recommendedDurationSec: 4.5,
+      recommendedMinSec: 4,
+      recommendedMaxSec: 5.5,
+      provider: 'volcengine-ark',
+      confidence: 'HIGH',
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/shot-specs/shot-spec-1/duration-recommendation',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ shot_spec: draft }),
+      }),
+    )
+  })
+
+  it('maps a validator-approved action rewrite without changing the submitted draft', async () => {
+    const rewritten = {
+      duration_sec: 2,
+      visual_content: { action: '极微距镜头拍摄胚胎舱表面' },
+    }
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        shot_spec: rewritten,
+        reason: '保留一个主要可见动作。',
+        resolved_issue_codes: ['ACTION_COMPLEXITY_EXCEEDED'],
+        provider: 'volcengine-ark',
+        model: 'doubao-text',
+      },
+      trace_id: 'trace-rewrite',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const draft = { duration_sec: 2, visual_content: { action: '起身，转身，开门' } }
+
+    const result = await rewriteShotAction('shot-spec-1', draft as never)
+
+    expect(result).toMatchObject({
+      shotSpec: rewritten,
+      provider: 'volcengine-ark',
+      resolvedIssueCodes: ['ACTION_COMPLEXITY_EXCEEDED'],
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/shot-specs/shot-spec-1/action-rewrite',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ shot_spec: draft }),
+      }),
+    )
+  })
+
+  it('posts a dedicated end-state rewrite without changing the submitted draft', async () => {
+    const rewritten = {
+      duration_sec: 2,
+      end_state: { action_state: '人物停在门前，手仍握着门把' },
+    }
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        shot_spec: rewritten,
+        reason: '补全动作完成后的状态。',
+        resolved_issue_codes: ['END_STATE_NOT_ADVANCED'],
+        provider: 'volcengine-ark',
+        model: 'doubao-text',
+      },
+      trace_id: 'trace-end-state-rewrite',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const draft = { duration_sec: 2, end_state: { action_state: '人物静止' } }
+
+    const result = await rewriteShotEndState('shot-spec-1', draft as never)
+
+    expect(result).toMatchObject({
+      shotSpec: rewritten,
+      resolvedIssueCodes: ['END_STATE_NOT_ADVANCED'],
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/shot-specs/shot-spec-1/end-state-rewrite',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ shot_spec: draft }),
+      }),
+    )
+  })
 })
 
 describe('mapWorkspace', () => {

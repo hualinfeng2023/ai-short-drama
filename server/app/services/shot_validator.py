@@ -40,6 +40,19 @@ _HIGH_RISK_TOKENS = (
     "多人打斗",
     "文字特写",
 )
+_LOCATION_PROP_CONFLICT_RULES = (
+    {
+        "location_tokens": (
+            "胚胎储存",
+            "胚胎存储",
+            "胚胎培养",
+            "胚胎库",
+            "低温胚胎",
+        ),
+        "conflicting_tokens": ("婴儿床", "婴儿车", "尿布台"),
+        "expected_elements": ("低温胚胎舱", "生命维持管线", "监测终端"),
+    },
+)
 
 
 def _issue(
@@ -65,6 +78,45 @@ class ShotValidator:
     def validate_shot(self, shot: ShotSpec, *, index: int = 0) -> list[ShotValidationIssue]:
         prefix = f"shots.{index}"
         issues: list[ShotValidationIssue] = []
+        location_text = " ".join(
+            (
+                shot.visual_content.environment,
+                shot.start_state.location,
+                shot.start_state.environment_state,
+                shot.end_state.location,
+                shot.end_state.environment_state,
+            )
+        )
+        visual_text = " ".join(
+            (
+                shot.visual_content.description,
+                shot.visual_content.action,
+                shot.start_state.action_state,
+                shot.end_state.action_state,
+            )
+        )
+        for rule in _LOCATION_PROP_CONFLICT_RULES:
+            matched_locations = [
+                token for token in rule["location_tokens"] if token in location_text
+            ]
+            conflicting_elements = [
+                token for token in rule["conflicting_tokens"] if token in visual_text
+            ]
+            if matched_locations and conflicting_elements:
+                issues.append(
+                    _issue(
+                        "LOCATION_PROP_SEMANTIC_CONFLICT",
+                        "BLOCKER",
+                        f"{prefix}.visual_content.description",
+                        "场景用途与画面道具语义冲突",
+                        repairable=True,
+                        location=shot.start_state.location,
+                        matched_location_tokens=matched_locations,
+                        conflicting_elements=conflicting_elements,
+                        expected_elements=list(rule["expected_elements"]),
+                    )
+                )
+
         action_parts = [
             item.strip()
             for item in _ACTION_SEPARATORS.split(shot.visual_content.action)

@@ -13,13 +13,14 @@ import {
   useState,
   type ButtonHTMLAttributes,
   type ComponentPropsWithoutRef,
+  type CSSProperties,
   type HTMLAttributes,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactElement,
   type ReactNode,
 } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertCircle, AlertTriangle, Check, CheckCircle2, ChevronDown, CircleDot, Info, LoaderCircle, LockKeyhole, RotateCcw, Search, X } from 'lucide-react'
+import { AlertCircle, AlertTriangle, Check, CheckCircle2, ChevronDown, CircleDot, Info, LoaderCircle, LockKeyhole, Minus, Plus, RotateCcw, Search, X } from 'lucide-react'
 
 export function Button({
   variant = 'primary',
@@ -29,13 +30,187 @@ export function Button({
   type,
   ...props
 }: ButtonHTMLAttributes<HTMLButtonElement> & {
-  variant?: 'primary' | 'secondary' | 'ghost' | 'danger'
+  variant?: 'primary' | 'secondary' | 'ghost' | 'danger' | 'ai'
   size?: 'sm' | 'md'
 }) {
   return (
     <button className={`button button--${variant} button--${size} ${className}`} type={type ?? 'button'} {...props}>
       {children}
     </button>
+  )
+}
+
+export function HintTooltip({
+  children,
+  className = '',
+  label,
+}: {
+  children: ReactNode
+  className?: string
+  label: string
+}) {
+  const tooltipId = useId()
+
+  return (
+    <span className={`hint-tooltip ${className}`.trim()}>
+      <button aria-describedby={tooltipId} aria-label={label} type="button">
+        <AlertCircle aria-hidden size={15} />
+      </button>
+      <span id={tooltipId} role="tooltip">{children}</span>
+    </span>
+  )
+}
+
+export function NumberStepper({
+  disabled = false,
+  label,
+  max,
+  min,
+  onChange,
+  step = 1,
+  unit,
+  value,
+}: {
+  disabled?: boolean
+  label: string
+  max?: number
+  min?: number
+  onChange: (value: number) => void
+  step?: number
+  unit?: string
+  value: number
+}) {
+  function normalize(nextValue: number) {
+    const bounded = Math.min(max ?? Number.POSITIVE_INFINITY, Math.max(
+      min ?? Number.NEGATIVE_INFINITY,
+      nextValue,
+    ))
+    return Number(bounded.toFixed(4))
+  }
+
+  function changeBy(delta: number) {
+    onChange(normalize(value + delta))
+  }
+
+  const decrementDisabled = disabled || (min !== undefined && value <= min)
+  const incrementDisabled = disabled || (max !== undefined && value >= max)
+
+  return (
+    <div aria-label={label} className="number-stepper" role="group">
+      <button
+        aria-label={`减少${label}`}
+        disabled={decrementDisabled}
+        onClick={() => changeBy(-step)}
+        type="button"
+      >
+        <Minus aria-hidden size={15} />
+      </button>
+      <input
+        aria-label={label}
+        disabled={disabled}
+        inputMode="decimal"
+        max={max}
+        min={min}
+        onChange={(event) => {
+          const nextValue = Number(event.target.value)
+          if (Number.isFinite(nextValue)) onChange(normalize(nextValue))
+        }}
+        step={step}
+        type="number"
+        value={value}
+      />
+      {unit ? <span aria-hidden>{unit}</span> : null}
+      <button
+        aria-label={`增加${label}`}
+        disabled={incrementDisabled}
+        onClick={() => changeBy(step)}
+        type="button"
+      >
+        <Plus aria-hidden size={15} />
+      </button>
+    </div>
+  )
+}
+
+export function DurationSlider({
+  disabled = false,
+  label,
+  max = 12,
+  min = 0.5,
+  onChange,
+  recommendedMax,
+  recommendedMin,
+  recommendedValue,
+  step = 0.5,
+  value,
+}: {
+  disabled?: boolean
+  label: string
+  max?: number
+  min?: number
+  onChange: (value: number) => void
+  recommendedMax?: number
+  recommendedMin?: number
+  recommendedValue?: number
+  step?: number
+  value: number
+}) {
+  const inputId = useId()
+  const clamp = (next: number) => Math.min(max, Math.max(min, next))
+  const position = (next: number) => `${((clamp(next) - min) / (max - min)) * 100}%`
+  const display = (next: number) => Number(next.toFixed(1)).toString()
+  const hasRecommendedRange =
+    recommendedMin !== undefined
+    && recommendedMax !== undefined
+    && recommendedValue !== undefined
+  const style = {
+    '--duration-value-position': position(value),
+    '--duration-range-start': position(recommendedMin ?? min),
+    '--duration-range-end': position(recommendedMax ?? min),
+    '--duration-recommended-position': position(recommendedValue ?? min),
+  } as CSSProperties
+
+  return (
+    <div aria-label={label} className="duration-slider" role="group" style={style}>
+      <div className="duration-slider__control">
+        <output className="duration-slider__value" htmlFor={inputId}>
+          {display(value)} 秒
+        </output>
+        <div aria-hidden className="duration-slider__track">
+          <span className="duration-slider__progress" />
+          {hasRecommendedRange ? (
+            <>
+              <span className="duration-slider__recommended-range" />
+              <span className="duration-slider__recommended-marker" />
+            </>
+          ) : null}
+        </div>
+        <input
+          aria-label={label}
+          disabled={disabled}
+          id={inputId}
+          max={max}
+          min={min}
+          onChange={(event) => onChange(Number(event.target.value))}
+          step={step}
+          type="range"
+          value={value}
+        />
+        <span aria-hidden className="duration-slider__thumb" />
+      </div>
+      <div className="duration-slider__legend">
+        <span>{display(min)} 秒</span>
+        {hasRecommendedRange ? (
+          <strong>
+            推荐 {display(recommendedMin)}–{display(recommendedMax)} 秒
+            <small>最佳 {display(recommendedValue)} 秒</small>
+          </strong>
+        ) : (
+          <span>运行 AI 推荐后标注剧情适配范围</span>
+        )}
+        <span>{display(max)} 秒</span>
+      </div>
+    </div>
   )
 }
 
@@ -794,17 +969,21 @@ export function StatusBadge({
   status,
   label,
   description,
+  size = 'md',
+  variant = 'badge',
 }: {
   status: string
   label?: string
   description?: string
+  size?: 'sm' | 'md'
+  variant?: 'badge' | 'inline'
 }) {
   const meta = statusMeta[status] ?? statusMeta.DRAFT
   const displayLabel = label ?? meta.label
   return (
     <span
       aria-label={description}
-      className={`status-badge status-badge--${meta.tone}`}
+      className={`status-badge status-badge--${meta.tone} status-badge--${size} status-badge--${variant}`}
       data-tone={meta.tone}
       role={description ? 'status' : undefined}
       title={description ?? displayLabel}

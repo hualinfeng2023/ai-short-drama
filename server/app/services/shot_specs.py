@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import re
 from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, uuid5
 
@@ -11,11 +12,17 @@ from sqlalchemy.orm import Session
 
 from app.db.models import (
     Character,
+    CharacterIdentityVersion,
+    CharacterLookVersion,
+    CharacterStoryStateVersion,
     Episode,
+    LocationVersion,
     Project,
+    PropVersion,
     Scene,
     Shot,
     ShotConstraintLock,
+    StoryBibleVersion,
     StoryboardVersion,
 )
 from app.db.models import (
@@ -44,6 +51,11 @@ from app.services.prompt_compiler import CompiledPrompt, PromptCompiler
 from app.services.provenance import record_shot_spec_revision
 from app.services.shot_validator import ShotValidationReport, ShotValidator
 
+_SEQUENCE_BUDGET_ISSUE_CODES = {
+    "TOTAL_DURATION_MISMATCH",
+    "SCENE_DURATION_MISMATCH",
+}
+
 
 def _json(raw: object, fallback: object) -> object:
     if not isinstance(raw, str):
@@ -52,6 +64,73 @@ def _json(raw: object, fallback: object) -> object:
         return json.loads(raw)
     except json.JSONDecodeError:
         return fallback
+
+
+def _idea_section(idea: str, label: str, end_labels: tuple[str, ...]) -> str:
+    match = re.search(rf"{re.escape(label)}\s*[：:]?\s*", idea or "")
+    if match is None:
+        return ""
+    start = match.end()
+    end = len(idea)
+    for end_label in end_labels:
+        next_match = re.search(
+            rf"\n\s*{re.escape(end_label)}\s*[：:]?",
+            idea[start:],
+        )
+        if next_match is not None:
+            end = min(end, start + next_match.start())
+    return re.sub(r"\s+", " ", idea[start:end]).strip()
+
+
+def _project_visual_inheritance(
+    session: Session,
+    project: Project,
+) -> dict[str, object]:
+    story_bible = session.scalar(
+        select(StoryBibleVersion)
+        .where(
+            StoryBibleVersion.project_id == project.id,
+            StoryBibleVersion.status == "APPROVED",
+        )
+        .order_by(StoryBibleVersion.version.desc())
+    )
+    payload = (
+        _json(story_bible.payload_json, {})
+        if story_bible is not None
+        else {}
+    )
+    payload = payload if isinstance(payload, dict) else {}
+    world = payload.get("world")
+    if not isinstance(world, str) or not world.strip():
+        world = _idea_section(
+            project.idea,
+            "核心设定",
+            ("故事梗概", "主要角色", "整体视觉", "分镜", "分镜01"),
+        )
+    visual_direction: dict[str, object] = {}
+    overall_visual = _idea_section(
+        project.idea,
+        "整体视觉",
+        ("分镜", "分镜01", "主要角色", "故事梗概"),
+    )
+    if overall_visual:
+        visual_direction["overall_visual"] = overall_visual
+    return {
+        "story_bible_version_id": story_bible.id if story_bible is not None else None,
+        "story_bible_content_hash": (
+            story_bible.content_hash if story_bible is not None else None
+        ),
+        "world": world or "",
+        "visual_direction": visual_direction,
+    }
+
+
+def _version_visual_payload(record: object | None, field: str) -> dict[str, object]:
+    if record is None:
+        return {}
+    raw = getattr(record, field, "{}")
+    value = _json(raw, {})
+    return value if isinstance(value, dict) else {}
 
 
 def _project_and_scene(
@@ -396,26 +475,94 @@ def resolve_shot_constraints(
         {
             "character_id": item.id,
             "name": item.name,
+            "visual_brief": item.visual_brief,
             "lock_version": item.lock_version,
             "identity_version_id": item.locked_identity_version_id,
             "look_version_id": item.active_look_version_id,
             "story_state_version_id": item.active_story_state_version_id,
+            "identity": {
+                "stable_traits": _version_visual_payload(
+                    session.get(
+                        CharacterIdentityVersion,
+                        item.locked_identity_version_id,
+                    )
+                    if item.locked_identity_version_id
+                    else None,
+                    "stable_traits_json",
+                ),
+                "prompt_snapshot": _version_visual_payload(
+                    session.get(
+                        CharacterIdentityVersion,
+                        item.locked_identity_version_id,
+                    )
+                    if item.locked_identity_version_id
+                    else None,
+                    "prompt_snapshot_json",
+                ),
+            },
+            "look": _version_visual_payload(
+                session.get(CharacterLookVersion, item.active_look_version_id)
+                if item.active_look_version_id
+                else None,
+                "payload_json",
+            ),
+            "story_state": _version_visual_payload(
+                session.get(
+                    CharacterStoryStateVersion,
+                    item.active_story_state_version_id,
+                )
+                if item.active_story_state_version_id
+                else None,
+                "payload_json",
+            ),
         }
         for item in sorted(characters, key=lambda value: value.id)
     ]
+    location_id = resolved.continuity.location_version_id or spec.location_version_id
+    location = session.get(LocationVersion, location_id) if location_id else None
+    prop_ids = resolved.continuity.prop_version_ids
+    props = (
+        list(session.scalars(select(PropVersion).where(PropVersion.id.in_(prop_ids))).all())
+        if prop_ids
+        else []
+    )
+    project_inheritance = _project_visual_inheritance(session, project)
     snapshot = {
         "project": {
             "id": project.id,
             "lock_version": project.lock_version,
+            "genre": project.genre,
             "style": project.style,
             "aspect_ratio": project.aspect_ratio,
             "target_platform": project.target_platform,
+            **project_inheritance,
         },
         "scene": {
             "id": scene.id,
             "ordinal": scene.ordinal,
             "purpose": scene.purpose,
             "duration_sec": scene.duration_sec,
+            "location": (
+                {
+                    "id": location.id,
+                    "version": location.version,
+                    "name": location.name,
+                    "content_hash": location.content_hash,
+                    "visual_facts": _json(location.payload_json, {}),
+                }
+                if location is not None
+                else {}
+            ),
+            "props": [
+                {
+                    "id": item.id,
+                    "version": item.version,
+                    "name": item.name,
+                    "content_hash": item.content_hash,
+                    "visual_facts": _json(item.payload_json, {}),
+                }
+                for item in sorted(props, key=lambda value: value.id)
+            ],
         },
         "character_locks": character_locks,
         "field_locks": resolutions,
@@ -659,19 +806,35 @@ def write_shot_spec(
 
 
 def ensure_shot_spec_generation_ready(spec: ShotSpecRecord) -> None:
-    if spec.review_status == "NEEDS_REVIEW":
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "SHOT_SPEC_NEEDS_REVIEW",
-                "message": "镜头规格仍有阻断问题，不能进入生成队列",
-                "details": {
-                    "shot_spec_id": spec.id,
-                    "validation_report": _json(spec.validation_report_json, {}),
-                },
-                "user_action": "在导演级分镜表中修正阻断项并重新保存",
+    if spec.review_status != "NEEDS_REVIEW":
+        return
+    validation_report = _json(spec.validation_report_json, {})
+    raw_issues = (
+        validation_report.get("issues")
+        if isinstance(validation_report, dict)
+        else None
+    )
+    generation_blockers = [
+        issue
+        for issue in raw_issues or []
+        if isinstance(issue, dict)
+        and issue.get("severity") == "BLOCKER"
+        and issue.get("code") not in _SEQUENCE_BUDGET_ISSUE_CODES
+    ]
+    if raw_issues and not generation_blockers:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "SHOT_SPEC_NEEDS_REVIEW",
+            "message": "镜头规格仍有阻断问题，不能进入生成队列",
+            "details": {
+                "shot_spec_id": spec.id,
+                "validation_report": validation_report,
             },
-        )
+            "user_action": "在导演级分镜表中修正阻断项并重新保存",
+        },
+    )
 
 
 def upsert_shot_constraint_lock(

@@ -3079,6 +3079,7 @@ def storyboard_workspace(session: Session, project_id: str) -> dict[str, object]
                 "prop_version_ids": json.loads(spec.prop_version_ids_json),
                 "status": spec.status,
                 "image_url": f"/api/v1/assets/{take.asset_id}/content" if take else None,
+                "image_status": take.status if take else None,
                 "content_hash": spec.content_hash,
                 "shot_spec": structured_contract.model_dump(mode="json"),
                 "prompt_compiled": spec.prompt_compiled,

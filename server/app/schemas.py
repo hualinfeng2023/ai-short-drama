@@ -635,6 +635,24 @@ class ShotSpecCompileRequest(BaseModel):
     adapter: Literal["generic", "veo", "kling", "seedance"] | None = None
 
 
+class ShotDurationRecommendationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    shot_spec: StructuredShotSpec
+
+
+class ShotActionRewriteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    shot_spec: StructuredShotSpec
+
+
+class ShotEndStateRewriteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    shot_spec: StructuredShotSpec
+
+
 class SceneShotOrderRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 

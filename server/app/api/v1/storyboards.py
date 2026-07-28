@@ -6,7 +6,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.trace import success
+from app.config import get_settings
 from app.db.models import (
+    Asset,
     Episode,
     Job,
     Project,
@@ -14,10 +16,15 @@ from app.db.models import (
     Shot,
     ShotSpec,
     StoryboardVersion,
+    Take,
+    TimelineVersion,
 )
 from app.db.session import get_session
 from app.domain.commands import CommandActor, DirectorCommand, ExpectedVersion
 from app.schemas import (
+    ShotActionRewriteRequest,
+    ShotDurationRecommendationRequest,
+    ShotEndStateRewriteRequest,
     ShotLockUpdateRequest,
     ShotSpecCompileRequest,
     ShotSpecUpdateRequest,
@@ -26,11 +33,22 @@ from app.schemas import (
 )
 from app.services.domain_commands import dispatch_domain_command
 from app.services.projects import content_hash, version_conflict
+from app.services.shot_action_rewrite import (
+    merge_rewritten_actions,
+    rewrite_shot_action,
+)
+from app.services.shot_duration_recommendation import recommend_shot_duration
+from app.services.shot_end_state_rewrite import (
+    merge_rewritten_end_state,
+    rewrite_shot_end_state,
+)
 from app.services.shot_specs import (
     compile_shot_spec,
+    load_shot_spec_contract,
     remove_shot_constraint_lock,
     upsert_shot_constraint_lock,
     validate_storyboard_shot_specs,
+    write_shot_spec,
 )
 from app.services.storyboards_v2 import (
     list_workflow_runs,
@@ -157,6 +175,147 @@ def compile_structured_shot_spec(
             "lock_snapshot": snapshot,
         }
     )
+
+
+@router.post("/shot-specs/{shot_spec_id}/duration-recommendation")
+async def recommend_structured_shot_duration(
+    shot_spec_id: str,
+    payload: ShotDurationRecommendationRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    spec = session.get(ShotSpec, shot_spec_id)
+    if spec is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "NOT_FOUND", "message": "分镜镜头不存在"},
+        )
+    result = await recommend_shot_duration(get_settings(), payload.shot_spec)
+    return success(result.model_dump(mode="json"))
+
+
+@router.post("/shot-specs/{shot_spec_id}/action-rewrite")
+async def rewrite_structured_shot_action(
+    shot_spec_id: str,
+    payload: ShotActionRewriteRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    spec = session.get(ShotSpec, shot_spec_id)
+    if spec is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "NOT_FOUND", "message": "分镜镜头不存在"},
+        )
+    storyboard = session.get(StoryboardVersion, spec.storyboard_version_id)
+    shot = session.get(Shot, spec.shot_id)
+    project = (
+        session.get(Project, storyboard.project_id)
+        if storyboard is not None
+        else None
+    )
+    if storyboard is None or shot is None or project is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "SHOT_SPEC_PROJECT_MISSING",
+                "message": "镜头规格未关联到有效项目",
+            },
+        )
+
+    result = await rewrite_shot_action(get_settings(), payload.shot_spec)
+    persisted = load_shot_spec_contract(session, spec)
+    revised = merge_rewritten_actions(persisted, result.shot_spec)
+    spec, _report, _compiled = write_shot_spec(
+        session,
+        spec,
+        revised,
+        actor="创作者",
+        change_reason="用户采用 AI 动作精简建议并重新运行镜头检查",
+        adapter_name=spec.prompt_adapter,
+    )
+
+    takes = list(session.scalars(select(Take).where(Take.shot_id == shot.id)).all())
+    asset_ids = {take.asset_id for take in takes}
+    for take in takes:
+        take.status = "SUSPECT"
+        if take.approval == "APPROVED":
+            take.approval = "SUPERSEDED"
+    if asset_ids:
+        for asset in session.scalars(select(Asset).where(Asset.id.in_(asset_ids))):
+            asset.status = "SUSPECT"
+    for timeline in session.scalars(
+        select(TimelineVersion).where(TimelineVersion.project_id == project.id)
+    ):
+        if timeline.status != "SUPERSEDED":
+            timeline.status = "SUSPECT"
+    project.preview_approved = False
+    project.updated_at = datetime.now(UTC)
+    session.commit()
+
+    applied_result = result.model_copy(
+        update={"shot_spec": load_shot_spec_contract(session, spec)}
+    )
+    return success(applied_result.model_dump(mode="json"))
+
+
+@router.post("/shot-specs/{shot_spec_id}/end-state-rewrite")
+async def rewrite_structured_shot_end_state(
+    shot_spec_id: str,
+    payload: ShotEndStateRewriteRequest,
+    session: Session = Depends(get_session),
+) -> dict[str, object]:
+    spec = session.get(ShotSpec, shot_spec_id)
+    if spec is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "NOT_FOUND", "message": "分镜镜头不存在"},
+        )
+    storyboard = session.get(StoryboardVersion, spec.storyboard_version_id)
+    shot = session.get(Shot, spec.shot_id)
+    project = (
+        session.get(Project, storyboard.project_id)
+        if storyboard is not None
+        else None
+    )
+    if storyboard is None or shot is None or project is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "SHOT_SPEC_PROJECT_MISSING",
+                "message": "镜头规格未关联到有效项目",
+            },
+        )
+    result = await rewrite_shot_end_state(get_settings(), payload.shot_spec)
+    persisted = load_shot_spec_contract(session, spec)
+    revised = merge_rewritten_end_state(persisted, result.shot_spec)
+    spec, _report, _compiled = write_shot_spec(
+        session,
+        spec,
+        revised,
+        actor="创作者",
+        change_reason="用户采用 AI 结尾状态优化建议并重新运行镜头检查",
+        adapter_name=spec.prompt_adapter,
+    )
+    takes = list(session.scalars(select(Take).where(Take.shot_id == shot.id)).all())
+    asset_ids = {take.asset_id for take in takes}
+    for take in takes:
+        take.status = "SUSPECT"
+        if take.approval == "APPROVED":
+            take.approval = "SUPERSEDED"
+    if asset_ids:
+        for asset in session.scalars(select(Asset).where(Asset.id.in_(asset_ids))):
+            asset.status = "SUSPECT"
+    for timeline in session.scalars(
+        select(TimelineVersion).where(TimelineVersion.project_id == project.id)
+    ):
+        if timeline.status != "SUPERSEDED":
+            timeline.status = "SUSPECT"
+    project.preview_approved = False
+    project.updated_at = datetime.now(UTC)
+    session.commit()
+    applied_result = result.model_copy(
+        update={"shot_spec": load_shot_spec_contract(session, spec)}
+    )
+    return success(applied_result.model_dump(mode="json"))
 
 
 @router.put("/projects/{project_id}/shot-locks")

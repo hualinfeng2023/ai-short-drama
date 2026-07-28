@@ -556,6 +556,10 @@ summary:focus-visible,
   font-weight: 680;
   letter-spacing: 0.005em;
 }
+.status-badge--sm {
+  min-height: var(--space-5);
+  padding: var(--space-0) var(--space-2);
+}
 .status-badge--neutral { color: var(--color-text-secondary); background: var(--color-surface-muted); border-color: var(--color-border); }
 .status-badge--info { color: var(--color-action-primary); background: var(--color-action-primary-soft); border-color: color-mix(in srgb, var(--color-action-primary) 17%, transparent); }
 .status-badge--success { color: var(--color-state-success); background: var(--color-state-success-soft); border-color: color-mix(in srgb, var(--color-state-success) 24%, transparent); }
