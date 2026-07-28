@@ -233,9 +233,10 @@ summary:focus-visible,
   margin-left: auto;
   color: var(--color-white);
   background: var(--color-state-danger);
-  border: 2px solid var(--color-sidebar-surface);
+  border: 0;
   border-radius: var(--radius-round);
-  font-size: 0.6875rem;
+  outline: none;
+  font-size: var(--font-size-micro);
   font-style: normal;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
@@ -1500,8 +1501,9 @@ summary:focus-visible,
     align-items: center;
     justify-content: center;
     margin: 0;
-    border-color: var(--color-surface);
-    font-size: 0.6875rem;
+    border: 0;
+    outline: none;
+    font-size: var(--font-size-micro);
     font-style: normal;
     font-weight: 700;
     line-height: 1;
