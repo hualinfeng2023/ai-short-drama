@@ -280,7 +280,7 @@ export function DirectorReviewCard({
           disabled={busy}
           onClick={() => onReview(normalizedInstruction || undefined)}
           size="sm"
-          variant="secondary"
+          variant="ai"
         >
           {busy ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}
           {busy ? '编译中…' : normalizedInstruction ? '生成修改预览' : '开始审查'}

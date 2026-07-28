@@ -1002,14 +1002,15 @@ export function ProjectBriefPage() {
               <div className="brief-field__heading">
                 <label htmlFor="brief-project-name">短剧名称</label>
                 <span className="brief-field__actions">
-                  <button
+                  <Button
                     disabled={!editable || apiStatus !== 'connected' || suggestingName || form.idea.trim().length < 10}
                     onClick={() => void intelligentlyRenameProject()}
-                    type="button"
+                    size="sm"
+                    variant="ai"
                   >
                     {suggestingName ? <LoaderCircle className="spin" size={12} /> : <FilePenLine size={12} />}
                     {suggestingName ? '正在生成新名称' : '生成新名称'}
-                  </button>
+                  </Button>
                   {nameBeforeSuggestion !== null ? (
                     <button className="brief-field__action--undo" onClick={undoProjectNameSuggestion} type="button">
                       <RotateCcw size={12} />撤销
@@ -1076,10 +1077,11 @@ export function ProjectBriefPage() {
                   >
                     <Maximize2 size={12} />展开全文
                   </button>
-                  <button
+                  <Button
                     disabled={!editable || apiStatus !== 'connected' || rewritingIdea || form.idea.trim().length < 10}
                     onClick={() => void intelligentlyRewriteIdea()}
-                    type="button"
+                    size="sm"
+                    variant="ai"
                   >
                     {rewritingIdea
                       ? <LoaderCircle className="spin" size={12} />
@@ -1087,7 +1089,7 @@ export function ProjectBriefPage() {
                     {rewritingIdea
                       ? ideaGenerationPhase === 'writing' ? '正在写入' : '正在构思'
                       : '重写故事'}
-                  </button>
+                  </Button>
                   {ideaBeforeRewrite !== null ? (
                     <button className="brief-field__action--undo" onClick={undoIdeaRewrite} type="button">
                       <RotateCcw size={12} />撤销
@@ -1180,14 +1182,15 @@ export function ProjectBriefPage() {
                 <div className="brief-field__heading">
                   <label htmlFor="brief-content-requirements">必须满足（每行一条）</label>
                   <span className="brief-field__actions">
-                    <button
+                    <Button
                       disabled={!editable || apiStatus !== 'connected' || draftingRequirements || form.idea.trim().length < 10}
                       onClick={() => void intelligentlyDraftRequirements()}
-                      type="button"
+                      size="sm"
+                      variant="ai"
                     >
                       {draftingRequirements ? <LoaderCircle className="spin" size={12} /> : <ListPlus size={12} />}
                       {draftingRequirements ? '正在补充' : '补充要求'}
-                    </button>
+                    </Button>
                     {requirementsBeforeDraft !== null ? (
                       <button className="brief-field__action--undo" onClick={undoRequirementsDraft} type="button">
                         <RotateCcw size={12} />撤销
@@ -1213,14 +1216,15 @@ export function ProjectBriefPage() {
                 <div className="brief-field__heading">
                   <label htmlFor="brief-content-avoidances">必须避免（每行一条）</label>
                   <span className="brief-field__actions">
-                    <button
+                    <Button
                       disabled={!editable || apiStatus !== 'connected' || draftingAvoidances || form.idea.trim().length < 10}
                       onClick={() => void intelligentlyDraftAvoidances()}
-                      type="button"
+                      size="sm"
+                      variant="ai"
                     >
                       {draftingAvoidances ? <LoaderCircle className="spin" size={12} /> : <ShieldCheck size={12} />}
                       {draftingAvoidances ? '正在检查' : '检查规避项'}
-                    </button>
+                    </Button>
                     {avoidancesBeforeDraft !== null ? (
                       <button className="brief-field__action--undo" onClick={undoAvoidancesDraft} type="button">
                         <RotateCcw size={12} />撤销
@@ -1246,14 +1250,15 @@ export function ProjectBriefPage() {
                 <div className="brief-field__heading">
                   <label htmlFor="brief-blocking-questions">生成前必须回答的问题（每行一条）</label>
                   <span className="brief-field__actions">
-                    <button
+                    <Button
                       disabled={!editable || apiStatus !== 'connected' || draftingQuestions || form.idea.trim().length < 10}
                       onClick={() => void intelligentlyDraftBlockingQuestions()}
-                      type="button"
+                      size="sm"
+                      variant="ai"
                     >
                       {draftingQuestions ? <LoaderCircle className="spin" size={12} /> : <Sparkles size={12} />}
                       {draftingQuestions ? '正在分析' : 'AI 起草问题'}
-                    </button>
+                    </Button>
                     {questionsBeforeDraft !== null ? (
                       <button className="brief-field__action--undo" onClick={undoQuestionsDraft} type="button">
                         <RotateCcw size={12} />撤销

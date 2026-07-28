@@ -1,5 +1,7 @@
 import base64
 import json
+import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
@@ -36,6 +38,7 @@ from app.db.models import (
     WorkflowNode,
     WorkflowRun,
 )
+from app.domain.shot_spec import ShotSpec as StructuredShotSpec
 from app.schemas import JobRead
 from app.services.assets import register_file, resolve_asset_path
 from app.services.character_image_qc import detect_lower_right_watermark
@@ -51,7 +54,43 @@ from app.services.jobs import enqueue_job, job_to_read
 from app.services.media import PreviewFiles, PreviewShot
 from app.services.projects import canonical_json, content_hash, version_conflict
 from app.services.provenance import record_shot_spec_revision
+from app.services.shot_frames import (
+    RENDER_MODE_BLACK_FRAME,
+    VISIBILITY_BACK_ONLY,
+    VISIBILITY_FACE_VISIBLE,
+    VISIBILITY_HANDS_ONLY,
+    VISIBILITY_OFF_SCREEN,
+    FrameBeat,
+    FrameConflict,
+    PromptDebug,
+    PromptDebugRemoval,
+    blocking_conflicts,
+    collapse_to_single_beat,
+    compile_static_frame_brief,
+    detect_frame_conflicts,
+    resolve_visibility,
+    split_visual_moments,
+    visibility_prompt_clause,
+)
+from app.services.shot_specs import (
+    build_structured_shot_spec,
+    compile_shot_spec,
+    ensure_shot_spec_generation_ready,
+    load_shot_spec_contract,
+    write_shot_spec,
+)
 from app.services.workspace import project_or_404
+
+# 兼容旧测试与调用方命名
+compile_single_frame_visual_brief = compile_static_frame_brief
+
+
+def _json_object(raw: str) -> dict[str, object]:
+    try:
+        value = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def _split_scene_seconds(total_seconds: int, weights: list[int]) -> list[int]:
@@ -78,14 +117,51 @@ def _split_scene_seconds(total_seconds: int, weights: list[int]) -> list[int]:
     return values
 
 
+# 集体称谓 → 具名角色名（剧本写「夫妻」时应对齐锁定的妻子/丈夫）
+_COLLECTIVE_NAME_ALIASES: dict[str, tuple[str, ...]] = {
+    "夫妻": ("妻子", "丈夫"),
+    "夫妇": ("妻子", "丈夫"),
+    "两口子": ("妻子", "丈夫"),
+}
+_GLOVE_HAND_TOKENS = ("无菌白手套", "无菌手套", "白手套", "戴手套的手", "戴着白色手套")
+
+
 def _mentioned_character_keys(
     text: str,
     characters_by_key: dict[str, Character],
 ) -> list[str]:
+    """从画面文案提取出镜角色；支持夫妻等集体称谓与隐面手套手。"""
+    if not text:
+        return []
     mentioned: list[str] = []
+    names_to_keys: dict[str, list[str]] = {}
     for character_key, character in characters_by_key.items():
+        names_to_keys.setdefault(character.name, []).append(character_key)
         if character.name in text or character_key in text:
             mentioned.append(character_key)
+
+    for alias, member_names in _COLLECTIVE_NAME_ALIASES.items():
+        if alias not in text:
+            continue
+        for name in member_names:
+            for character_key in names_to_keys.get(name, []):
+                if character_key not in mentioned:
+                    mentioned.append(character_key)
+        # 名称非「妻子/丈夫」但 key 标明配偶时也纳入
+        for character_key in characters_by_key:
+            if character_key in mentioned:
+                continue
+            key_lower = character_key.lower()
+            if key_lower.startswith("spouse_") or "wife" in key_lower or "husband" in key_lower:
+                mentioned.append(character_key)
+
+    if any(token in text for token in _GLOVE_HAND_TOKENS):
+        for character_key, character in characters_by_key.items():
+            brief = character.visual_brief or ""
+            if character_key in mentioned:
+                continue
+            if _is_face_hidden_brief(brief) and "手套" in brief:
+                mentioned.append(character_key)
     return mentioned
 
 
@@ -93,13 +169,403 @@ def _scene_character_keys(
     lines: list[ScriptLine],
     characters_by_key: dict[str, Character],
 ) -> list[str]:
+    """场次可出镜角色：只认 ACTION 画面提名与露脸对白说话人，不含 VO 台词点名。"""
     result: list[str] = []
     for line in lines:
-        candidates = [line.speaker_key, *_mentioned_character_keys(line.text, characters_by_key)]
+        if line.line_type == "ACTION":
+            candidates = [
+                line.speaker_key,
+                *_mentioned_character_keys(line.text, characters_by_key),
+            ]
+        elif line.line_type == "DIALOGUE":
+            speaker = characters_by_key.get(line.speaker_key)
+            if speaker is not None and _is_face_hidden_brief(speaker.visual_brief):
+                candidates = []
+            else:
+                candidates = [line.speaker_key]
+        else:
+            candidates = []
         for character_key in candidates:
             if character_key in characters_by_key and character_key not in result:
                 result.append(character_key)
     return result[:8]
+
+
+def _characters_from_visual_text(
+    text: str,
+    characters_by_key: dict[str, Character],
+) -> list[Character]:
+    """按画面描述解析应锁定身份的出镜角色。"""
+    return [
+        characters_by_key[key]
+        for key in _mentioned_character_keys(text, characters_by_key)
+        if key in characters_by_key
+    ]
+
+
+def _load_project_characters_by_key(
+    session: Session,
+    project_id: str,
+) -> dict[str, Character]:
+    return {
+        character.character_key: character
+        for character in session.scalars(
+            select(Character).where(Character.project_id == project_id)
+        ).all()
+    }
+
+
+def _resolve_bound_characters_for_shot(
+    session: Session,
+    *,
+    project_id: str,
+    shot: Shot,
+    delivery: str,
+) -> list[Character]:
+    """出图时按画面描述重绑角色，愈合「夫妻」未映射导致的错误角色表。"""
+    characters_by_key = _load_project_characters_by_key(session, project_id)
+    if not characters_by_key:
+        return []
+    inferred = _characters_from_visual_text(shot.description or "", characters_by_key)
+    if inferred:
+        return inferred[:8]
+    # 描述无法提名时回退到镜头已存绑定
+    try:
+        stored_ids = json.loads(shot.character_ids_json or "[]")
+    except json.JSONDecodeError:
+        stored_ids = []
+    if not isinstance(stored_ids, list):
+        stored_ids = []
+    by_id = {character.id: character for character in characters_by_key.values()}
+    ordered = [item for item in stored_ids if isinstance(item, str) and item in by_id]
+    _ = delivery  # 描述优先；无法提名时回退存量绑定
+    return [by_id[item_id] for item_id in ordered][:8]
+
+
+@dataclass(frozen=True)
+class FrameBinding:
+    """当前画面实际需要的角色、可见范围与参考资产。"""
+
+    characters: list[Character]
+    visibility_by_name: dict[str, str]
+    absent_names: tuple[str, ...]
+    reference_asset_ids: list[str]
+    conflicts: list[FrameConflict]
+
+
+def resolve_frame_bindings(
+    session: Session,
+    *,
+    frame: FrameBeat,
+    delivery: str,
+    shot_size: str,
+    camera_movement: str,
+    frame_named: list[Character],
+    fallback: list[Character] = (),
+    scene_cast: list[Character] = (),
+    offscreen_names: tuple[str, ...] = (),
+    face_hidden_names: tuple[str, ...] = (),
+    location: LocationVersion | None = None,
+    props: list[PropVersion] | None = None,
+) -> FrameBinding:
+    """按「画面实际可见区域」选出镜角色与参考资产，并检查生图冲突。"""
+    declared_offscreen = {
+        character.name
+        for character in (*frame_named, *fallback, *scene_cast)
+        if any(character.name and character.name in item for item in offscreen_names)
+    }
+    # 画面点名的角色优先；画外音镜头默认无人出镜；回退角色也必须在本帧有可见证据
+    candidates = [item for item in frame_named if item.name not in declared_offscreen]
+    if not candidates and delivery != "VOICE_OVER":
+        candidates = [
+            item
+            for item in fallback
+            if item.name not in declared_offscreen
+            and _frame_evidences_character(item, frame.visual)
+        ]
+
+    visibility_by_name: dict[str, str] = {}
+    on_camera: list[Character] = []
+    for character in candidates:
+        visibility = resolve_visibility(
+            character_name=character.name,
+            visual_brief=character.visual_brief,
+            frame_text=frame.visual,
+            delivery=delivery,
+            offscreen_names=offscreen_names,
+            face_hidden_names=face_hidden_names,
+        )
+        if visibility == VISIBILITY_OFF_SCREEN:
+            continue
+        visibility_by_name[character.name] = visibility
+        on_camera.append(character)
+
+    on_camera_names = {character.name for character in on_camera}
+    absent = [
+        character.name
+        for character in (*scene_cast, *fallback, *frame_named)
+        if character.name not in on_camera_names
+    ]
+    absent = list(dict.fromkeys(absent))
+
+    reference_asset_ids: list[str] = []
+    for character in on_camera:
+        for asset_id in _character_reference_asset_ids(
+            session,
+            character,
+            visibility=visibility_by_name[character.name],
+        ):
+            if asset_id not in reference_asset_ids:
+                reference_asset_ids.append(asset_id)
+    identity_reference_count = len(reference_asset_ids)
+    for asset_id in _scene_reference_asset_ids(frame.visual, location=location, props=props or []):
+        if asset_id not in reference_asset_ids:
+            reference_asset_ids.append(asset_id)
+
+    conflicts = detect_frame_conflicts(
+        frame_text=frame.visual,
+        shot_size=shot_size,
+        camera_movement=camera_movement,
+        visible_character_count=len(on_camera),
+        face_visible_count=sum(
+            1 for value in visibility_by_name.values() if value == VISIBILITY_FACE_VISIBLE
+        ),
+        identity_reference_count=identity_reference_count,
+    )
+    return FrameBinding(
+        characters=on_camera,
+        visibility_by_name=visibility_by_name,
+        absent_names=tuple(absent),
+        reference_asset_ids=reference_asset_ids[:8],
+        conflicts=conflicts,
+    )
+
+
+def _frame_evidences_character(character: Character, frame_text: str) -> bool:
+    """回退绑定时：本帧必须有该角色的可见证据，避免空镜灌入整场 cast。"""
+    text = frame_text or ""
+    if character.name and character.name in text:
+        return True
+    brief = character.visual_brief or ""
+    glove_tokens = ("手套", "双手", "手部", "指尖", "袖口", "手腕")
+    back_tokens = ("背影", "背对镜头", "背对着镜头", "从背后")
+    if any(token in text for token in glove_tokens) and (
+        _is_face_hidden_brief(brief) or any(token in brief for token in glove_tokens)
+    ):
+        return True
+    if any(token in text for token in back_tokens):
+        return True
+    return False
+
+
+def _merge_names(current: tuple[str, ...], extra: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys((*current, *extra)))
+
+
+def _visible_prop_version_ids(frame_text: str, props: list[PropVersion]) -> list[str]:
+    """只绑定画面里点名的道具，避免整片道具表灌进每个镜头。"""
+    visible = [item.id for item in props if item.name and item.name in frame_text]
+    return visible
+
+
+def _frame_prompt_payload(
+    *,
+    beat: FrameBeat,
+    binding: FrameBinding,
+    project: Project,
+    description: str,
+    dialogue: str,
+    delivery: str,
+    location_name: str,
+    time_of_day: str,
+    shot_size: str,
+    camera: str,
+    location_version_id: str | None,
+    prop_version_ids: list[str],
+    image_prompt: str,
+    offscreen_names: tuple[str, ...],
+    face_hidden_names: tuple[str, ...],
+    prompt_intent: dict[str, object] | None,
+    storyboard_intent: dict[str, object] | None,
+    identity_ids: list[str],
+    look_ids: list[str],
+    story_state_ids: list[str],
+) -> dict[str, object]:
+    """ShotSpec.prompt_json：静态出图规格 + 声音/运镜/时间轴等非画面信息分字段留存。"""
+    return {
+        "description": description,
+        "dialogue": dialogue,
+        "delivery": delivery,
+        "style": project.style,
+        "location": location_name,
+        "time_of_day": time_of_day,
+        "shot_size": shot_size,
+        "camera": camera,
+        "render_mode": beat.render_mode,
+        # 以下三项刻意不进入生图提示词，仅供时间线、音频与剪辑阶段使用
+        "audio_cues": list(beat.audio_cues),
+        "camera_notes": list(beat.camera_notes),
+        "timeline_notes": list(beat.timeline_notes),
+        "character_ids": [character.id for character in binding.characters],
+        "character_names": [character.name for character in binding.characters],
+        "character_visibility": binding.visibility_by_name,
+        "absent_character_names": list(binding.absent_names),
+        "offscreen_names": list(offscreen_names),
+        "face_hidden_names": list(face_hidden_names),
+        "character_identity_version_ids": identity_ids,
+        "character_look_ids": look_ids,
+        "character_story_state_version_ids": story_state_ids,
+        "location_version_id": location_version_id,
+        "prop_version_ids": prop_version_ids,
+        "reference_asset_ids": binding.reference_asset_ids,
+        "image_prompt": image_prompt,
+        "creative_bible": {},
+        "prompt_debug": {},
+        "frame_conflicts": [
+            {"code": item.code, "severity": item.severity, "message": item.message}
+            for item in binding.conflicts
+        ],
+        "director_intent": prompt_intent,
+        "storyboard_director_intent": storyboard_intent,
+    }
+
+
+def _version_reference_asset_ids(payload: str | None) -> list[str]:
+    try:
+        values = json.loads(payload or "[]")
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(values, list):
+        return []
+    return [item for item in values if isinstance(item, str) and item]
+
+
+def _scene_reference_asset_ids(
+    frame_text: str,
+    *,
+    location: LocationVersion | None,
+    props: list[PropVersion],
+) -> list[str]:
+    """场景参考图始终跟随当前地点；道具只传画面里点名的那几件。"""
+    asset_ids: list[str] = []
+    if location is not None:
+        asset_ids.extend(_version_reference_asset_ids(location.reference_asset_ids_json)[:1])
+    for prop in props:
+        if prop.name and prop.name in frame_text:
+            asset_ids.extend(_version_reference_asset_ids(prop.reference_asset_ids_json)[:1])
+    return asset_ids
+
+
+def _is_face_hidden_brief(visual_brief: str | None) -> bool:
+    """角色设定要求不露脸或仅出局部（手/剪影）时视为隐面。"""
+    brief = (visual_brief or "").strip()
+    if not brief:
+        return False
+    tokens = (
+        "不露出面部",
+        "不露脸",
+        "全程不露出面部",
+        "仅出现",
+        "只出手",
+        "仅出手",
+        "戴无菌",
+        "无菌白手套",
+        "不露出可识别",
+    )
+    return any(token in brief for token in tokens)
+
+
+def _storyboard_static_frame_direction(
+    *,
+    shot_size: str,
+    time_of_day: str,
+    has_on_camera_dialogue: bool,
+    has_visible_cast: bool,
+    is_macro: bool,
+) -> str:
+    """单帧静帧摄影指引：只有景别与光线，不含运镜过程。"""
+    shot_language = {
+        "WS": "广角全景静帧，环境纵深可见，主体不必居中",
+        "MS": "中景静帧，人物与环境信息平衡",
+        "MCU": "中近景静帧，上半身与表情主导画面",
+        "CU": (
+            "100mm macro 极微距静帧，焦点落在物件表面材质与凝结细节"
+            if is_macro
+            else "近景静帧，焦点在局部材质或物件表面"
+        ),
+    }.get(shot_size, f"{shot_size} 静帧景别")
+    time_lower = time_of_day.lower()
+    if any(token in time_lower for token in ("夜", "night", "晚", "凌晨", "午夜")):
+        lighting = "冷色实景光与局部暖光并存，主体有明确明暗交界，拒绝平光美颜"
+    else:
+        lighting = "侧前方自然主光塑造体积，保留真实阴影与材质反光"
+    # 无人可见时不下发任何人像表演与皮肤要求，避免诱导模型添人
+    if not has_visible_cast:
+        texture = "材质保留真实磨损、灰尘与冷凝痕迹"
+        performance = "画面中不出现任何人物、人脸、手部或身体局部"
+    else:
+        texture = "皮肤保留毛孔与细微瑕疵，衣料有真实褶皱"
+        performance = (
+            "表情克制，口部可呈说话瞬间，禁止摆拍假笑"
+            if has_on_camera_dialogue
+            else "表情克制自然，禁止空眼神与塑料微笑"
+        )
+    return (
+        f"{shot_language}。固定机位单帧，禁止表现推拉摇移过程。"
+        f"{performance}。{lighting}。"
+        f"按电影剧照/实拍静帧理解：非对称构图、空气透视与生活痕迹；{texture}。"
+        "严禁：居中证件照、磨皮美颜、塑料皮肤、文字字幕水印、拼贴分镜格。"
+    )
+
+
+def _shot_delivery(
+    line: ScriptLine,
+    speaker: Character | None,
+) -> str:
+    """将剧本行映射为生图交付方式：ACTION / VOICE_OVER / DIALOGUE。"""
+    if line.line_type == "ACTION":
+        return "ACTION"
+    if line.line_type == "VOICE_OVER":
+        return "VOICE_OVER"
+    if line.line_type == "DIALOGUE":
+        if speaker is not None and _is_face_hidden_brief(speaker.visual_brief):
+            return "VOICE_OVER"
+        return "DIALOGUE"
+    # 未知类型按画外音保守处理，避免误生成口型镜头
+    return "VOICE_OVER"
+
+
+def _action_visual_text(purpose: str, action_line: ScriptLine | None) -> str:
+    if action_line is None:
+        return purpose.strip()
+    purpose_part = purpose.strip()
+    action_part = action_line.text.strip()
+    if purpose_part and action_part:
+        return f"{purpose_part}。{action_part}"
+    return purpose_part or action_part
+
+
+def _visual_description_for_line(
+    line: ScriptLine,
+    *,
+    delivery: str,
+    purpose: str,
+    speaking_label: str,
+    action_visual: str,
+) -> str:
+    """按交付方式组装镜头画面描述，VO 继承同场 ACTION 视觉。"""
+    action_visual = action_visual.strip() or purpose.strip() or "延续当前场景空间"
+    if delivery == "ACTION":
+        return _action_visual_text(purpose, line)
+    if delivery == "VOICE_OVER":
+        return f"画外音覆盖于：{action_visual}"
+    # DIALOGUE：保留表演意图，同时锚定同场视觉，避免丢分镜画面
+    performance = (
+        f"{speaking_label}以{line.emotion}状态完成台词，保持与锁定身份参考图为同一人"
+    )
+    if action_visual and action_visual != purpose.strip():
+        return f"{performance}。视觉锚点：{action_visual}"
+    return performance
 
 
 def _line_character_keys(
@@ -107,37 +573,95 @@ def _line_character_keys(
     *,
     characters_by_key: dict[str, Character],
     scene_character_keys: list[str],
+    delivery: str | None = None,
+    visual_anchor_text: str | None = None,
 ) -> list[str]:
+    """按交付方式绑定出镜角色；台词提名不再自动入镜。"""
+    resolved_delivery = delivery or (
+        "ACTION"
+        if line.line_type == "ACTION"
+        else "VOICE_OVER"
+        if line.line_type == "VOICE_OVER"
+        else "DIALOGUE"
+    )
     result: list[str] = []
-    candidates = [line.speaker_key, *_mentioned_character_keys(line.text, characters_by_key)]
-    for character_key in candidates:
-        if character_key in characters_by_key and character_key not in result:
+    if resolved_delivery == "ACTION":
+        candidates = [line.speaker_key, *_mentioned_character_keys(line.text, characters_by_key)]
+        for character_key in candidates:
+            if character_key in characters_by_key and character_key not in result:
+                result.append(character_key)
+        if not result:
+            result.extend(scene_character_keys)
+        return result[:8]
+
+    # VO / 隐面台词：只认画面锚点里点名的角色，不因 speaker 或台词提及入镜
+    anchor = visual_anchor_text or ""
+    for character_key in _mentioned_character_keys(anchor, characters_by_key):
+        if character_key not in result:
             result.append(character_key)
-    if not result and line.line_type in {"ACTION", "VOICE_OVER"}:
-        result.extend(scene_character_keys)
+    if resolved_delivery == "DIALOGUE" and line.speaker_key in characters_by_key:
+        if line.speaker_key not in result:
+            result.insert(0, line.speaker_key)
     return result[:8]
 
 
 _IDENTITY_VIEW_PRIORITY = ("FRONT", "THREE_QUARTER", "FULL_BODY", "PROFILE")
 
 
-def _character_reference_asset_ids(session: Session, character: Character) -> list[str]:
-    """优先使用锁定身份档案正脸/全身图，回退到锁定候选图与造型参考。"""
-    asset_ids: list[str] = []
-    if character.locked_identity_version_id:
-        identity_assets = list(
-            session.scalars(
-                select(CharacterIdentityAsset).where(
-                    CharacterIdentityAsset.identity_version_id
-                    == character.locked_identity_version_id
-                )
-            ).all()
+def _look_reference_asset_ids(session: Session, character: Character) -> list[str]:
+    """造型参考图：服装、手套、袖口等可见着装依据。"""
+    if not character.active_look_version_id:
+        return []
+    look = session.get(CharacterLookVersion, character.active_look_version_id)
+    if look is None:
+        return []
+    try:
+        look_refs = json.loads(look.reference_asset_ids_json or "[]")
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(look_refs, list):
+        return []
+    return [item for item in look_refs if isinstance(item, str) and item]
+
+
+def _identity_assets_by_view(session: Session, character: Character) -> dict[str, str]:
+    if not character.locked_identity_version_id:
+        return {}
+    identity_assets = session.scalars(
+        select(CharacterIdentityAsset).where(
+            CharacterIdentityAsset.identity_version_id
+            == character.locked_identity_version_id
         )
-        by_view = {
-            item.view_type: item.asset_id
-            for item in identity_assets
-            if item.asset_id and item.view_type != "EXPRESSIONS"
-        }
+    ).all()
+    return {
+        item.view_type: item.asset_id
+        for item in identity_assets
+        if item.asset_id and item.view_type != "EXPRESSIONS"
+    }
+
+
+def _character_reference_asset_ids(
+    session: Session,
+    character: Character,
+    *,
+    visibility: str = VISIBILITY_FACE_VISIBLE,
+) -> list[str]:
+    """按画面实际可见区域选参考图，避免无关参考诱导模型加人。"""
+    if visibility == VISIBILITY_OFF_SCREEN:
+        return []
+    if visibility == VISIBILITY_HANDS_ONLY:
+        # 只出现手部时用造型参考（手套、袖口），不传正脸身份图
+        return _look_reference_asset_ids(session, character)[:3]
+
+    by_view = _identity_assets_by_view(session, character)
+    asset_ids: list[str] = []
+    if visibility == VISIBILITY_BACK_ONLY:
+        # 背影优先体态与服装轮廓，不传正脸
+        for view_type in ("FULL_BODY", "PROFILE"):
+            asset_id = by_view.get(view_type)
+            if asset_id and asset_id not in asset_ids:
+                asset_ids.append(asset_id)
+    else:
         for view_type in _IDENTITY_VIEW_PRIORITY:
             asset_id = by_view.get(view_type)
             if asset_id and asset_id not in asset_ids:
@@ -146,88 +670,424 @@ def _character_reference_asset_ids(session: Session, character: Character) -> li
         full_body = by_view.get("FULL_BODY")
         if full_body and full_body not in asset_ids:
             asset_ids.append(full_body)
-    if not asset_ids and character.locked_candidate_id:
+    if not asset_ids and character.locked_candidate_id and visibility == VISIBILITY_FACE_VISIBLE:
         candidate = session.get(CharacterCandidate, character.locked_candidate_id)
         if candidate is not None and candidate.asset_id:
             asset_ids.append(candidate.asset_id)
-    if character.active_look_version_id:
-        look = session.get(CharacterLookVersion, character.active_look_version_id)
-        if look is not None:
-            try:
-                look_refs = json.loads(look.reference_asset_ids_json or "[]")
-            except json.JSONDecodeError:
-                look_refs = []
-            if isinstance(look_refs, list):
-                for item in look_refs:
-                    if isinstance(item, str) and item and item not in asset_ids:
-                        asset_ids.append(item)
+    for asset_id in _look_reference_asset_ids(session, character):
+        if asset_id not in asset_ids:
+            asset_ids.append(asset_id)
     return asset_ids[:3]
 
 
-def _storyboard_identity_prompt(characters: list[Character]) -> str:
+def _storyboard_identity_prompt(
+    characters: list[Character],
+    *,
+    visibility_by_name: dict[str, str],
+) -> str:
+    """仅输出当前画面可见角色；无人出镜时不写身份/五官/服装模板。"""
     if not characters:
         return ""
-    references = "\n".join(
-        f"- 参考图对应角色：{character.name}（{character.role}）；"
-        f"{character.visual_brief.strip() or '沿用锁定身份五官与发型'}"
+
+    reference_lines = [
+        visibility_prompt_clause(
+            character.name,
+            character.role,
+            character.visual_brief.strip() or "沿用锁定身份五官与发型",
+            visibility_by_name.get(character.name, VISIBILITY_FACE_VISIBLE),
+        )
         for character in characters
-    )
-    return "\n".join(
+        if visibility_by_name.get(character.name, VISIBILITY_FACE_VISIBLE)
+        != VISIBILITY_OFF_SCREEN
+    ]
+    if not reference_lines:
+        return ""
+
+    visibilities = {
+        visibility_by_name.get(character.name, VISIBILITY_FACE_VISIBLE)
+        for character in characters
+        if visibility_by_name.get(character.name, VISIBILITY_FACE_VISIBLE)
+        != VISIBILITY_OFF_SCREEN
+    }
+    constraints: list[str] = ["角色身份锁定（硬约束）：", *reference_lines]
+    if VISIBILITY_FACE_VISIBLE in visibilities:
+        constraints.extend(
+            (
+                "- 输入参考图是每个露脸角色唯一的身份基准。画面中的人物必须与参考图为同一人：",
+                "脸型、五官比例、瞳距、鼻梁、唇形、发型核心特征、发色、年龄感与辨识度保持一致。",
+            )
+        )
+    if visibilities & {VISIBILITY_HANDS_ONLY, VISIBILITY_BACK_ONLY}:
+        constraints.append(
+            "- 局部出镜角色以可见范围为准，不要求五官或唇形可见，禁止用口罩折中出完整人脸。"
+        )
+    constraints.extend(
         (
-            "角色身份锁定（硬约束）：",
-            references,
-            "- 输入参考图是每个角色唯一的身份基准。画面中的人物必须与参考图为同一人：",
-            "脸型、五官比例、瞳距、鼻梁、唇形、发型核心特征、发色、年龄感与辨识度保持一致。",
             "- 允许改变表情、姿势、景别、光线与背景；禁止换脸、混脸、另造相似替身。",
             "- 当前镜头未绑定的角色不要入镜；不要新增路人抢戏。",
         )
     )
+    return "\n".join(constraints)
 
 
-def _storyboard_photographic_direction(
+def _idea_section(idea: str, start_label: str, end_labels: tuple[str, ...]) -> str:
+    """从创意正文截取命名小节段落。"""
+    if not idea or not start_label:
+        return ""
+    match = re.search(
+        rf"{re.escape(start_label)}\s*[：:：]?\s*",
+        idea,
+    )
+    if match is None:
+        return ""
+    start = match.end()
+    end = len(idea)
+    for label in end_labels:
+        next_match = re.search(rf"\n\s*{re.escape(label)}\s*[：:：]?", idea[start:])
+        if next_match is not None:
+            end = min(end, start + next_match.start())
+    return idea[start:end].strip()
+
+
+def _compact_prompt_clause(text: str, max_chars: int) -> str:
+    """压缩段落空白并截断，供生图提示词使用。"""
+    cleaned = re.sub(r"\s+", "", (text or "").strip())
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[: max_chars - 1].rstrip("，,；;、") + "…"
+
+
+def _build_creative_bible(project: Project) -> dict[str, str]:
+    """Global Creative Bible：只存储，不直接拼进 Shot Prompt。"""
+    idea = (getattr(project, "idea", None) or "").strip()
+    genre = (getattr(project, "genre", None) or "").strip().lower()
+    bible: dict[str, str] = {}
+
+    genre_era = {
+        "sci_fi": "远未来科幻文明",
+        "science_fiction": "远未来科幻文明",
+        "cyberpunk": "赛博朋克近未来",
+        "fantasy": "奇幻异世界",
+        "historical": "历史时期",
+        "period": "历史时期",
+    }
+    if genre in genre_era:
+        bible["era"] = genre_era[genre]
+
+    setting = _idea_section(
+        idea,
+        "核心设定",
+        ("故事梗概", "主要角色", "整体视觉", "分镜", "分镜01"),
+    )
+    visual = _idea_section(
+        idea,
+        "整体视觉",
+        ("分镜", "分镜01", "主要角色", "故事梗概"),
+    )
+    synopsis = _idea_section(
+        idea,
+        "故事梗概",
+        ("主要角色", "整体视觉", "分镜", "分镜01", "核心设定"),
+    )
+    if setting:
+        bible["worldview"] = _compact_prompt_clause(setting, 240)
+    if visual:
+        bible["visual_style"] = _compact_prompt_clause(visual, 160)
+        # 色彩体系从整体视觉中截取常见色词簇
+        color_hits = re.findall(
+            r"[冷暖青银灰黑白金铜橙红][^，。；\n]{0,8}(?:色|灰|黑|青)",
+            visual,
+        )
+        if color_hits:
+            bible["color_system"] = "、".join(list(dict.fromkeys(color_hits))[:6])
+
+    year_source = " ".join(part for part in (synopsis, idea) if part)
+    year_hits = re.findall(
+        r"[^。；\n]{0,16}"
+        r"(?:推迟了|等待了|过去了|沉默了|拖延了)?"
+        r"(?:三百一十二|三百多|三百年|[\d]{2,4}|[一二三四五六七八九十百千零两]{1,10})"
+        r"年"
+        r"[^。；\n]{0,24}",
+        year_source,
+    )
+    year_hits += re.findall(
+        r"[^.\n]{0,24}\b\d{2,4}\s*years?\b[^.\n]{0,24}",
+        year_source,
+        flags=re.IGNORECASE,
+    )
+    if year_hits:
+        bible["time_span"] = _compact_prompt_clause(year_hits[0], 80)
+
+    style = (getattr(project, "style", None) or "").strip()
+    if style:
+        bible["project_style"] = style
+    return bible
+
+
+def _storyboard_world_era_prompt(project: Project) -> str:
+    """兼容旧调用：Creative Bible 摘要字符串，不再注入生图 Prompt。"""
+    bible = _build_creative_bible(project)
+    if not bible:
+        return ""
+    bits = [f"{key}={value}" for key, value in bible.items()]
+    return "；".join(bits)
+
+
+@dataclass(frozen=True)
+class AssembledShotPrompt:
+    """分层装配后的生图结果。"""
+
+    image_prompt: str
+    creative_bible: dict[str, str]
+    metadata: dict[str, object]
+    debug: PromptDebug
+
+
+def assemble_shot_prompt(
+    project: Project,
     *,
+    description: str,
+    dialogue: str,
+    location: str,
+    time_of_day: str,
     shot_size: str,
     camera_movement: str,
-    time_of_day: str,
-    has_dialogue: bool,
-) -> str:
-    shot_language = {
-        "WS": "广角全景，用环境纵深交代人物位置，主体不必居中",
-        "MS": "中景，人物与环境信息平衡，身体有自然重心偏移",
-        "MCU": "中近景，上半身与微表情主导画面，视线可偏离镜头",
-        "CU": "近景特写，焦点在眼神与呼吸，允许轻微构图失衡",
-    }.get(shot_size, f"{shot_size} 景别")
-    movement = {
-        "STATIC": "机位克制稳定，像纪录片跟拍前的停顿",
-        "PAN": "画面边缘保留运动空间，仿佛刚停住的摇镜瞬间",
-        "DOLLY_IN": "透视略压缩，像推进中途截取的一帧",
-        "TRACK": "背景有轻微运动模糊倾向，主体清晰",
-        "HANDHELD": "极轻微手持呼吸感，避免过度晃动",
-    }.get(camera_movement, camera_movement)
-    time_lower = time_of_day.lower()
-    if any(token in time_lower for token in ("夜", "night", "晚", "凌晨")):
-        lighting = (
-            "以场景实景光为主：窗光、屏幕光或顶灯形成明确方向，"
-            "面部有明暗交界，拒绝平光美颜灯"
-        )
-    else:
-        lighting = (
-            "侧前方自然主光塑造体积，环境反光只补暗部，"
-            "保留真实阴影与材质反光，拒绝影棚环形灯效果"
-        )
-    expression = (
-        "人物处于说话或刚说完的间隙：口型、眼神与呼吸不同步于摆拍微笑，"
-        "表情克制、有情绪残留"
-        if has_dialogue
-        else "表情克制自然，靠眼神与肩颈微张力传情，禁止空眼神与塑料微笑"
+    characters: list[Character],
+    aspect_ratio: str | None = None,
+    delivery: str = "DIALOGUE",
+    frame: FrameBeat | None = None,
+    visibility_by_name: dict[str, str] | None = None,
+    absent_character_names: tuple[str, ...] = (),
+    visible_props: tuple[str, ...] = (),
+    location_version_label: str = "",
+    conflicts: list[FrameConflict] | tuple[FrameConflict, ...] = (),
+) -> AssembledShotPrompt:
+    """按四层装配生图 Prompt：Bible 只进 metadata，画面层只描述摄像机可见内容。"""
+    creative_bible = _build_creative_bible(project)
+    resolved_ratio = aspect_ratio or project.aspect_ratio
+    orientation_label = {
+        "1:1": "正方形",
+        "4:3": "横向标准画幅",
+        "3:4": "竖向标准画幅",
+        "16:9": "横屏宽画幅",
+        "9:16": "竖屏短视频画幅",
+        "3:2": "横向摄影画幅",
+        "2:3": "竖向摄影画幅",
+        "21:9": "超宽银幕画幅",
+    }.get(resolved_ratio, "指定画幅")
+
+    split = split_visual_moments(description)
+    frame_brief = frame.visual if frame is not None else compile_static_frame_brief(
+        description,
+        shot_size=shot_size,
     )
-    return (
-        f"{shot_language}；{movement}。{expression}。{lighting}。"
-        "按电影剧照/实拍静帧理解，而非电商肖像或 LinkedIn 头像："
-        "非对称构图、前景轻微遮挡、空气透视与生活痕迹；"
-        "皮肤保留毛孔与细微瑕疵，衣料有真实褶皱，景深自然。"
-        "严禁：居中证件照构图、过度对称、磨皮美颜、塑料皮肤、"
-        "完美打光网红脸、假笑、眼神空洞、CGI 感、插画感。"
+    active_frame = frame
+    if active_frame is None:
+        active_frame = collapse_to_single_beat(split, shot_size=shot_size)
+
+    if visibility_by_name is not None:
+        resolved_visibility = visibility_by_name
+    else:
+        resolved_visibility = {
+            character.name: resolve_visibility(
+                character_name=character.name,
+                visual_brief=character.visual_brief,
+                frame_text=frame_brief,
+                delivery=delivery,
+                offscreen_names=split.offscreen_names,
+                face_hidden_names=split.face_hidden_names,
+            )
+            for character in characters
+        }
+
+    # Voice-over 且画面未点名：不绑定任何角色视觉
+    on_camera = [
+        character
+        for character in characters
+        if resolved_visibility.get(character.name) != VISIBILITY_OFF_SCREEN
+    ]
+    if delivery == "VOICE_OVER" and not any(
+        character.name and character.name in frame_brief for character in on_camera
+    ):
+        on_camera = []
+
+    face_visible = [
+        character
+        for character in on_camera
+        if resolved_visibility.get(character.name) == VISIBILITY_FACE_VISIBLE
+    ]
+    has_on_camera_dialogue = (
+        delivery == "DIALOGUE" and bool(dialogue.strip()) and bool(face_visible)
+    )
+
+    removed: list[PromptDebugRemoval] = []
+    included: list[str] = []
+
+    if creative_bible:
+        removed.append(
+            PromptDebugRemoval(
+                field="global_creative_bible",
+                reason="世界观/时代/风格/色彩仅存 Creative Bible，不进入 image prompt",
+                sample="；".join(f"{k}={v}" for k, v in list(creative_bible.items())[:3]),
+            )
+        )
+    for item in split.story_context_removed:
+        removed.append(
+            PromptDebugRemoval(
+                field="story_context",
+                reason="剧情背景/时间跨度/法规解释不属于当前静帧可见内容",
+                sample=item,
+            )
+        )
+    if dialogue.strip():
+        removed.append(
+            PromptDebugRemoval(
+                field="dialogue",
+                reason="对白不进入 image prompt，仅保留可见口型（若有露脸角色）",
+                sample=dialogue.strip()[:80],
+            )
+        )
+    if camera_movement:
+        removed.append(
+            PromptDebugRemoval(
+                field="camera_movement",
+                reason="运镜过程不进入单帧 image prompt",
+                sample=camera_movement,
+            )
+        )
+    audio_cues = tuple(active_frame.audio_cues) if active_frame is not None else ()
+    camera_notes = tuple(active_frame.camera_notes) if active_frame is not None else ()
+    timeline_notes = tuple(active_frame.timeline_notes) if active_frame is not None else ()
+    for cue in audio_cues:
+        removed.append(
+            PromptDebugRemoval(
+                field="audio_cues",
+                reason="音频信息进入 metadata，不进入 image prompt",
+                sample=cue,
+            )
+        )
+    for note in camera_notes:
+        removed.append(
+            PromptDebugRemoval(
+                field="camera_notes",
+                reason="运镜说明进入 metadata，不进入 image prompt",
+                sample=note,
+            )
+        )
+    for note in timeline_notes:
+        removed.append(
+            PromptDebugRemoval(
+                field="timeline_notes",
+                reason="时间轴说明进入 metadata，不进入 image prompt",
+                sample=note,
+            )
+        )
+
+    absent = absent_character_names or tuple(
+        character.name
+        for character in characters
+        if resolved_visibility.get(character.name) == VISIBILITY_OFF_SCREEN
+    )
+    if absent:
+        removed.append(
+            PromptDebugRemoval(
+                field="absent_character_constraints",
+                reason="不可见角色约束不写入 image prompt，避免诱导生成人脸/表情",
+                sample="、".join(absent),
+            )
+        )
+    if delivery == "VOICE_OVER":
+        removed.append(
+            PromptDebugRemoval(
+                field="voice_over_character_visual",
+                reason="voice over 角色不传视觉描述与身份模板",
+                sample=delivery,
+            )
+        )
+    if not on_camera:
+        removed.append(
+            PromptDebugRemoval(
+                field="portrait_templates",
+                reason="visible_characters 为空：禁止输出角色身份、人脸、表情、皮肤、服装要求",
+                sample="",
+            )
+        )
+
+    # --- Layer 2: Location / Asset Context ---
+    location_bits = [f"地点 {location}"] if location.strip() else []
+    if location_version_label.strip():
+        location_bits.append(f"场景版本 {location_version_label.strip()}")
+    if time_of_day.strip():
+        location_bits.append(f"时段 {time_of_day.strip()}")
+    if visible_props:
+        location_bits.append(f"可见道具 {'、'.join(visible_props)}")
+    location_block = "；".join(location_bits)
+    if location_block:
+        included.append("location_asset_context")
+
+    # --- Layer 3: Shot Visual Spec ---
+    photo_direction = _storyboard_static_frame_direction(
+        shot_size=shot_size,
+        time_of_day=time_of_day,
+        has_on_camera_dialogue=has_on_camera_dialogue,
+        has_visible_cast=bool(on_camera),
+        is_macro=active_frame.is_macro if active_frame is not None else False,
+    )
+    dialogue_visual = (
+        "人物呈平静说话瞬间的口型与眼神，画面中不出现任何可读文字或字幕。"
+        if has_on_camera_dialogue
+        else ""
+    )
+    visual_spec = (
+        f"单帧静帧规格：{frame_brief}。"
+        f"{shot_size} 景别，{orientation_label} {resolved_ratio}。"
+        f"{photo_direction}"
+        f"{dialogue_visual}"
+    )
+    included.extend(
+        [
+            "shot_visual_spec.frame_brief",
+            "shot_visual_spec.shot_size",
+            "shot_visual_spec.composition_lighting",
+        ]
+    )
+    if frame_brief:
+        included.append("shot_visual_spec.subject_action")
+
+    # --- Layer 4: Character Binding（仅可见角色）---
+    identity_block = _storyboard_identity_prompt(
+        on_camera,
+        visibility_by_name=resolved_visibility,
+    )
+    if identity_block:
+        included.append("character_binding.visible_characters")
+    elif not on_camera:
+        included.append("character_binding.empty_no_portrait")
+
+    space_line = f"可见主体与空间：{location_block}。" if location_block else ""
+    image_prompt = f"{visual_spec}{space_line}{identity_block}"
+
+    metadata: dict[str, object] = {
+        "creative_bible": creative_bible,
+        "dialogue": dialogue,
+        "delivery": delivery,
+        "camera_movement": camera_movement,
+        "audio_cues": list(audio_cues),
+        "camera_notes": list(camera_notes),
+        "timeline_notes": list(timeline_notes),
+        "absent_character_names": list(absent),
+        "story_context_removed": list(split.story_context_removed),
+    }
+    debug = PromptDebug(
+        included=tuple(dict.fromkeys(included)),
+        removed=tuple(removed),
+        conflicts=tuple(conflicts),
+    )
+    return AssembledShotPrompt(
+        image_prompt=image_prompt,
+        creative_bible=creative_bible,
+        metadata=metadata,
+        debug=debug,
     )
 
 
@@ -242,36 +1102,187 @@ def build_storyboard_take_prompt(
     camera_movement: str,
     characters: list[Character],
     aspect_ratio: str | None = None,
+    delivery: str = "DIALOGUE",
+    frame: FrameBeat | None = None,
+    visibility_by_name: dict[str, str] | None = None,
+    absent_character_names: tuple[str, ...] = (),
+    visible_props: tuple[str, ...] = (),
+    location_version_label: str = "",
+    conflicts: list[FrameConflict] | tuple[FrameConflict, ...] = (),
 ) -> str:
-    """为低成本分镜生成身份锁定 + 写实电影静帧提示词。"""
-    resolved_ratio = aspect_ratio or project.aspect_ratio
-    orientation_label = {
-        "1:1": "正方形",
-        "4:3": "横向标准画幅",
-        "3:4": "竖向标准画幅",
-        "16:9": "横屏宽画幅",
-        "9:16": "竖屏短视频画幅",
-        "3:2": "横向摄影画幅",
-        "2:3": "竖向摄影画幅",
-        "21:9": "超宽银幕画幅",
-    }.get(resolved_ratio, "指定画幅")
-    dialogue_hint = f"人物正在说：{dialogue}。" if dialogue.strip() else ""
-    identity_block = _storyboard_identity_prompt(characters)
-    cast_names = "、".join(character.name for character in characters) or "无具名角色"
-    photo_direction = _storyboard_photographic_direction(
+    """为低成本分镜生成可执行单帧图像规格（出图前去掉声音/时间轴/运镜/故事上下文）。"""
+    return assemble_shot_prompt(
+        project,
+        description=description,
+        dialogue=dialogue,
+        location=location,
+        time_of_day=time_of_day,
         shot_size=shot_size,
         camera_movement=camera_movement,
-        time_of_day=time_of_day,
-        has_dialogue=bool(dialogue.strip()),
+        characters=characters,
+        aspect_ratio=aspect_ratio,
+        delivery=delivery,
+        frame=frame,
+        visibility_by_name=visibility_by_name,
+        absent_character_names=absent_character_names,
+        visible_props=visible_props,
+        location_version_label=location_version_label,
+        conflicts=conflicts,
+    ).image_prompt
+
+
+def _delivery_from_prompt_payload(
+    prompt_payload: object,
+    *,
+    dialogue: str,
+) -> str:
+    """从 ShotSpec.prompt_json 读取 delivery，缺省时按是否有台词回退。"""
+    if isinstance(prompt_payload, dict):
+        raw = prompt_payload.get("delivery")
+        if raw in {"ACTION", "VOICE_OVER", "DIALOGUE"}:
+            return str(raw)
+    return "DIALOGUE" if dialogue.strip() else "ACTION"
+
+
+def _stored_names(prompt_payload: object, key: str) -> tuple[str, ...]:
+    if not isinstance(prompt_payload, dict):
+        return ()
+    values = prompt_payload.get(key)
+    if not isinstance(values, list):
+        return ()
+    return tuple(item for item in values if isinstance(item, str) and item)
+
+
+def rebuild_shot_frame_prompt(
+    session: Session,
+    *,
+    project: Project,
+    shot: Shot,
+    spec: ShotSpec,
+    prompt_payload: dict[str, object],
+    note: str | None = None,
+) -> tuple[str, FrameBinding, FrameBeat]:
+    """按当前镜头描述重新编译单帧提示词与参考图，沿用最新锁定身份。"""
+    delivery = _delivery_from_prompt_payload(prompt_payload, dialogue=shot.dialogue)
+    render_mode = prompt_payload.get("render_mode")
+    split = split_visual_moments(shot.description)
+    beat = collapse_to_single_beat(split, shot_size=shot.shot_size) or FrameBeat(
+        visual=shot.description
     )
-    return (
-        f"{description.rstrip('。')}。{dialogue_hint}"
-        f"出镜角色：{cast_names}。地点：{location}，时间：{time_of_day}。"
-        f"{shot_size} 景别，{camera_movement} 运镜，{orientation_label} {resolved_ratio}。"
-        f"{photo_direction}"
-        f"整体风格延续{project.style}，色彩克制、层次丰富，避免画面文字、字幕、水印、边框和拼贴。"
-        f"{identity_block}"
+    if render_mode == RENDER_MODE_BLACK_FRAME:
+        beat = FrameBeat(
+            visual=beat.visual,
+            render_mode=RENDER_MODE_BLACK_FRAME,
+            audio_cues=beat.audio_cues,
+            camera_notes=beat.camera_notes,
+            timeline_notes=beat.timeline_notes,
+        )
+    characters_by_key = _load_project_characters_by_key(session, project.id)
+    stored = _resolve_bound_characters_for_shot(
+        session,
+        project_id=project.id,
+        shot=shot,
+        delivery=delivery,
     )
+    binding = resolve_frame_bindings(
+        session,
+        frame=beat,
+        delivery=delivery,
+        shot_size=shot.shot_size,
+        camera_movement=shot.camera_movement,
+        frame_named=_characters_from_visual_text(beat.visual, characters_by_key),
+        fallback=stored,
+        scene_cast=stored,
+        offscreen_names=_merge_names(
+            _stored_names(prompt_payload, "offscreen_names"), split.offscreen_names
+        ),
+        face_hidden_names=_merge_names(
+            _stored_names(prompt_payload, "face_hidden_names"), split.face_hidden_names
+        ),
+        location=(
+            session.get(LocationVersion, str(spec.location_version_id))
+            if spec.location_version_id
+            else None
+        ),
+        props=_specced_prop_versions(session, spec),
+    )
+    if beat.render_mode == RENDER_MODE_BLACK_FRAME:
+        return "", binding, beat
+    assembled = assemble_shot_prompt(
+        project,
+        description=beat.visual,
+        dialogue=shot.dialogue,
+        location=shot.location,
+        time_of_day=shot.time_of_day,
+        shot_size=shot.shot_size,
+        camera_movement=shot.camera_movement,
+        characters=binding.characters,
+        aspect_ratio=project.aspect_ratio,
+        delivery=delivery,
+        frame=beat,
+        visibility_by_name=binding.visibility_by_name,
+        absent_character_names=binding.absent_names,
+        conflicts=binding.conflicts,
+    )
+    prompt = assembled.image_prompt
+    prompt_payload["creative_bible"] = assembled.creative_bible
+    prompt_payload["prompt_debug"] = assembled.debug.as_dict()
+    for key, value in assembled.metadata.items():
+        if key in {
+            "audio_cues",
+            "camera_notes",
+            "timeline_notes",
+            "absent_character_names",
+            "dialogue",
+            "delivery",
+            "story_context_removed",
+        }:
+            prompt_payload[key] = value
+    director_intent = prompt_payload.get("director_intent")
+    if isinstance(director_intent, dict):
+        prompt = f"{prompt}\n{director_intent_prompt_block(director_intent)}"
+    if note and note.strip():
+        prompt = f"{prompt}\n导演修改意图：{note.strip()}。"
+    return prompt, binding, beat
+
+
+def _specced_prop_versions(session: Session, spec: ShotSpec) -> list[PropVersion]:
+    try:
+        prop_ids = json.loads(spec.prop_version_ids_json or "[]")
+    except json.JSONDecodeError:
+        return []
+    ordered = [item for item in prop_ids if isinstance(item, str)]
+    if not ordered:
+        return []
+    return list(
+        session.scalars(select(PropVersion).where(PropVersion.id.in_(ordered))).all()
+    )
+
+
+def _apply_frame_binding_to_shot(
+    shot: Shot,
+    *,
+    binding: FrameBinding,
+    prompt_payload: dict[str, object],
+    beat: FrameBeat,
+    prompt: str,
+) -> None:
+    """回写可重新计算的帧级提示数据，不改写 ShotSpec 的连续性锁定快照。"""
+    healed_ids = [character.id for character in binding.characters]
+    prompt_payload["image_prompt"] = prompt
+    prompt_payload["render_mode"] = beat.render_mode
+    prompt_payload["character_ids"] = healed_ids
+    prompt_payload["character_names"] = [character.name for character in binding.characters]
+    prompt_payload["character_visibility"] = binding.visibility_by_name
+    prompt_payload["absent_character_names"] = list(binding.absent_names)
+    prompt_payload["audio_cues"] = list(beat.audio_cues)
+    prompt_payload["camera_notes"] = list(beat.camera_notes)
+    prompt_payload["timeline_notes"] = list(beat.timeline_notes)
+    prompt_payload["reference_asset_ids"] = binding.reference_asset_ids
+    prompt_payload["frame_conflicts"] = [
+        {"code": item.code, "severity": item.severity, "message": item.message}
+        for item in binding.conflicts
+    ]
 
 
 def resolve_storyboard_take_generation_inputs(
@@ -285,62 +1296,65 @@ def resolve_storyboard_take_generation_inputs(
     project = session.get(Project, job.project_id)
     if shot is None or spec is None or project is None:
         raise ValueError("分镜任务实体不存在")
-    try:
-        character_ids = json.loads(shot.character_ids_json or "[]")
-    except json.JSONDecodeError:
-        character_ids = []
-    if not isinstance(character_ids, list):
-        character_ids = []
-    ordered_ids = [item for item in character_ids if isinstance(item, str)]
-    characters_by_id = {
-        item.id: item
-        for item in session.scalars(
-            select(Character).where(
-                Character.project_id == project.id,
-                Character.id.in_(ordered_ids),
-            )
-        ).all()
-    } if ordered_ids else {}
-    characters = [
-        characters_by_id[item_id] for item_id in ordered_ids if item_id in characters_by_id
-    ]
-    reference_asset_ids: list[str] = []
-    for character in characters:
-        for asset_id in _character_reference_asset_ids(session, character):
-            if asset_id not in reference_asset_ids:
-                reference_asset_ids.append(asset_id)
-    # 若绑定角色暂无参考，回退到任务入队时携带的 reference_asset_ids
-    if not reference_asset_ids:
-        reference_asset_ids = [
-            item for item in payload.get("reference_asset_ids", []) if isinstance(item, str)
-        ]
-    prompt = build_storyboard_take_prompt(
-        project,
-        description=shot.description,
-        dialogue=shot.dialogue,
-        location=shot.location,
-        time_of_day=shot.time_of_day,
-        shot_size=shot.shot_size,
-        camera_movement=shot.camera_movement,
-        characters=characters,
-        aspect_ratio=project.aspect_ratio,
-    )
+    ensure_shot_spec_generation_ready(spec)
     try:
         prompt_payload = json.loads(spec.prompt_json or "{}")
     except json.JSONDecodeError:
         prompt_payload = {}
-    director_intent = (
-        prompt_payload.get("director_intent")
-        if isinstance(prompt_payload, dict)
-        else None
-    )
-    if isinstance(director_intent, dict):
-        prompt = f"{prompt}\n{director_intent_prompt_block(director_intent)}"
+    if not isinstance(prompt_payload, dict):
+        prompt_payload = {}
     note = payload.get("note")
     if isinstance(note, str) and note.strip():
-        prompt = f"{prompt}\n导演修改意图：{note.strip()}。"
+        contract = load_shot_spec_contract(session, spec)
+        if note.strip() not in contract.technique.notes:
+            contract = contract.model_copy(
+                update={
+                    "technique": contract.technique.model_copy(
+                        update={
+                            "notes": (
+                                f"{contract.technique.notes}\n导演修改意见：{note.strip()}"
+                            ).strip()
+                        }
+                    )
+                }
+            )
+            write_shot_spec(
+                session,
+                spec,
+                contract,
+                actor="system:storyboard-regeneration",
+                change_reason="将镜头重生成意见写入结构化导演手法",
+                trace_id=job.trace_id,
+            )
+    prompt, binding, beat = rebuild_shot_frame_prompt(
+        session,
+        project=project,
+        shot=shot,
+        spec=spec,
+        prompt_payload=prompt_payload,
+        note=note if isinstance(note, str) else None,
+    )
+    prompt_payload["delivery"] = _delivery_from_prompt_payload(
+        prompt_payload,
+        dialogue=shot.dialogue,
+    )
+    _apply_frame_binding_to_shot(
+        shot,
+        binding=binding,
+        prompt_payload=prompt_payload,
+        beat=beat,
+        prompt=prompt,
+    )
+    _resolved, _report, compiled, _snapshot = compile_shot_spec(
+        session,
+        spec,
+        adapter_name=spec.prompt_adapter or "generic",
+        store=True,
+    )
+    prompt_payload["image_prompt"] = compiled.prompt
+    spec.prompt_json = canonical_json(prompt_payload)
     seed = int(payload.get("seed") or 0)
-    return prompt, reference_asset_ids[:8], seed
+    return compiled.prompt, binding.reference_asset_ids, seed
 
 
 def _create_workflow(
@@ -395,7 +1409,142 @@ def _create_workflow(
     return run
 
 
-def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVersion, list[str]]:
+def build_storyboard_agent_drafts(session: Session, job: Job) -> list[StructuredShotSpec]:
+    project = project_or_404(session, job.project_id)
+    script = session.scalar(
+        select(ScriptVersion)
+        .where(ScriptVersion.project_id == job.project_id, ScriptVersion.status == "APPROVED")
+        .order_by(ScriptVersion.version.desc())
+    )
+    if script is None:
+        raise ValueError("已批准剧本不存在")
+    characters = list(
+        session.scalars(select(Character).where(Character.project_id == project.id)).all()
+    )
+    characters_by_key = {item.character_key: item for item in characters}
+    props = list(
+        session.scalars(
+            select(PropVersion).where(
+                PropVersion.project_id == project.id,
+                PropVersion.status == "APPROVED",
+            )
+        ).all()
+    )
+    locations = list(
+        session.scalars(
+            select(LocationVersion).where(
+                LocationVersion.project_id == project.id,
+                LocationVersion.status == "APPROVED",
+            )
+        ).all()
+    )
+    locations_by_name = {item.name: item for item in locations}
+    script_scenes = list(
+        session.scalars(
+            select(ScriptScene)
+            .where(ScriptScene.script_version_id == script.id)
+            .order_by(ScriptScene.ordinal)
+        ).all()
+    )
+    drafts: list[StructuredShotSpec] = []
+    shot_ordinal = 1
+    for script_scene in script_scenes:
+        lines = list(
+            session.scalars(
+                select(ScriptLine)
+                .where(ScriptLine.script_scene_id == script_scene.id)
+                .order_by(ScriptLine.ordinal)
+            ).all()
+        )
+        durations = _split_scene_seconds(
+            round(script_scene.duration_ms / 1000),
+            [item.estimated_duration_ms + item.pause_after_ms for item in lines],
+        )
+        scene_character_keys = _scene_character_keys(lines, characters_by_key)
+        last_action_visual = script_scene.purpose.strip()
+        location = locations_by_name.get(script_scene.location) or (
+            locations[0] if locations else None
+        )
+        for line, duration_sec in zip(lines, durations, strict=True):
+            speaking_character = characters_by_key.get(line.speaker_key)
+            speaking_label = speaking_character.name if speaking_character is not None else "旁白"
+            delivery = _shot_delivery(line, speaking_character)
+            if delivery == "ACTION":
+                last_action_visual = _action_visual_text(script_scene.purpose, line)
+            description = _visual_description_for_line(
+                line,
+                delivery=delivery,
+                purpose=script_scene.purpose,
+                speaking_label=speaking_label,
+                action_visual=last_action_visual,
+            )
+            character_keys = _line_character_keys(
+                line,
+                characters_by_key=characters_by_key,
+                scene_character_keys=scene_character_keys,
+                delivery=delivery,
+                visual_anchor_text=last_action_visual,
+            )
+            bound_characters = [characters_by_key[key] for key in character_keys]
+            reference_asset_ids: list[str] = []
+            for character in bound_characters:
+                if not character.locked_candidate_id:
+                    continue
+                candidate = session.get(CharacterCandidate, character.locked_candidate_id)
+                if candidate is not None:
+                    reference_asset_ids.append(candidate.asset_id)
+            visible_prop_ids = _visible_prop_version_ids(description, props)
+            visible_props = [item for item in props if item.id in visible_prop_ids]
+            code = f"S{shot_ordinal:02d}"
+            shot_size = ("WS", "MS", "MCU", "CU")[(shot_ordinal - 1) % 4]
+            camera = ("STATIC", "TRACK", "DOLLY_IN", "PAN")[(shot_ordinal - 1) % 4]
+            simple_action = next(
+                (
+                    item.strip()
+                    for item in re.split(r"[，,；;]", description)
+                    if item.strip()
+                ),
+                description,
+            )
+            draft = build_structured_shot_spec(
+                duration_sec=duration_sec,
+                narrative_goal=script_scene.purpose,
+                description=description,
+                action=simple_action,
+                environment=script_scene.location,
+                location=script_scene.location,
+                time_of_day=script_scene.time_of_day,
+                shot_size=shot_size,
+                camera_movement=camera,
+                character_ids=[item.id for item in bound_characters],
+                character_names=[item.name for item in bound_characters],
+                prop_version_ids=visible_prop_ids,
+                prop_names=[item.name for item in visible_props],
+                location_version_id=location.id if location is not None else None,
+                dialogue=line.text if line.line_type in {"DIALOGUE", "VOICE_OVER"} else "",
+                delivery=delivery,
+                project_style=project.style,
+                aspect_ratio=project.aspect_ratio,
+                source_scene_ordinal=script_scene.ordinal,
+                source_script_scene_id=script_scene.id,
+                source_script_line_ids=[line.id],
+                code=code,
+                title=script_scene.heading,
+                reference_asset_ids=reference_asset_ids,
+            )
+            drafts.append(draft)
+            shot_ordinal += 1
+    return drafts
+
+
+def create_dynamic_storyboard(
+    session: Session,
+    job: Job,
+    *,
+    planned_shot_specs: list[StructuredShotSpec] | None = None,
+    agent_needs_review: bool = False,
+    agent_metadata: dict[str, object] | None = None,
+) -> tuple[StoryboardVersion, list[str]]:
     input_payload = json.loads(job.input_json)
     visual_bible = session.get(
         VisualBibleVersion,
@@ -476,6 +1625,7 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
         session.scalars(select(Character).where(Character.project_id == project.id)).all()
     )
     characters_by_key = {item.character_key: item for item in characters}
+    characters_by_id = {item.id: item for item in characters}
     locations = list(
         session.scalars(
             select(LocationVersion).where(
@@ -500,6 +1650,13 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
             .order_by(ScriptScene.ordinal)
         ).all()
     )
+    if planned_shot_specs is None:
+        planned_shot_specs = build_storyboard_agent_drafts(session, job)
+    planned_by_line_id = {
+        item.source.script_line_ids[0]: item
+        for item in planned_shot_specs
+        if item.source.script_line_ids
+    }
     director_intents = confirmed_director_intents_by_scene(session, script=script)
     child_job_ids: list[str] = []
     shot_payloads: list[dict[str, object]] = []
@@ -552,218 +1709,479 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
         location = location_by_name.get(script_scene.location) or (
             locations[0] if locations else None
         )
+        last_action_visual = script_scene.purpose.strip()
+        last_action_shot_size: str | None = None
+        last_action_camera: str | None = None
+        scene_offscreen_names: tuple[str, ...] = ()
+        scene_face_hidden_names: tuple[str, ...] = ()
+        scene_duration_sec = 0
         for line, duration_sec in zip(lines, durations, strict=True):
-            code = f"S{shot_ordinal:02d}"
+            planned_spec = planned_by_line_id.get(line.id)
+            speaking_character = characters_by_key.get(line.speaker_key)
+            speaking_label = speaking_character.name if speaking_character is not None else "旁白"
+            delivery = _shot_delivery(line, speaking_character)
+            if delivery == "ACTION":
+                last_action_visual = _action_visual_text(script_scene.purpose, line)
+            description = _visual_description_for_line(
+                line,
+                delivery=delivery,
+                purpose=script_scene.purpose,
+                speaking_label=speaking_label,
+                action_visual=last_action_visual,
+            )
             line_character_keys = _line_character_keys(
                 line,
                 characters_by_key=characters_by_key,
                 scene_character_keys=scene_character_keys,
+                delivery=delivery,
+                visual_anchor_text=last_action_visual,
             )
-            bound_characters = [characters_by_key[key] for key in line_character_keys]
-            character_ids = [character.id for character in bound_characters]
-            identity_ids = [
-                character.locked_identity_version_id
-                for character in bound_characters
-                if character.locked_identity_version_id
-            ]
-            look_ids = [
-                character.active_look_version_id
-                for character in bound_characters
-                if character.active_look_version_id
-            ]
-            story_state_ids = [
-                character.active_story_state_version_id
-                for character in bound_characters
-                if character.active_story_state_version_id
-            ]
+            line_characters = [characters_by_key[key] for key in line_character_keys]
+            scene_cast = [characters_by_key[key] for key in scene_character_keys]
             dialogue = line.text if line.line_type in {"DIALOGUE", "VOICE_OVER"} else ""
-            speaking_character = characters_by_key.get(line.speaker_key)
-            speaking_label = speaking_character.name if speaking_character is not None else "旁白"
-            description = (
-                f"{script_scene.purpose}。{line.text}"
-                if line.line_type == "ACTION"
-                else f"{speaking_label}以{line.emotion}状态完成台词，保持与锁定身份参考图为同一人"
+            if planned_spec is not None:
+                description = planned_spec.visual_content.description
+                dialogue = planned_spec.audio.dialogue or planned_spec.audio.voice_over
+                duration_sec = max(1, round(planned_spec.duration_sec))
+
+            # 「某角色全程不露脸/仅有画外音」在整场生效，先累积再逐帧应用
+            split = split_visual_moments(description)
+            scene_offscreen_names = _merge_names(
+                scene_offscreen_names, split.offscreen_names
             )
-            shot_size = ("WS", "MS", "MCU", "CU")[(shot_ordinal - 1) % 4]
-            camera = ("STATIC", "TRACK", "DOLLY_IN", "PAN")[(shot_ordinal - 1) % 4]
-            shot = Shot(
-                id=str(uuid4()),
-                scene_id=scene.id,
-                code=code,
-                ordinal=shot_ordinal,
-                title=f"{script_scene.heading} · {code}",
-                description=description,
-                dialogue=dialogue,
-                duration_sec=duration_sec,
-                status="QUEUED",
-                shot_size=shot_size,
-                camera_movement=camera,
-                current_take=0,
-                candidate_take=None,
-                continuity="CLEAR",
-                location=script_scene.location,
-                time_of_day=script_scene.time_of_day,
-                current_take_id=None,
-                character_ids_json=canonical_json(character_ids),
-                character_look_version="Look V1",
-                character_identity_version_ids_json=canonical_json(identity_ids),
-                character_look_version_ids_json=canonical_json(look_ids),
-                character_story_state_version_ids_json=canonical_json(story_state_ids),
-                lock_version=1,
+            scene_face_hidden_names = _merge_names(
+                scene_face_hidden_names, split.face_hidden_names
             )
-            session.add(shot)
-            session.flush()
-            reference_asset_ids: list[str] = []
-            for character in bound_characters:
-                for asset_id in _character_reference_asset_ids(session, character):
-                    if asset_id not in reference_asset_ids:
-                        reference_asset_ids.append(asset_id)
-            image_prompt = build_storyboard_take_prompt(
-                project,
-                description=description,
-                dialogue=dialogue,
-                location=script_scene.location,
-                time_of_day=script_scene.time_of_day,
-                shot_size=shot_size,
-                camera_movement=camera,
-                characters=bound_characters,
-                aspect_ratio=project.aspect_ratio,
+
+            cycled_size = (
+                planned_spec.camera.shot_size
+                if planned_spec is not None
+                else ("WS", "MS", "MCU", "CU")[(shot_ordinal - 1) % 4]
             )
-            if prompt_intent is not None:
-                image_prompt = f"{image_prompt}\n{director_intent_prompt_block(prompt_intent)}"
-            prompt_payload = {
-                "description": description,
-                "dialogue": dialogue,
-                "style": project.style,
-                "location": script_scene.location,
-                "time_of_day": script_scene.time_of_day,
-                "shot_size": shot_size,
-                "camera": camera,
-                "character_ids": character_ids,
-                "character_names": [character.name for character in bound_characters],
-                "character_identity_version_ids": identity_ids,
-                "character_look_ids": look_ids,
-                "character_story_state_version_ids": story_state_ids,
-                "location_version_id": location.id if location else None,
-                "prop_version_ids": [item.id for item in props],
-                "reference_asset_ids": reference_asset_ids,
-                "image_prompt": image_prompt,
-                "director_intent": prompt_intent,
-                "storyboard_director_intent": storyboard_intent,
-            }
-            spec = ShotSpec(
-                id=str(uuid4()),
-                storyboard_version_id=storyboard.id,
-                shot_id=shot.id,
-                script_scene_id=script_scene.id,
-                script_line_ids_json=canonical_json([line.id]),
-                ordinal=shot_ordinal,
-                description=description,
-                dialogue=dialogue,
-                duration_ms=duration_sec * 1000,
-                shot_size=shot_size,
-                camera_movement=camera,
-                character_look_ids_json=canonical_json(look_ids),
-                location_version_id=location.id if location else None,
-                prop_version_ids_json=canonical_json([item.id for item in props]),
-                prompt_json=canonical_json(prompt_payload),
-                content_hash=content_hash(prompt_payload),
-                status="QUEUED",
+            cycled_camera = (
+                planned_spec.camera.movement
+                if planned_spec is not None
+                else ("STATIC", "TRACK", "DOLLY_IN", "PAN")[(shot_ordinal - 1) % 4]
             )
-            session.add(spec)
-            session.flush()
-            record_shot_spec_revision(
-                session,
-                project_id=project.id,
-                spec=spec,
-                actor="system:storyboard-planner",
-                change_reason="由已锁定剧本场景与台词生成初始镜头规格",
-                trace_id=job.trace_id,
+            if delivery == "ACTION":
+                planned_size = cycled_size
+                planned_camera = cycled_camera
+                last_action_shot_size = planned_size
+                last_action_camera = planned_camera
+            elif last_action_shot_size and last_action_camera:
+                # VO / 隐面台词继承同场上一 ACTION 景别运镜，避免冲掉画面语言
+                planned_size = last_action_shot_size
+                planned_camera = last_action_camera
+            else:
+                planned_size = cycled_size
+                planned_camera = cycled_camera
+
+            # 只有动作行会包含多个视觉时刻；台词/画外音行始终只出一帧
+            if planned_spec is not None:
+                beats = [
+                    FrameBeat(
+                        visual=planned_spec.visual_content.description,
+                    )
+                ]
+            elif delivery == "ACTION" and len(split.beats) > 1:
+                beats = list(split.beats)
+            else:
+                collapsed = collapse_to_single_beat(split, shot_size=planned_size)
+                beats = [collapsed] if collapsed is not None else [FrameBeat(visual=description)]
+            if delivery == "ACTION":
+                # 供后续画外音镜头继承的画面状态是最后一帧，而不是整段多时刻文案
+                last_action_visual = beats[-1].visual or last_action_visual
+            beat_durations = _split_scene_seconds(
+                duration_sec,
+                [1 if beat.render_mode == RENDER_MODE_BLACK_FRAME else 3 for beat in beats],
             )
-            child, _ = enqueue_job(
-                session,
-                project_id=project.id,
-                job_type="GENERATE_STORYBOARD_TAKE",
-                entity_type="shot_spec",
-                entity_id=spec.id,
-                idempotency_key=f"{project.id}:GENERATE_STORYBOARD_TAKE:{spec.id}:v2",
-                input_payload={
-                    "storyboard_version_id": storyboard.id,
-                    "workflow_run_id": workflow.id,
-                    "shot_spec_id": spec.id,
-                    "shot_id": shot.id,
-                    "prompt": image_prompt,
-                    "reference_asset_ids": reference_asset_ids,
-                    "director_intent": prompt_intent,
-                    "seed": int(spec.content_hash[:8], 16),
-                },
-                label=f"{code} · 分镜版本",
-                stage="等待生成低成本分镜",
-                trace_id=job.trace_id,
-                estimated_seconds=30,
-                retryable=True,
-            )
-            session.add(
-                JobDependency(
-                    id=str(uuid4()),
-                    job_id=child.id,
-                    depends_on_job_id=job.id,
-                    dependency_type="SUCCESS",
-                    created_at=now,
+
+            for beat, beat_duration in zip(beats, beat_durations, strict=True):
+                code = f"S{shot_ordinal:02d}"
+                shot_size = beat.shot_size_hint or planned_size
+                camera = planned_camera
+                binding = resolve_frame_bindings(
+                    session,
+                    frame=beat,
+                    delivery=delivery,
+                    shot_size=shot_size,
+                    camera_movement=camera,
+                    frame_named=_characters_from_visual_text(beat.visual, characters_by_key),
+                    fallback=line_characters,
+                    scene_cast=scene_cast,
+                    offscreen_names=scene_offscreen_names,
+                    face_hidden_names=scene_face_hidden_names,
+                    location=location,
+                    props=props,
                 )
-            )
-            session.add(
-                WorkflowNode(
+                blocking = blocking_conflicts(binding.conflicts)
+                if blocking:
+                    raise ValueError(
+                        "镜头画面存在必须人工澄清的冲突："
+                        + "；".join(item.message for item in blocking)
+                    )
+                bound_characters = binding.characters
+                continuity_characters = (
+                    [
+                        characters_by_id[character_id]
+                        for character_id in planned_spec.continuity.character_ids
+                        if character_id in characters_by_id
+                    ]
+                    if planned_spec is not None
+                    else []
+                )
+                # 旧下游合同要求每个镜头都保存场内角色的锁定版本快照；
+                # ShotSpec.continuity 仍只描述本镜真正涉及的角色。
+                snapshot_characters = (
+                    continuity_characters or bound_characters or scene_cast or characters
+                )
+                character_ids = [character.id for character in snapshot_characters]
+                identity_ids = [
+                    character.locked_identity_version_id
+                    for character in snapshot_characters
+                    if character.locked_identity_version_id
+                ]
+                look_ids = [
+                    character.active_look_version_id
+                    for character in snapshot_characters
+                    if character.active_look_version_id
+                ]
+                story_state_ids = [
+                    character.active_story_state_version_id
+                    for character in snapshot_characters
+                    if character.active_story_state_version_id
+                ]
+                reference_asset_ids = binding.reference_asset_ids
+                visible_prop_ids = _visible_prop_version_ids(beat.visual, props)
+                shot = Shot(
                     id=str(uuid4()),
-                    workflow_run_id=workflow.id,
-                    node_key=f"storyboard.take.{shot_ordinal}",
-                    node_type="JOB",
+                    scene_id=scene.id,
+                    code=code,
+                    ordinal=shot_ordinal,
+                    title=script_scene.heading,
+                    description=beat.visual or description,
+                    dialogue=dialogue,
+                    duration_sec=beat_duration,
+                    status="QUEUED",
+                    shot_size=shot_size,
+                    camera_movement=camera,
+                    current_take=0,
+                    candidate_take=None,
+                    continuity="CLEAR",
+                    location=script_scene.location,
+                    time_of_day=script_scene.time_of_day,
+                    current_take_id=None,
+                    character_ids_json=canonical_json(character_ids),
+                    character_look_version="Look V1",
+                    character_identity_version_ids_json=canonical_json(identity_ids),
+                    character_look_version_ids_json=canonical_json(look_ids),
+                    character_story_state_version_ids_json=canonical_json(story_state_ids),
+                    lock_version=1,
+                )
+                session.add(shot)
+                session.flush()
+                scene_duration_sec += beat_duration
+                visible_prop_names = [
+                    item.name for item in props if item.id in visible_prop_ids and item.name
+                ]
+                assembled_debug: dict[str, object] = {}
+                assembled_bible: dict[str, str] = {}
+                if beat.render_mode == RENDER_MODE_BLACK_FRAME:
+                    image_prompt = ""
+                else:
+                    prop_names = tuple(visible_prop_names)
+                    assembled = assemble_shot_prompt(
+                        project,
+                        description=beat.visual,
+                        dialogue=dialogue,
+                        location=script_scene.location,
+                        time_of_day=script_scene.time_of_day,
+                        shot_size=shot_size,
+                        camera_movement=camera,
+                        characters=bound_characters,
+                        aspect_ratio=project.aspect_ratio,
+                        delivery=delivery,
+                        frame=beat,
+                        visibility_by_name=binding.visibility_by_name,
+                        absent_character_names=binding.absent_names,
+                        visible_props=prop_names,
+                        location_version_label=(
+                            f"v{location.version}" if location is not None else ""
+                        ),
+                        conflicts=binding.conflicts,
+                    )
+                    image_prompt = assembled.image_prompt
+                    assembled_debug = assembled.debug.as_dict()
+                    assembled_bible = assembled.creative_bible
+                    if prompt_intent is not None:
+                        image_prompt = (
+                            f"{image_prompt}\n{director_intent_prompt_block(prompt_intent)}"
+                        )
+                prompt_payload = _frame_prompt_payload(
+                    beat=beat,
+                    binding=binding,
+                    project=project,
+                    description=beat.visual or description,
+                    dialogue=dialogue,
+                    delivery=delivery,
+                    location_name=script_scene.location,
+                    time_of_day=script_scene.time_of_day,
+                    shot_size=shot_size,
+                    camera=camera,
+                    location_version_id=location.id if location else None,
+                    image_prompt=image_prompt,
+                    offscreen_names=scene_offscreen_names,
+                    face_hidden_names=scene_face_hidden_names,
+                    prompt_intent=prompt_intent,
+                    storyboard_intent=storyboard_intent,
+                    identity_ids=identity_ids,
+                    look_ids=look_ids,
+                    story_state_ids=story_state_ids,
+                    prop_version_ids=visible_prop_ids,
+                )
+                prompt_payload["creative_bible"] = assembled_bible
+                prompt_payload["prompt_debug"] = assembled_debug
+                structured_contract = planned_spec or build_structured_shot_spec(
+                    duration_sec=beat_duration,
+                    narrative_goal=script_scene.purpose,
+                    description=beat.visual or description,
+                    action=beat.visual or description,
+                    environment=script_scene.location,
+                    location=script_scene.location,
+                    time_of_day=script_scene.time_of_day,
+                    shot_size=shot_size,
+                    camera_movement=camera,
+                    character_ids=character_ids,
+                    character_names=[item.name for item in bound_characters],
+                    prop_version_ids=visible_prop_ids,
+                    prop_names=visible_prop_names,
+                    location_version_id=location.id if location else None,
+                    dialogue=dialogue,
+                    delivery=delivery,
+                    project_style=project.style,
+                    aspect_ratio=project.aspect_ratio,
+                    source_scene_ordinal=script_scene.ordinal,
+                    source_script_scene_id=script_scene.id,
+                    source_script_line_ids=[line.id],
+                    code=code,
+                    title=script_scene.heading,
+                    reference_asset_ids=reference_asset_ids,
+                )
+                if structured_contract.duration_sec != beat_duration:
+                    structured_contract = structured_contract.model_copy(
+                        update={"duration_sec": float(beat_duration)}
+                    )
+                if prompt_intent is not None:
+                    structured_contract = structured_contract.model_copy(
+                        update={
+                            "technique": structured_contract.technique.model_copy(
+                                update={
+                                    "notes": (
+                                        f"{structured_contract.technique.notes}\n"
+                                        f"{director_intent_prompt_block(prompt_intent)}"
+                                    ).strip()
+                                }
+                            )
+                        }
+                    )
+                spec = ShotSpec(
+                    id=str(uuid4()),
+                    storyboard_version_id=storyboard.id,
+                    shot_id=shot.id,
+                    script_scene_id=script_scene.id,
+                    script_line_ids_json=canonical_json([line.id]),
+                    ordinal=shot_ordinal,
+                    description=beat.visual or description,
+                    dialogue=dialogue,
+                    duration_ms=beat_duration * 1000,
+                    shot_size=shot_size,
+                    camera_movement=camera,
+                    character_look_ids_json=canonical_json(look_ids),
+                    location_version_id=location.id if location else None,
+                    prop_version_ids_json=canonical_json(visible_prop_ids),
+                    prompt_json=canonical_json(prompt_payload),
+                    structured_spec_json=canonical_json(
+                        structured_contract.model_dump(mode="json")
+                    ),
+                    prompt_compiled="",
+                    prompt_adapter=structured_contract.generation.adapter,
+                    compiler_version="prompt-compiler-v1",
+                    compiler_input_hash="",
+                    prompt_compiled_hash="",
+                    validation_report_json="{}",
+                    lock_snapshot_json="{}",
+                    migration_provenance_json=canonical_json(
+                        {
+                            "source": "storyboard_agent",
+                            "provider": (agent_metadata or {}).get("provider", "deterministic"),
+                            "model": (agent_metadata or {}).get(
+                                "model", "structured-storyboard-agent-v1"
+                            ),
+                            "request_id": (agent_metadata or {}).get("request_id"),
+                        }
+                    ),
+                    review_status="VALID",
+                    repair_attempts=int((agent_metadata or {}).get("repair_attempts", 0)),
+                    content_hash=content_hash(structured_contract.model_dump(mode="json")),
+                    status="DRAFT",
+                )
+                session.add(spec)
+                session.flush()
+                _resolved, validation_report, compiled, _lock_snapshot = compile_shot_spec(
+                    session,
+                    spec,
+                    adapter_name=structured_contract.generation.adapter,
+                    store=True,
+                )
+                image_prompt = compiled.prompt
+                if agent_needs_review or validation_report.needs_review:
+                    spec.review_status = "NEEDS_REVIEW"
+                    spec.status = "NEEDS_REVIEW"
+                    shot.status = "NEEDS_REVIEW"
+                else:
+                    spec.status = "QUEUED"
+                    shot.status = "QUEUED"
+                record_shot_spec_revision(
+                    session,
+                    project_id=project.id,
+                    spec=spec,
+                    actor="system:storyboard-planner",
+                    change_reason="Storyboard Agent 基于严格 ShotSpec 合同生成初始镜头规格",
+                    trace_id=job.trace_id,
+                )
+                if spec.review_status == "NEEDS_REVIEW":
+                    session.add(
+                        WorkflowNode(
+                            id=str(uuid4()),
+                            workflow_run_id=workflow.id,
+                            node_key=f"storyboard.take.{shot_ordinal}",
+                            node_type="REVIEW",
+                            entity_type="shot_spec",
+                            entity_id=spec.id,
+                            job_id=None,
+                            status="NEEDS_REVIEW",
+                            dependency_keys_json=canonical_json(["storyboard.plan"]),
+                            output_json=spec.validation_report_json,
+                            degraded=True,
+                            error_code="SHOT_SPEC_NEEDS_REVIEW",
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                    shot_payloads.append(
+                        {
+                            "shot_spec_id": spec.id,
+                            "shot_id": shot.id,
+                            "script_line_id": line.id,
+                            "duration_ms": spec.duration_ms,
+                            "content_hash": spec.content_hash,
+                            "render_mode": beat.render_mode,
+                            "review_status": spec.review_status,
+                        }
+                    )
+                    shot_ordinal += 1
+                    continue
+                child, _ = enqueue_job(
+                    session,
+                    project_id=project.id,
+                    job_type="GENERATE_STORYBOARD_TAKE",
                     entity_type="shot_spec",
                     entity_id=spec.id,
-                    job_id=child.id,
-                    status="READY",
-                    dependency_keys_json=canonical_json(["storyboard.plan"]),
-                    output_json="{}",
-                    degraded=False,
-                    error_code=None,
-                    created_at=now,
-                    updated_at=now,
-                )
-            )
-            child_job_ids.append(child.id)
-            shot_payloads.append(
-                {
-                    "shot_spec_id": spec.id,
-                    "shot_id": shot.id,
-                    "script_line_id": line.id,
-                    "duration_ms": spec.duration_ms,
-                    "content_hash": spec.content_hash,
-                    "director_intent_receipt_hash": (
-                        prompt_intent.get("receipt_hash")
-                        if prompt_intent is not None
-                        else None
+                    idempotency_key=f"{project.id}:GENERATE_STORYBOARD_TAKE:{spec.id}:v2",
+                    input_payload={
+                        "storyboard_version_id": storyboard.id,
+                        "workflow_run_id": workflow.id,
+                        "shot_spec_id": spec.id,
+                        "shot_id": shot.id,
+                        "prompt": image_prompt,
+                        "reference_asset_ids": reference_asset_ids,
+                        "render_mode": beat.render_mode,
+                        "director_intent": prompt_intent,
+                        "seed": int(spec.content_hash[:8], 16),
+                    },
+                    label=f"{code} · 分镜版本",
+                    stage=(
+                        "等待合成黑场关键帧"
+                        if beat.render_mode == RENDER_MODE_BLACK_FRAME
+                        else "等待生成低成本分镜"
                     ),
-                }
-            )
-            if confirmed_intent is not None:
-                evidence = intent_evidence[confirmed_intent.change_set_id]
-                shot_spec_ids = evidence["shot_spec_ids"]
-                prompt_hashes = evidence["prompt_receipt_hashes"]
-                if isinstance(shot_spec_ids, list):
-                    shot_spec_ids.append(spec.id)
-                if isinstance(prompt_hashes, list) and prompt_intent is not None:
-                    prompt_hashes.append(prompt_intent["receipt_hash"])
-            shot_ordinal += 1
+                    trace_id=job.trace_id,
+                    estimated_seconds=30,
+                    retryable=True,
+                )
+                session.add(
+                    JobDependency(
+                        id=str(uuid4()),
+                        job_id=child.id,
+                        depends_on_job_id=job.id,
+                        dependency_type="SUCCESS",
+                        created_at=now,
+                    )
+                )
+                session.add(
+                    WorkflowNode(
+                        id=str(uuid4()),
+                        workflow_run_id=workflow.id,
+                        node_key=f"storyboard.take.{shot_ordinal}",
+                        node_type="JOB",
+                        entity_type="shot_spec",
+                        entity_id=spec.id,
+                        job_id=child.id,
+                        status="READY",
+                        dependency_keys_json=canonical_json(["storyboard.plan"]),
+                        output_json="{}",
+                        degraded=False,
+                        error_code=None,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                child_job_ids.append(child.id)
+                shot_payloads.append(
+                    {
+                        "shot_spec_id": spec.id,
+                        "shot_id": shot.id,
+                        "script_line_id": line.id,
+                        "duration_ms": spec.duration_ms,
+                        "content_hash": spec.content_hash,
+                        "render_mode": beat.render_mode,
+                        "director_intent_receipt_hash": (
+                            prompt_intent.get("receipt_hash")
+                            if prompt_intent is not None
+                            else None
+                        ),
+                    }
+                )
+                if confirmed_intent is not None:
+                    evidence = intent_evidence[confirmed_intent.change_set_id]
+                    shot_spec_ids = evidence["shot_spec_ids"]
+                    prompt_hashes = evidence["prompt_receipt_hashes"]
+                    if isinstance(shot_spec_ids, list):
+                        shot_spec_ids.append(spec.id)
+                    if isinstance(prompt_hashes, list) and prompt_intent is not None:
+                        prompt_hashes.append(prompt_intent["receipt_hash"])
+                shot_ordinal += 1
+        # 拆帧后镜头总时长可能与初始行时长有偏差，回写场次时长保持一致
+        scene.duration_sec = scene_duration_sec or scene.duration_sec
     storyboard.payload_json = canonical_json(
         {
             "schema_version": "storyboard-v2",
+            "shot_spec_schema_version": "shot-spec-v1",
             "script_version_id": script.id,
             "visual_bible_version_id": visual_bible.id,
             "shots": shot_payloads,
+            "storyboard_agent": agent_metadata or {"provider": "deterministic"},
             "director_intent_consumption": intent_consumption,
         }
     )
     storyboard.content_hash = content_hash(json.loads(storyboard.payload_json))
+    needs_review_count = sum(
+        1 for item in shot_payloads if item.get("review_status") == "NEEDS_REVIEW"
+    )
+    if needs_review_count:
+        storyboard.status = "NEEDS_REVIEW"
+        workflow.status = "WAITING_FOR_REVIEW"
+        workflow.current_gate = "G4_STORYBOARD"
     for confirmed_intent in director_intents.values():
         evidence = intent_evidence.get(confirmed_intent.change_set_id)
         if evidence is None or not evidence.get("shot_spec_ids"):
@@ -799,8 +2217,16 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
         )
     )
     if root_node is not None:
-        root_node.status = "FAN_OUT_COMPLETE"
-        root_node.output_json = canonical_json({"child_job_ids": child_job_ids})
+        root_node.status = "NEEDS_REVIEW" if needs_review_count else "FAN_OUT_COMPLETE"
+        root_node.output_json = canonical_json(
+            {
+                "child_job_ids": child_job_ids,
+                "needs_review_count": needs_review_count,
+            }
+        )
+        root_node.error_code = (
+            "SHOT_SPEC_NEEDS_REVIEW" if needs_review_count else None
+        )
         root_node.updated_at = now
     append_event(
         session,
@@ -811,6 +2237,7 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
             "storyboard_version_id": storyboard.id,
             "shot_count": len(shot_payloads),
             "child_job_ids": child_job_ids,
+            "needs_review_count": needs_review_count,
         },
     )
     session.flush()
@@ -1170,6 +2597,7 @@ def regenerate_storyboard_shot(
                 "message": "第 4 阶段已批准，无法再重生成分镜",
             },
         )
+    ensure_shot_spec_generation_ready(spec)
     if storyboard.status not in {"READY_FOR_REVIEW", "ANIMATIC_RUNNING", "TAKES_RUNNING"}:
         raise HTTPException(
             status_code=409,
@@ -1201,39 +2629,46 @@ def regenerate_storyboard_shot(
     now = datetime.now(UTC)
     revision = (spec.content_hash[:8] if spec.content_hash else "regen") + now.strftime("%H%M%S")
     seed = int(content_hash(f"{spec.id}:{revision}:{note or ''}")[:8], 16) & 0x7FFFFFFF
-    characters: list[Character] = []
     try:
-        character_ids = json.loads(shot.character_ids_json or "[]")
+        regen_prompt_payload = json.loads(spec.prompt_json or "{}")
     except json.JSONDecodeError:
-        character_ids = []
-    if isinstance(character_ids, list) and character_ids:
-        ordered = [item for item in character_ids if isinstance(item, str)]
-        by_id = {
-            item.id: item
-            for item in session.scalars(
-                select(Character).where(Character.id.in_(ordered))
-            ).all()
-        }
-        characters = [by_id[item_id] for item_id in ordered if item_id in by_id]
-    reference_asset_ids: list[str] = []
-    for character in characters:
-        for asset_id in _character_reference_asset_ids(session, character):
-            if asset_id not in reference_asset_ids:
-                reference_asset_ids.append(asset_id)
-    image_prompt = build_storyboard_take_prompt(
-        project,
-        description=shot.description,
-        dialogue=shot.dialogue,
-        location=shot.location,
-        time_of_day=shot.time_of_day,
-        shot_size=shot.shot_size,
-        camera_movement=shot.camera_movement,
-        characters=characters,
-        aspect_ratio=project.aspect_ratio,
-    )
+        regen_prompt_payload = {}
+    if not isinstance(regen_prompt_payload, dict):
+        regen_prompt_payload = {}
     cleaned_note = note.strip() if isinstance(note, str) and note.strip() else None
-    if cleaned_note:
-        image_prompt = f"{image_prompt}\n导演修改意图：{cleaned_note}。"
+    image_prompt, binding, beat = rebuild_shot_frame_prompt(
+        session,
+        project=project,
+        shot=shot,
+        spec=spec,
+        prompt_payload=regen_prompt_payload,
+        note=cleaned_note,
+    )
+    blocking = blocking_conflicts(binding.conflicts)
+    if blocking:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "SHOT_FRAME_CONFLICT",
+                "message": "镜头画面存在必须先拆镜或澄清叙事意图的冲突，未提交生图",
+                "conflicts": [
+                    {"code": item.code, "message": item.message} for item in blocking
+                ],
+            },
+        )
+    regen_prompt_payload["delivery"] = _delivery_from_prompt_payload(
+        regen_prompt_payload,
+        dialogue=shot.dialogue,
+    )
+    _apply_frame_binding_to_shot(
+        shot,
+        binding=binding,
+        prompt_payload=regen_prompt_payload,
+        beat=beat,
+        prompt=image_prompt,
+    )
+    spec.prompt_json = canonical_json(regen_prompt_payload)
+    reference_asset_ids = binding.reference_asset_ids
     spec.status = "QUEUED"
     shot.status = "QUEUED"
     shot.lock_version += 1
@@ -1256,6 +2691,7 @@ def regenerate_storyboard_shot(
             "shot_id": shot.id,
             "prompt": image_prompt,
             "reference_asset_ids": reference_asset_ids,
+            "render_mode": beat.render_mode,
             "seed": seed,
             "replace_existing": True,
             "note": cleaned_note,
@@ -1593,10 +3029,44 @@ def storyboard_workspace(session: Session, project_id: str) -> dict[str, object]
                 Take.is_current.is_(True),
             )
         )
+        try:
+            prompt_payload = json.loads(spec.prompt_json or "{}")
+        except json.JSONDecodeError:
+            prompt_payload = {}
+        structured_contract = load_shot_spec_contract(session, spec)
+        validation_report = _json_object(spec.validation_report_json)
+        lock_snapshot = _json_object(spec.lock_snapshot_json)
+        migration_provenance = _json_object(spec.migration_provenance_json)
+        image_prompt = spec.prompt_compiled or ""
+        delivery = None
+        render_mode = "IMAGE"
+        audio_cues: list[str] = []
+        camera_notes: list[str] = []
+        timeline_notes: list[str] = []
+        if isinstance(prompt_payload, dict):
+            raw_prompt = prompt_payload.get("image_prompt")
+            if not image_prompt and isinstance(raw_prompt, str):
+                image_prompt = raw_prompt
+            raw_delivery = prompt_payload.get("delivery")
+            if raw_delivery in {"ACTION", "VOICE_OVER", "DIALOGUE"}:
+                delivery = raw_delivery
+            raw_mode = prompt_payload.get("render_mode")
+            if isinstance(raw_mode, str) and raw_mode:
+                render_mode = raw_mode
+            for key, target in (
+                ("audio_cues", audio_cues),
+                ("camera_notes", camera_notes),
+                ("timeline_notes", timeline_notes),
+            ):
+                values = prompt_payload.get(key)
+                if isinstance(values, list):
+                    target.extend(item for item in values if isinstance(item, str) and item)
         shots.append(
             {
                 "shot_spec_id": spec.id,
                 "shot_id": spec.shot_id,
+                "scene_id": shot.scene_id if shot else None,
+                "shot_lock_version": shot.lock_version if shot else 1,
                 "code": shot.code if shot else f"S{spec.ordinal:02d}",
                 "title": shot.title if shot else "",
                 "description": spec.description,
@@ -1609,7 +3079,25 @@ def storyboard_workspace(session: Session, project_id: str) -> dict[str, object]
                 "prop_version_ids": json.loads(spec.prop_version_ids_json),
                 "status": spec.status,
                 "image_url": f"/api/v1/assets/{take.asset_id}/content" if take else None,
+                "image_status": take.status if take else None,
                 "content_hash": spec.content_hash,
+                "shot_spec": structured_contract.model_dump(mode="json"),
+                "prompt_compiled": spec.prompt_compiled,
+                "prompt_adapter": spec.prompt_adapter,
+                "compiler_version": spec.compiler_version,
+                "compiler_input_hash": spec.compiler_input_hash,
+                "prompt_compiled_hash": spec.prompt_compiled_hash,
+                "review_status": spec.review_status,
+                "repair_attempts": spec.repair_attempts,
+                "validation_report": validation_report,
+                "lock_snapshot": lock_snapshot,
+                "migration_provenance": migration_provenance,
+                "image_prompt": image_prompt,
+                "delivery": delivery,
+                "render_mode": render_mode,
+                "audio_cues": audio_cues,
+                "camera_notes": camera_notes,
+                "timeline_notes": timeline_notes,
             }
         )
     workflow = (
@@ -1704,6 +3192,24 @@ def approve_storyboard(
     project = project_or_404(session, storyboard.project_id)
     if project.lock_version != expected_version:
         raise version_conflict(project, expected_version)
+    needs_review_ids = list(
+        session.scalars(
+            select(ShotSpec.id).where(
+                ShotSpec.storyboard_version_id == storyboard.id,
+                ShotSpec.review_status == "NEEDS_REVIEW",
+            )
+        ).all()
+    )
+    if needs_review_ids:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "SHOT_SPEC_NEEDS_REVIEW",
+                "message": "分镜中仍有未通过导演级校验的镜头，不能批准",
+                "details": {"shot_spec_ids": needs_review_ids},
+                "user_action": "展开镜头修正结构化字段并重新保存",
+            },
+        )
     if project.status != "STORYBOARD_READY" or storyboard.status != "READY_FOR_REVIEW":
         raise HTTPException(
             status_code=409,

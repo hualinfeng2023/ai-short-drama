@@ -68,7 +68,8 @@ def test_v1_upgrade_recovers_from_partial_sqlite_ddl(
         "job_dependencies",
         "review_gates",
         "storyboard_versions",
-        "shot_specs",
+            "shot_specs",
+            "shot_constraint_locks",
         "generation_records",
         "quality_checks",
         "review_records",
@@ -240,7 +241,20 @@ def test_v1_upgrade_recovers_from_partial_sqlite_ddl(
         "director_intent_json",
         "rejection_reasons_json",
     }
-    assert revision == "0029_legacy_take_provenance"
+    assert {item["name"] for item in inspector.get_columns("shot_specs")} >= {
+        "structured_spec_json",
+        "prompt_compiled",
+        "prompt_adapter",
+        "compiler_version",
+        "compiler_input_hash",
+        "prompt_compiled_hash",
+        "validation_report_json",
+        "lock_snapshot_json",
+        "migration_provenance_json",
+        "review_status",
+        "repair_attempts",
+    }
+    assert revision == "0030_structured_shot_specs"
     if platform_targets is not None:
         assert '"priority":"PRIMARY"' in platform_targets
     command.check(config)

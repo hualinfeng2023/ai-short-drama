@@ -153,7 +153,6 @@ from app.services.projects import (
     version_conflict,
 )
 from app.services.proposals import create_proposal_job
-from app.services.provenance import record_shot_spec_revision
 from app.services.relationship_graph_workflow import (
     approve_relationship_graph,
     create_confirmed_relationship_revision,
@@ -171,6 +170,7 @@ from app.services.script_rewrites import (
     persist_script_excerpt_rewrite,
     script_excerpt_revision_state_hash,
 )
+from app.services.shot_specs import load_shot_spec_contract, write_shot_spec
 from app.services.storyboards_v2 import approve_storyboard, regenerate_storyboard_shot
 from app.services.takes import (
     apply_candidate_take,
@@ -2328,6 +2328,9 @@ def _shot_spec_state_hash(shot: Shot, spec: ShotSpec | None) -> str:
                     "camera_movement": spec.camera_movement,
                     "status": spec.status,
                     "content_hash": spec.content_hash,
+                    "structured_spec_json": spec.structured_spec_json,
+                    "prompt_compiled_hash": spec.prompt_compiled_hash,
+                    "review_status": spec.review_status,
                 }
                 if spec is not None
                 else None
@@ -2337,21 +2340,19 @@ def _shot_spec_state_hash(shot: Shot, spec: ShotSpec | None) -> str:
 
 
 def _shot_spec_content_hash(spec: ShotSpec) -> str:
+    try:
+        structured = json.loads(spec.structured_spec_json or "{}")
+    except json.JSONDecodeError:
+        structured = {}
+    if structured:
+        return content_hash(structured)
     return content_hash(
         {
-            "shot_id": spec.shot_id,
-            "script_scene_id": spec.script_scene_id,
-            "script_line_ids_json": spec.script_line_ids_json,
-            "ordinal": spec.ordinal,
             "description": spec.description,
             "dialogue": spec.dialogue,
             "duration_ms": spec.duration_ms,
             "shot_size": spec.shot_size,
             "camera_movement": spec.camera_movement,
-            "character_look_ids_json": spec.character_look_ids_json,
-            "location_version_id": spec.location_version_id,
-            "prop_version_ids_json": spec.prop_version_ids_json,
-            "prompt_json": spec.prompt_json,
         }
     )
 
@@ -2443,33 +2444,80 @@ def _execute_shot_spec_update(
         actor=command.actor.id,
         **{key: value for key, value in command.payload.items() if key != "confirmed"},
     )
-    changes = validated.model_dump(
-        exclude={"expected_version", "actor"},
-        exclude_none=True,
-    )
-    for field, value in changes.items():
-        setattr(shot, field, value)
-        if spec is not None:
-            setattr(spec, field, value)
-    shot.lock_version += 1
-    shot.status = "DRAFT"
-    if spec is not None:
-        spec.status = "DRAFT"
-        spec.content_hash = _shot_spec_content_hash(spec)
-        record_shot_spec_revision(
+    if spec is None:
+        if validated.shot_spec is not None or validated.prompt_adapter is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "STRUCTURED_SHOT_SPEC_REQUIRED",
+                    "message": "该历史镜头尚未迁移，暂时只能修改兼容字段",
+                    "user_action": "先重新生成分镜或执行 ShotSpec 数据迁移",
+                },
+            )
+        legacy_changes = validated.model_dump(
+            exclude={"expected_version", "actor", "shot_spec", "prompt_adapter"},
+            exclude_none=True,
+        )
+        for field, value in legacy_changes.items():
+            setattr(shot, field, value)
+        shot.lock_version += 1
+        shot.status = "DRAFT"
+    else:
+        contract = validated.shot_spec or load_shot_spec_contract(session, spec)
+        if validated.shot_spec is None:
+            if validated.description is not None:
+                contract = contract.model_copy(
+                    update={
+                        "visual_content": contract.visual_content.model_copy(
+                            update={"description": validated.description}
+                        )
+                    }
+                )
+            if validated.dialogue is not None:
+                contract = contract.model_copy(
+                    update={
+                        "audio": contract.audio.model_copy(
+                            update={"dialogue": validated.dialogue}
+                        )
+                    }
+                )
+            if validated.shot_size is not None:
+                contract = contract.model_copy(
+                    update={
+                        "camera": contract.camera.model_copy(
+                            update={"shot_size": validated.shot_size}
+                        )
+                    }
+                )
+            if validated.camera_movement is not None:
+                contract = contract.model_copy(
+                    update={
+                        "camera": contract.camera.model_copy(
+                            update={"movement": validated.camera_movement}
+                        )
+                    }
+                )
+        if validated.prompt_adapter is not None:
+            contract = contract.model_copy(
+                update={
+                    "generation": contract.generation.model_copy(
+                        update={"adapter": validated.prompt_adapter}
+                    )
+                }
+            )
+        spec, _validation, _compiled = write_shot_spec(
             session,
-            project_id=project.id,
-            spec=spec,
+            spec,
+            contract,
             actor=command.actor.id,
             change_reason=str(
                 command.payload.get("reason")
                 or command.payload.get("note")
-                or "用户修改镜头规格"
+                or "用户修改结构化镜头规格并重新编译 Prompt"
             ),
-            changes=changes,
             trace_id=command.command_id,
+            adapter_name=validated.prompt_adapter,
         )
-
     takes = session.scalars(select(Take).where(Take.shot_id == shot.id)).all()
     asset_ids = {take.asset_id for take in takes}
     for take in takes:

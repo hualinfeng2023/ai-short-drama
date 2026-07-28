@@ -25,6 +25,7 @@ from app.db.models import (
     ReviewRecord,
     Scene,
     Shot,
+    ShotSpec,
     Take,
 )
 from app.schemas import JobRead
@@ -35,6 +36,7 @@ from app.services.identity_consistency import IdentityEvaluation, image_data_url
 from app.services.image_provider import GeneratedImage
 from app.services.jobs import ACTIVE_STATUSES, QUEUED_STATUSES, enqueue_job, job_to_read
 from app.services.provenance import add_lineage_edge
+from app.services.shot_specs import compile_shot_spec, ensure_shot_spec_generation_ready
 from app.services.workspace import shot_or_404
 
 IMAGE_JOB_TYPE = "GENERATE_SHOT_IMAGE"
@@ -209,6 +211,7 @@ def create_shot_image_job(
 ) -> tuple[JobRead, bool]:
     shot = shot_or_404(session, shot_id)
     project = _shot_project(session, shot)
+    structured_spec = session.scalar(select(ShotSpec).where(ShotSpec.shot_id == shot.id))
     active = session.scalar(
         select(Job)
         .where(
@@ -266,11 +269,29 @@ def create_shot_image_job(
                 "details": {"aspect_ratio": resolved_aspect_ratio},
             },
         )
-    base_prompt = (
-        prompt.strip()
-        if prompt and prompt.strip()
-        else build_shot_prompt(project, shot, resolved_aspect_ratio)
-    )
+    if structured_spec is not None:
+        ensure_shot_spec_generation_ready(structured_spec)
+        if prompt and prompt.strip():
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "SHOT_SPEC_PROMPT_OVERRIDE_FORBIDDEN",
+                    "message": "结构化镜头不能直接覆盖 Prompt，请编辑 ShotSpec 后重新编译",
+                },
+            )
+        _resolved, _report, compiled, _snapshot = compile_shot_spec(
+            session,
+            structured_spec,
+            adapter_name="generic",
+            store=True,
+        )
+        base_prompt = compiled.prompt
+    else:
+        base_prompt = (
+            prompt.strip()
+            if prompt and prompt.strip()
+            else build_shot_prompt(project, shot, resolved_aspect_ratio)
+        )
     bindings = _character_bindings(session, project=project, shot=shot)
     character_ids = [character.id for character, _candidate, _asset in bindings]
     reference_asset_ids = [asset.id for _character, _candidate, asset in bindings]

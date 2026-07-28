@@ -158,12 +158,19 @@ def create_audio_pipeline(session: Session, job: Job) -> tuple[SoundBriefVersion
     cue_specs: list[dict[str, object]] = []
     cursor_ms = 0
     seen_scenes: set[str] = set()
+    seen_dialogue_lines: set[str] = set()
     for spec in specs:
         scene_ordinal = scene_ordinals.get(spec.script_scene_id)
         audio_intent = audio_intents.get(scene_ordinal) if scene_ordinal is not None else None
         line_ids = json.loads(spec.script_line_ids_json)
         line = session.get(ScriptLine, line_ids[0]) if line_ids else None
-        if line is not None and line.line_type in {"DIALOGUE", "VOICE_OVER"}:
+        # 同一剧本行可能被拆成多帧，对白/画外音只建一次，避免重复配音
+        if (
+            line is not None
+            and line.line_type in {"DIALOGUE", "VOICE_OVER"}
+            and line.id not in seen_dialogue_lines
+        ):
+            seen_dialogue_lines.add(line.id)
             cue_specs.append(
                 {
                     "cue_type": line.line_type,
@@ -181,6 +188,38 @@ def create_audio_pipeline(session: Session, job: Job) -> tuple[SoundBriefVersion
                     ),
                 }
             )
+        # 拆帧时保存在 prompt_json.audio_cues 的音效意图（如胎心）写入 SFX
+        try:
+            prompt_payload = json.loads(spec.prompt_json or "{}")
+        except json.JSONDecodeError:
+            prompt_payload = {}
+        frame_audio_cues = (
+            prompt_payload.get("audio_cues") if isinstance(prompt_payload, dict) else None
+        )
+        if isinstance(frame_audio_cues, list):
+            for cue_text in frame_audio_cues:
+                if not isinstance(cue_text, str) or not cue_text.strip():
+                    continue
+                # 画外音说明已由台词行承载，避免重复成 SFX
+                if any(token in cue_text for token in ("画外音", "对白", "台词")):
+                    continue
+                cue_specs.append(
+                    {
+                        "cue_type": "SFX",
+                        "script_line_id": line.id if line is not None else None,
+                        "script_scene_id": spec.script_scene_id,
+                        "shot_id": spec.shot_id,
+                        "voice_profile_id": None,
+                        "start_ms": cursor_ms,
+                        "duration_ms": min(1500, spec.duration_ms),
+                        "payload": _cue_payload(
+                            "SFX",
+                            text=cue_text.strip(),
+                            emotion="accent",
+                            director_intent=audio_intent,
+                        ),
+                    }
+                )
         if spec.script_scene_id not in seen_scenes:
             scene = session.get(ScriptScene, spec.script_scene_id)
             scene_duration = sum(

@@ -2505,6 +2505,8 @@ async def _ark_json(
     on_validated_output: Callable[[int], Awaitable[None]] | None = None,
     on_validation_failure: Callable[[int, dict[str, Any]], Awaitable[None]] | None = None,
     thinking_type: Literal["enabled", "disabled"] = "disabled",
+    max_attempts: int = 3,
+    strict_json_schema: bool = False,
 ) -> TextGenerationResult:
     if not settings.ark_api_key:
         raise TextProviderError("ARK_API_KEY_MISSING", "服务端未配置 ARK_API_KEY", retryable=False)
@@ -2515,7 +2517,9 @@ async def _ark_json(
     last_failure_kind = ""
     repair_source_json = ""
     provider_error_text = ""
-    for attempt in range(3):
+    if not 1 <= max_attempts <= 3:
+        raise ValueError("max_attempts 必须在 1 到 3 之间")
+    for attempt in range(max_attempts):
         output: str | None = None
         repair = (
             "\n上一次输出未通过校验。请只返回修复后的完整 JSON，不要解释、补丁或局部片段。"
@@ -2542,6 +2546,22 @@ async def _ark_json(
             ) as client:
                 try:
                     async with asyncio.timeout(total_timeout_seconds):
+                        request_payload: dict[str, Any] = {
+                            "model": settings.ark_prompt_model,
+                            "input": prompt + repair,
+                            "thinking": {"type": thinking_type},
+                            "max_output_tokens": ARK_TEXT_MAX_OUTPUT_TOKENS,
+                            "stream": True,
+                        }
+                        if strict_json_schema:
+                            request_payload["text"] = {
+                                "format": {
+                                    "type": "json_schema",
+                                    "name": validator.__name__.lower(),
+                                    "schema": validator.model_json_schema(),
+                                    "strict": True,
+                                }
+                            }
                         async with client.stream(
                             "POST",
                             settings.ark_responses_url,
@@ -2549,13 +2569,7 @@ async def _ark_json(
                                 "Authorization": f"Bearer {settings.ark_api_key}",
                                 "Content-Type": "application/json",
                             },
-                            json={
-                                "model": settings.ark_prompt_model,
-                                "input": prompt + repair,
-                                "thinking": {"type": thinking_type},
-                                "max_output_tokens": ARK_TEXT_MAX_OUTPUT_TOKENS,
-                                "stream": True,
-                            },
+                            json=request_payload,
                         ) as response:
                             request_id = response.headers.get("x-request-id")
                             if response.status_code >= 400:
@@ -2634,7 +2648,7 @@ async def _ark_json(
                 "error_type": type(exc).__name__,
             }
             attempt_diagnostics.append(diagnostic)
-            if attempt < 2:
+            if attempt < max_attempts - 1:
                 await asyncio.sleep(0.25 * (2**attempt))
                 continue
             raise TextProviderError(
@@ -2711,10 +2725,10 @@ async def _ark_json(
                 "last_request_id": request_id,
             },
         )
-    # 模型输出具有随机性，整轮换一次生成经常就能通过；允许任务层自动重试而不是直接失败
+    # 调用方可以把严格结构失败转入人工复核；默认调用仍保留三次尝试的旧行为。
     raise TextProviderError(
         "ARK_TEXT_SCHEMA_INVALID",
-        "火山方舟连续三次未返回符合创作合同的结构化 JSON",
+        f"火山方舟连续 {max_attempts} 次未返回符合创作合同的结构化 JSON",
         retryable=True,
         details={
             "validator": validator.__name__,

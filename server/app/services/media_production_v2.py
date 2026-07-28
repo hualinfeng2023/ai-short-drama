@@ -30,9 +30,62 @@ from app.services.image_provider import GeneratedImage
 from app.services.jobs import enqueue_job
 from app.services.media_staging import seedream_fast_path_expires_at
 from app.services.projects import canonical_json, version_conflict
+from app.services.shot_frames import RENDER_MODE_BLACK_FRAME
+from app.services.shot_specs import compile_shot_spec, ensure_shot_spec_generation_ready
 from app.services.video_provider import GeneratedVideo
 from app.services.videos import materialize_generated_video
 from app.services.workspace import project_or_404
+
+
+def resolve_keyframe_image_prompt(payload: dict[str, object]) -> str:
+    """从任务入队载荷取出真正的生图提示词，兼容旧的整段 prompt_json。"""
+    raw = payload.get("prompt")
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return ""
+        if text.startswith("{") and text.endswith("}"):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                return text
+            if isinstance(parsed, dict):
+                image_prompt = parsed.get("image_prompt")
+                if isinstance(image_prompt, str):
+                    return image_prompt
+                return ""
+        return text
+    if isinstance(raw, dict):
+        image_prompt = raw.get("image_prompt")
+        if isinstance(image_prompt, str):
+            return image_prompt
+    return ""
+
+
+def _shot_spec_render_mode(spec: ShotSpec) -> str:
+    try:
+        payload = json.loads(spec.prompt_json or "{}")
+    except json.JSONDecodeError:
+        return "IMAGE"
+    if isinstance(payload, dict):
+        mode = payload.get("render_mode")
+        if isinstance(mode, str) and mode:
+            return mode
+    return "IMAGE"
+
+
+def _shot_spec_image_prompt(spec: ShotSpec) -> str:
+    if spec.prompt_compiled:
+        return spec.prompt_compiled
+    try:
+        payload = json.loads(spec.prompt_json or "{}")
+    except json.JSONDecodeError:
+        return ""
+    if isinstance(payload, dict):
+        image_prompt = payload.get("image_prompt")
+        if isinstance(image_prompt, str):
+            return image_prompt
+    return ""
 
 
 def start_media_production(session: Session, job: Job) -> list[str]:
@@ -57,11 +110,24 @@ def start_media_production(session: Session, job: Job) -> list[str]:
     )
     child_ids: list[str] = []
     for spec in specs:
+        ensure_shot_spec_generation_ready(spec)
+        _resolved, _report, keyframe_compiled, _snapshot = compile_shot_spec(
+            session,
+            spec,
+            adapter_name="generic",
+            store=True,
+        )
         candidate_count = 2 if spec.ordinal in {1, len(specs)} else 1
         storyboard_take = session.scalar(
             select(Take).where(Take.shot_id == spec.shot_id, Take.kind == "STORYBOARD")
         )
         reference_asset_ids = [storyboard_take.asset_id] if storyboard_take else []
+        render_mode = _shot_spec_render_mode(spec)
+        image_prompt = keyframe_compiled.prompt
+        # 黑场不传分镜参考，避免无关画面诱导模型
+        if render_mode == RENDER_MODE_BLACK_FRAME:
+            reference_asset_ids = []
+            image_prompt = ""
         for candidate_ordinal in range(1, candidate_count + 1):
             child, _ = enqueue_job(
                 session,
@@ -80,7 +146,8 @@ def start_media_production(session: Session, job: Job) -> list[str]:
                     "shot_id": spec.shot_id,
                     "candidate_ordinal": candidate_ordinal,
                     "candidate_count": candidate_count,
-                    "prompt": spec.prompt_json,
+                    "prompt": image_prompt,
+                    "render_mode": render_mode,
                     "reference_asset_ids": reference_asset_ids,
                     "character_look_ids": json.loads(spec.character_look_ids_json),
                     "location_version_id": spec.location_version_id,
@@ -88,7 +155,11 @@ def start_media_production(session: Session, job: Job) -> list[str]:
                     "seed": int(spec.content_hash[:8], 16) + candidate_ordinal,
                 },
                 label=f"正式关键帧 · 镜头 {spec.ordinal} · 候选 {candidate_ordinal}",
-                stage="等待生成正式关键帧",
+                stage=(
+                    "等待合成黑场关键帧"
+                    if render_mode == RENDER_MODE_BLACK_FRAME
+                    else "等待生成正式关键帧"
+                ),
                 trace_id=job.trace_id,
                 estimated_seconds=45,
                 retryable=True,
@@ -393,6 +464,13 @@ def _maybe_enqueue_video(
     if asset is None:
         return None
     metadata = json.loads(asset.metadata_json or "{}")
+    ensure_shot_spec_generation_ready(spec)
+    _resolved, _report, compiled, _snapshot = compile_shot_spec(
+        session,
+        spec,
+        adapter_name="seedance",
+        store=True,
+    )
     next_job, replayed = enqueue_job(
         session,
         project_id=job.project_id,
@@ -410,10 +488,7 @@ def _maybe_enqueue_video(
             "source_url": metadata.get("source_url"),
             "source_url_kind": metadata.get("source_url_kind", "seedream-original"),
             "source_url_fast_path_expires_at": metadata.get("source_url_fast_path_expires_at"),
-            "prompt": (
-                f"{spec.description}。保持人物、服装、场景、道具和构图稳定，"
-                "生成自然连续的细微运动，避免闪烁和新增主体。"
-            ),
+            "prompt": compiled.prompt,
             "duration": shot.duration_sec,
             "take_version": 1,
         },

@@ -599,7 +599,7 @@ def materialize_storyboards(session: Session, settings: Settings, job: Job) -> J
                         scene_id=scene.id,
                         code=code,
                         ordinal=shot_ordinal,
-                        title=f"{scene.title} · {code}",
+                        title=str(scene_data["title"]),
                         description=f"{scene.purpose}（模拟动态分镜）",
                         dialogue="",
                         duration_sec=int(shot_data["duration_sec"]),

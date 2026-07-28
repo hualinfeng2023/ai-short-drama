@@ -1229,7 +1229,7 @@ export function FilmCanvasPage() {
                   </Button>
                 ) : null}
                 {directorTarget && !selectedDirectorProposal ? (
-                  <Button disabled={directorBusy} onClick={() => void reviewSelectedObject()}>
+                  <Button disabled={directorBusy} onClick={() => void reviewSelectedObject()} variant="ai">
                     <Sparkles size={16} />{directorBusy ? '审查中…' : '发起场景审查'}
                   </Button>
                 ) : null}
@@ -1259,7 +1259,7 @@ export function FilmCanvasPage() {
                 ) : null}
                 {selectedDirectorProposal
                   && ['APPROVED', 'REJECTED', 'ROLLED_BACK'].includes(selectedDirectorProposal.status) ? (
-                    <Button disabled={directorBusy} onClick={() => void reviewSelectedObject()}>
+                    <Button disabled={directorBusy} onClick={() => void reviewSelectedObject()} variant="ai">
                       <Sparkles size={16} />{directorBusy ? '审查中…' : '重新审查'}
                     </Button>
                   ) : null}

@@ -946,8 +946,38 @@ class ShotSpec(Base):
     location_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     prop_version_ids_json: Mapped[str] = mapped_column(Text, default="[]")
     prompt_json: Mapped[str] = mapped_column(Text, default="{}")
+    structured_spec_json: Mapped[str] = mapped_column(Text, default="{}")
+    prompt_compiled: Mapped[str] = mapped_column(Text, default="")
+    prompt_adapter: Mapped[str] = mapped_column(String(32), default="generic")
+    compiler_version: Mapped[str] = mapped_column(String(48), default="prompt-compiler-v1")
+    compiler_input_hash: Mapped[str] = mapped_column(String(64), default="")
+    prompt_compiled_hash: Mapped[str] = mapped_column(String(64), default="")
+    validation_report_json: Mapped[str] = mapped_column(Text, default="{}")
+    lock_snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+    migration_provenance_json: Mapped[str] = mapped_column(Text, default="{}")
+    review_status: Mapped[str] = mapped_column(String(32), default="VALID", index=True)
+    repair_attempts: Mapped[int] = mapped_column(Integer, default=0)
     content_hash: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(32), index=True)
+
+
+class ShotConstraintLock(Base):
+    __tablename__ = "shot_constraint_locks"
+    __table_args__ = (
+        UniqueConstraint("project_id", "scope", "target_id", "field_path"),
+        Index("ix_shot_constraint_locks_target", "scope", "target_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    scope: Mapped[str] = mapped_column(String(24), index=True)
+    target_id: Mapped[str] = mapped_column(String(36))
+    field_path: Mapped[str] = mapped_column(String(120))
+    value_json: Mapped[str] = mapped_column(Text)
+    owner: Mapped[str] = mapped_column(String(80))
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class ShotSpecRevision(Base):

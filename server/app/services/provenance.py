@@ -101,7 +101,15 @@ def record_shot_spec_revision(
         "character_look_ids": _json_value(spec.character_look_ids_json, []),
         "location_version_id": spec.location_version_id,
         "prop_version_ids": _json_value(spec.prop_version_ids_json, []),
-        "prompt": _json_value(spec.prompt_json, {}),
+        "shot_spec": _json_value(spec.structured_spec_json, {}),
+        "prompt_compiled": spec.prompt_compiled,
+        "prompt_adapter": spec.prompt_adapter,
+        "compiler_version": spec.compiler_version,
+        "compiler_input_hash": spec.compiler_input_hash,
+        "prompt_compiled_hash": spec.prompt_compiled_hash,
+        "validation_report": _json_value(spec.validation_report_json, {}),
+        "lock_snapshot": _json_value(spec.lock_snapshot_json, {}),
+        "review_status": spec.review_status,
         "status": spec.status,
     }
     revision = ShotSpecRevision(
