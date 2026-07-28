@@ -20,6 +20,7 @@ from app.domain.narrative_targeting import (
     ProductionFormat,
     TargetAudience,
 )
+from app.domain.shot_spec import ShotSpec as StructuredShotSpec
 
 
 class OrmModel(BaseModel):
@@ -599,6 +600,8 @@ class ShotSpecUpdateRequest(BaseModel):
     dialogue: str | None = Field(default=None, max_length=4000)
     shot_size: Literal["WS", "MS", "MCU", "CU"] | None = None
     camera_movement: Literal["STATIC", "PAN", "DOLLY_IN", "TRACK", "HANDHELD"] | None = None
+    shot_spec: StructuredShotSpec | None = None
+    prompt_adapter: Literal["generic", "veo", "kling", "seedance"] | None = None
     actor: str = Field(default="创作者", min_length=1, max_length=80)
 
     @model_validator(mode="after")
@@ -606,6 +609,30 @@ class ShotSpecUpdateRequest(BaseModel):
         if not self.model_fields_set.difference({"expected_version", "actor"}):
             raise ValueError("至少提供一个镜头修改字段")
         return self
+
+
+class ShotLockUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    expected_version: int = Field(ge=1)
+    scope: Literal["PROJECT", "SCENE", "FIELD"]
+    target_id: str = Field(min_length=36, max_length=36)
+    field_path: str = Field(min_length=1, max_length=120)
+    locked: bool
+    value: object | None = None
+    actor: str = Field(default="创作者", min_length=1, max_length=80)
+
+    @model_validator(mode="after")
+    def require_lock_value(self) -> "ShotLockUpdateRequest":
+        if self.locked and "value" not in self.model_fields_set:
+            raise ValueError("锁定字段时必须提交 value")
+        return self
+
+
+class ShotSpecCompileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    adapter: Literal["generic", "veo", "kling", "seedance"] | None = None
 
 
 class SceneShotOrderRequest(BaseModel):

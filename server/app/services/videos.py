@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
-from app.db.models import Asset, Job, Shot, Take
+from app.db.models import Asset, Job, Shot, ShotSpec, Take
 from app.schemas import JobRead, ShotVideoGenerateRequest
 from app.services.events import append_event
 from app.services.generation_records import ensure_generation_record
@@ -21,6 +21,7 @@ from app.services.media_staging import (
     seedream_fast_path_expires_at,
     seedream_fast_path_usable,
 )
+from app.services.shot_specs import compile_shot_spec, ensure_shot_spec_generation_ready
 from app.services.takes import _shot_project
 from app.services.video_provider import GeneratedVideo
 from app.services.workspace import shot_or_404
@@ -76,8 +77,10 @@ def _seedream_fast_path(
 def build_video_prompt(
     shot: Shot,
     payload: ShotVideoGenerateRequest,
+    *,
+    compiled_prompt: str | None = None,
 ) -> str:
-    instruction = payload.prompt or (
+    instruction = compiled_prompt or payload.prompt or (
         f"{shot.description}。人物和环境产生自然连续的细微运动，保持主体身份、服装、场景和构图稳定，"
         "电影感运镜，动作连贯，避免新增人物、文字和画面闪烁。"
     )
@@ -100,6 +103,7 @@ def create_shot_video_job(
 ) -> tuple[JobRead, bool]:
     shot = shot_or_404(session, shot_id)
     project = _shot_project(session, shot)
+    structured_spec = session.scalar(select(ShotSpec).where(ShotSpec.shot_id == shot.id))
     take_version = shot.candidate_take or shot.current_take
     active = session.scalar(
         select(Job)
@@ -162,7 +166,25 @@ def create_shot_video_job(
             },
         )
 
-    prompt = build_video_prompt(shot, payload)
+    compiled_prompt: str | None = None
+    if structured_spec is not None:
+        ensure_shot_spec_generation_ready(structured_spec)
+        if payload.prompt and payload.prompt.strip():
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "SHOT_SPEC_PROMPT_OVERRIDE_FORBIDDEN",
+                    "message": "结构化镜头不能直接覆盖 Prompt，请编辑 ShotSpec 后重新编译",
+                },
+            )
+        _resolved, _report, compiled, _snapshot = compile_shot_spec(
+            session,
+            structured_spec,
+            adapter_name="seedance",
+            store=True,
+        )
+        compiled_prompt = compiled.prompt
+    prompt = build_video_prompt(shot, payload, compiled_prompt=compiled_prompt)
     job, replayed = enqueue_job(
         session,
         project_id=project.id,

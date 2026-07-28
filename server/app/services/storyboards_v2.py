@@ -38,6 +38,7 @@ from app.db.models import (
     WorkflowNode,
     WorkflowRun,
 )
+from app.domain.shot_spec import ShotSpec as StructuredShotSpec
 from app.schemas import JobRead
 from app.services.assets import register_file, resolve_asset_path
 from app.services.character_image_qc import detect_lower_right_watermark
@@ -71,10 +72,25 @@ from app.services.shot_frames import (
     split_visual_moments,
     visibility_prompt_clause,
 )
+from app.services.shot_specs import (
+    build_structured_shot_spec,
+    compile_shot_spec,
+    ensure_shot_spec_generation_ready,
+    load_shot_spec_contract,
+    write_shot_spec,
+)
 from app.services.workspace import project_or_404
 
 # 兼容旧测试与调用方命名
 compile_single_frame_visual_brief = compile_static_frame_brief
+
+
+def _json_object(raw: str) -> dict[str, object]:
+    try:
+        value = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def _split_scene_seconds(total_seconds: int, weights: list[int]) -> list[int]:
@@ -1251,21 +1267,8 @@ def _apply_frame_binding_to_shot(
     beat: FrameBeat,
     prompt: str,
 ) -> None:
-    """把重算结果回写到镜头与 ShotSpec，供详情页与后续重生成对齐。"""
+    """回写可重新计算的帧级提示数据，不改写 ShotSpec 的连续性锁定快照。"""
     healed_ids = [character.id for character in binding.characters]
-    try:
-        previous_ids = json.loads(shot.character_ids_json or "[]")
-    except json.JSONDecodeError:
-        previous_ids = []
-    if previous_ids != healed_ids:
-        shot.character_ids_json = canonical_json(healed_ids)
-        shot.character_identity_version_ids_json = canonical_json(
-            [
-                character.locked_identity_version_id
-                for character in binding.characters
-                if character.locked_identity_version_id
-            ]
-        )
     prompt_payload["image_prompt"] = prompt
     prompt_payload["render_mode"] = beat.render_mode
     prompt_payload["character_ids"] = healed_ids
@@ -1293,6 +1296,7 @@ def resolve_storyboard_take_generation_inputs(
     project = session.get(Project, job.project_id)
     if shot is None or spec is None or project is None:
         raise ValueError("分镜任务实体不存在")
+    ensure_shot_spec_generation_ready(spec)
     try:
         prompt_payload = json.loads(spec.prompt_json or "{}")
     except json.JSONDecodeError:
@@ -1300,6 +1304,28 @@ def resolve_storyboard_take_generation_inputs(
     if not isinstance(prompt_payload, dict):
         prompt_payload = {}
     note = payload.get("note")
+    if isinstance(note, str) and note.strip():
+        contract = load_shot_spec_contract(session, spec)
+        if note.strip() not in contract.technique.notes:
+            contract = contract.model_copy(
+                update={
+                    "technique": contract.technique.model_copy(
+                        update={
+                            "notes": (
+                                f"{contract.technique.notes}\n导演修改意见：{note.strip()}"
+                            ).strip()
+                        }
+                    )
+                }
+            )
+            write_shot_spec(
+                session,
+                spec,
+                contract,
+                actor="system:storyboard-regeneration",
+                change_reason="将镜头重生成意见写入结构化导演手法",
+                trace_id=job.trace_id,
+            )
     prompt, binding, beat = rebuild_shot_frame_prompt(
         session,
         project=project,
@@ -1319,9 +1345,16 @@ def resolve_storyboard_take_generation_inputs(
         beat=beat,
         prompt=prompt,
     )
+    _resolved, _report, compiled, _snapshot = compile_shot_spec(
+        session,
+        spec,
+        adapter_name=spec.prompt_adapter or "generic",
+        store=True,
+    )
+    prompt_payload["image_prompt"] = compiled.prompt
     spec.prompt_json = canonical_json(prompt_payload)
     seed = int(payload.get("seed") or 0)
-    return prompt, binding.reference_asset_ids, seed
+    return compiled.prompt, binding.reference_asset_ids, seed
 
 
 def _create_workflow(
@@ -1376,7 +1409,142 @@ def _create_workflow(
     return run
 
 
-def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVersion, list[str]]:
+def build_storyboard_agent_drafts(session: Session, job: Job) -> list[StructuredShotSpec]:
+    project = project_or_404(session, job.project_id)
+    script = session.scalar(
+        select(ScriptVersion)
+        .where(ScriptVersion.project_id == job.project_id, ScriptVersion.status == "APPROVED")
+        .order_by(ScriptVersion.version.desc())
+    )
+    if script is None:
+        raise ValueError("已批准剧本不存在")
+    characters = list(
+        session.scalars(select(Character).where(Character.project_id == project.id)).all()
+    )
+    characters_by_key = {item.character_key: item for item in characters}
+    props = list(
+        session.scalars(
+            select(PropVersion).where(
+                PropVersion.project_id == project.id,
+                PropVersion.status == "APPROVED",
+            )
+        ).all()
+    )
+    locations = list(
+        session.scalars(
+            select(LocationVersion).where(
+                LocationVersion.project_id == project.id,
+                LocationVersion.status == "APPROVED",
+            )
+        ).all()
+    )
+    locations_by_name = {item.name: item for item in locations}
+    script_scenes = list(
+        session.scalars(
+            select(ScriptScene)
+            .where(ScriptScene.script_version_id == script.id)
+            .order_by(ScriptScene.ordinal)
+        ).all()
+    )
+    drafts: list[StructuredShotSpec] = []
+    shot_ordinal = 1
+    for script_scene in script_scenes:
+        lines = list(
+            session.scalars(
+                select(ScriptLine)
+                .where(ScriptLine.script_scene_id == script_scene.id)
+                .order_by(ScriptLine.ordinal)
+            ).all()
+        )
+        durations = _split_scene_seconds(
+            round(script_scene.duration_ms / 1000),
+            [item.estimated_duration_ms + item.pause_after_ms for item in lines],
+        )
+        scene_character_keys = _scene_character_keys(lines, characters_by_key)
+        last_action_visual = script_scene.purpose.strip()
+        location = locations_by_name.get(script_scene.location) or (
+            locations[0] if locations else None
+        )
+        for line, duration_sec in zip(lines, durations, strict=True):
+            speaking_character = characters_by_key.get(line.speaker_key)
+            speaking_label = speaking_character.name if speaking_character is not None else "旁白"
+            delivery = _shot_delivery(line, speaking_character)
+            if delivery == "ACTION":
+                last_action_visual = _action_visual_text(script_scene.purpose, line)
+            description = _visual_description_for_line(
+                line,
+                delivery=delivery,
+                purpose=script_scene.purpose,
+                speaking_label=speaking_label,
+                action_visual=last_action_visual,
+            )
+            character_keys = _line_character_keys(
+                line,
+                characters_by_key=characters_by_key,
+                scene_character_keys=scene_character_keys,
+                delivery=delivery,
+                visual_anchor_text=last_action_visual,
+            )
+            bound_characters = [characters_by_key[key] for key in character_keys]
+            reference_asset_ids: list[str] = []
+            for character in bound_characters:
+                if not character.locked_candidate_id:
+                    continue
+                candidate = session.get(CharacterCandidate, character.locked_candidate_id)
+                if candidate is not None:
+                    reference_asset_ids.append(candidate.asset_id)
+            visible_prop_ids = _visible_prop_version_ids(description, props)
+            visible_props = [item for item in props if item.id in visible_prop_ids]
+            code = f"S{shot_ordinal:02d}"
+            shot_size = ("WS", "MS", "MCU", "CU")[(shot_ordinal - 1) % 4]
+            camera = ("STATIC", "TRACK", "DOLLY_IN", "PAN")[(shot_ordinal - 1) % 4]
+            simple_action = next(
+                (
+                    item.strip()
+                    for item in re.split(r"[，,；;]", description)
+                    if item.strip()
+                ),
+                description,
+            )
+            draft = build_structured_shot_spec(
+                duration_sec=duration_sec,
+                narrative_goal=script_scene.purpose,
+                description=description,
+                action=simple_action,
+                environment=script_scene.location,
+                location=script_scene.location,
+                time_of_day=script_scene.time_of_day,
+                shot_size=shot_size,
+                camera_movement=camera,
+                character_ids=[item.id for item in bound_characters],
+                character_names=[item.name for item in bound_characters],
+                prop_version_ids=visible_prop_ids,
+                prop_names=[item.name for item in visible_props],
+                location_version_id=location.id if location is not None else None,
+                dialogue=line.text if line.line_type in {"DIALOGUE", "VOICE_OVER"} else "",
+                delivery=delivery,
+                project_style=project.style,
+                aspect_ratio=project.aspect_ratio,
+                source_scene_ordinal=script_scene.ordinal,
+                source_script_scene_id=script_scene.id,
+                source_script_line_ids=[line.id],
+                code=code,
+                title=script_scene.heading,
+                reference_asset_ids=reference_asset_ids,
+            )
+            drafts.append(draft)
+            shot_ordinal += 1
+    return drafts
+
+
+def create_dynamic_storyboard(
+    session: Session,
+    job: Job,
+    *,
+    planned_shot_specs: list[StructuredShotSpec] | None = None,
+    agent_needs_review: bool = False,
+    agent_metadata: dict[str, object] | None = None,
+) -> tuple[StoryboardVersion, list[str]]:
     input_payload = json.loads(job.input_json)
     visual_bible = session.get(
         VisualBibleVersion,
@@ -1457,6 +1625,7 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
         session.scalars(select(Character).where(Character.project_id == project.id)).all()
     )
     characters_by_key = {item.character_key: item for item in characters}
+    characters_by_id = {item.id: item for item in characters}
     locations = list(
         session.scalars(
             select(LocationVersion).where(
@@ -1481,6 +1650,13 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
             .order_by(ScriptScene.ordinal)
         ).all()
     )
+    if planned_shot_specs is None:
+        planned_shot_specs = build_storyboard_agent_drafts(session, job)
+    planned_by_line_id = {
+        item.source.script_line_ids[0]: item
+        for item in planned_shot_specs
+        if item.source.script_line_ids
+    }
     director_intents = confirmed_director_intents_by_scene(session, script=script)
     child_job_ids: list[str] = []
     shot_payloads: list[dict[str, object]] = []
@@ -1540,6 +1716,7 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
         scene_face_hidden_names: tuple[str, ...] = ()
         scene_duration_sec = 0
         for line, duration_sec in zip(lines, durations, strict=True):
+            planned_spec = planned_by_line_id.get(line.id)
             speaking_character = characters_by_key.get(line.speaker_key)
             speaking_label = speaking_character.name if speaking_character is not None else "旁白"
             delivery = _shot_delivery(line, speaking_character)
@@ -1562,6 +1739,10 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
             line_characters = [characters_by_key[key] for key in line_character_keys]
             scene_cast = [characters_by_key[key] for key in scene_character_keys]
             dialogue = line.text if line.line_type in {"DIALOGUE", "VOICE_OVER"} else ""
+            if planned_spec is not None:
+                description = planned_spec.visual_content.description
+                dialogue = planned_spec.audio.dialogue or planned_spec.audio.voice_over
+                duration_sec = max(1, round(planned_spec.duration_sec))
 
             # 「某角色全程不露脸/仅有画外音」在整场生效，先累积再逐帧应用
             split = split_visual_moments(description)
@@ -1572,8 +1753,16 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
                 scene_face_hidden_names, split.face_hidden_names
             )
 
-            cycled_size = ("WS", "MS", "MCU", "CU")[(shot_ordinal - 1) % 4]
-            cycled_camera = ("STATIC", "TRACK", "DOLLY_IN", "PAN")[(shot_ordinal - 1) % 4]
+            cycled_size = (
+                planned_spec.camera.shot_size
+                if planned_spec is not None
+                else ("WS", "MS", "MCU", "CU")[(shot_ordinal - 1) % 4]
+            )
+            cycled_camera = (
+                planned_spec.camera.movement
+                if planned_spec is not None
+                else ("STATIC", "TRACK", "DOLLY_IN", "PAN")[(shot_ordinal - 1) % 4]
+            )
             if delivery == "ACTION":
                 planned_size = cycled_size
                 planned_camera = cycled_camera
@@ -1588,7 +1777,13 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
                 planned_camera = cycled_camera
 
             # 只有动作行会包含多个视觉时刻；台词/画外音行始终只出一帧
-            if delivery == "ACTION" and len(split.beats) > 1:
+            if planned_spec is not None:
+                beats = [
+                    FrameBeat(
+                        visual=planned_spec.visual_content.description,
+                    )
+                ]
+            elif delivery == "ACTION" and len(split.beats) > 1:
                 beats = list(split.beats)
             else:
                 collapsed = collapse_to_single_beat(split, shot_size=planned_size)
@@ -1626,20 +1821,34 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
                         + "；".join(item.message for item in blocking)
                     )
                 bound_characters = binding.characters
-                character_ids = [character.id for character in bound_characters]
+                continuity_characters = (
+                    [
+                        characters_by_id[character_id]
+                        for character_id in planned_spec.continuity.character_ids
+                        if character_id in characters_by_id
+                    ]
+                    if planned_spec is not None
+                    else []
+                )
+                # 旧下游合同要求每个镜头都保存场内角色的锁定版本快照；
+                # ShotSpec.continuity 仍只描述本镜真正涉及的角色。
+                snapshot_characters = (
+                    continuity_characters or bound_characters or scene_cast or characters
+                )
+                character_ids = [character.id for character in snapshot_characters]
                 identity_ids = [
                     character.locked_identity_version_id
-                    for character in bound_characters
+                    for character in snapshot_characters
                     if character.locked_identity_version_id
                 ]
                 look_ids = [
                     character.active_look_version_id
-                    for character in bound_characters
+                    for character in snapshot_characters
                     if character.active_look_version_id
                 ]
                 story_state_ids = [
                     character.active_story_state_version_id
-                    for character in bound_characters
+                    for character in snapshot_characters
                     if character.active_story_state_version_id
                 ]
                 reference_asset_ids = binding.reference_asset_ids
@@ -1672,16 +1881,15 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
                 session.add(shot)
                 session.flush()
                 scene_duration_sec += beat_duration
+                visible_prop_names = [
+                    item.name for item in props if item.id in visible_prop_ids and item.name
+                ]
                 assembled_debug: dict[str, object] = {}
                 assembled_bible: dict[str, str] = {}
                 if beat.render_mode == RENDER_MODE_BLACK_FRAME:
                     image_prompt = ""
                 else:
-                    prop_names = tuple(
-                        item.name
-                        for item in props
-                        if item.id in visible_prop_ids and item.name
-                    )
+                    prop_names = tuple(visible_prop_names)
                     assembled = assemble_shot_prompt(
                         project,
                         description=beat.visual,
@@ -1733,6 +1941,49 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
                 )
                 prompt_payload["creative_bible"] = assembled_bible
                 prompt_payload["prompt_debug"] = assembled_debug
+                structured_contract = planned_spec or build_structured_shot_spec(
+                    duration_sec=beat_duration,
+                    narrative_goal=script_scene.purpose,
+                    description=beat.visual or description,
+                    action=beat.visual or description,
+                    environment=script_scene.location,
+                    location=script_scene.location,
+                    time_of_day=script_scene.time_of_day,
+                    shot_size=shot_size,
+                    camera_movement=camera,
+                    character_ids=character_ids,
+                    character_names=[item.name for item in bound_characters],
+                    prop_version_ids=visible_prop_ids,
+                    prop_names=visible_prop_names,
+                    location_version_id=location.id if location else None,
+                    dialogue=dialogue,
+                    delivery=delivery,
+                    project_style=project.style,
+                    aspect_ratio=project.aspect_ratio,
+                    source_scene_ordinal=script_scene.ordinal,
+                    source_script_scene_id=script_scene.id,
+                    source_script_line_ids=[line.id],
+                    code=code,
+                    title=script_scene.heading,
+                    reference_asset_ids=reference_asset_ids,
+                )
+                if structured_contract.duration_sec != beat_duration:
+                    structured_contract = structured_contract.model_copy(
+                        update={"duration_sec": float(beat_duration)}
+                    )
+                if prompt_intent is not None:
+                    structured_contract = structured_contract.model_copy(
+                        update={
+                            "technique": structured_contract.technique.model_copy(
+                                update={
+                                    "notes": (
+                                        f"{structured_contract.technique.notes}\n"
+                                        f"{director_intent_prompt_block(prompt_intent)}"
+                                    ).strip()
+                                }
+                            )
+                        }
+                    )
                 spec = ShotSpec(
                     id=str(uuid4()),
                     storyboard_version_id=storyboard.id,
@@ -1749,19 +2000,87 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
                     location_version_id=location.id if location else None,
                     prop_version_ids_json=canonical_json(visible_prop_ids),
                     prompt_json=canonical_json(prompt_payload),
-                    content_hash=content_hash(prompt_payload),
-                    status="QUEUED",
+                    structured_spec_json=canonical_json(
+                        structured_contract.model_dump(mode="json")
+                    ),
+                    prompt_compiled="",
+                    prompt_adapter=structured_contract.generation.adapter,
+                    compiler_version="prompt-compiler-v1",
+                    compiler_input_hash="",
+                    prompt_compiled_hash="",
+                    validation_report_json="{}",
+                    lock_snapshot_json="{}",
+                    migration_provenance_json=canonical_json(
+                        {
+                            "source": "storyboard_agent",
+                            "provider": (agent_metadata or {}).get("provider", "deterministic"),
+                            "model": (agent_metadata or {}).get(
+                                "model", "structured-storyboard-agent-v1"
+                            ),
+                            "request_id": (agent_metadata or {}).get("request_id"),
+                        }
+                    ),
+                    review_status="VALID",
+                    repair_attempts=int((agent_metadata or {}).get("repair_attempts", 0)),
+                    content_hash=content_hash(structured_contract.model_dump(mode="json")),
+                    status="DRAFT",
                 )
                 session.add(spec)
                 session.flush()
+                _resolved, validation_report, compiled, _lock_snapshot = compile_shot_spec(
+                    session,
+                    spec,
+                    adapter_name=structured_contract.generation.adapter,
+                    store=True,
+                )
+                image_prompt = compiled.prompt
+                if agent_needs_review or validation_report.needs_review:
+                    spec.review_status = "NEEDS_REVIEW"
+                    spec.status = "NEEDS_REVIEW"
+                    shot.status = "NEEDS_REVIEW"
+                else:
+                    spec.status = "QUEUED"
+                    shot.status = "QUEUED"
                 record_shot_spec_revision(
                     session,
                     project_id=project.id,
                     spec=spec,
                     actor="system:storyboard-planner",
-                    change_reason="由已锁定剧本场景与台词生成初始镜头规格",
+                    change_reason="Storyboard Agent 基于严格 ShotSpec 合同生成初始镜头规格",
                     trace_id=job.trace_id,
                 )
+                if spec.review_status == "NEEDS_REVIEW":
+                    session.add(
+                        WorkflowNode(
+                            id=str(uuid4()),
+                            workflow_run_id=workflow.id,
+                            node_key=f"storyboard.take.{shot_ordinal}",
+                            node_type="REVIEW",
+                            entity_type="shot_spec",
+                            entity_id=spec.id,
+                            job_id=None,
+                            status="NEEDS_REVIEW",
+                            dependency_keys_json=canonical_json(["storyboard.plan"]),
+                            output_json=spec.validation_report_json,
+                            degraded=True,
+                            error_code="SHOT_SPEC_NEEDS_REVIEW",
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                    shot_payloads.append(
+                        {
+                            "shot_spec_id": spec.id,
+                            "shot_id": shot.id,
+                            "script_line_id": line.id,
+                            "duration_ms": spec.duration_ms,
+                            "content_hash": spec.content_hash,
+                            "render_mode": beat.render_mode,
+                            "review_status": spec.review_status,
+                        }
+                    )
+                    shot_ordinal += 1
+                    continue
                 child, _ = enqueue_job(
                     session,
                     project_id=project.id,
@@ -1847,13 +2166,22 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
     storyboard.payload_json = canonical_json(
         {
             "schema_version": "storyboard-v2",
+            "shot_spec_schema_version": "shot-spec-v1",
             "script_version_id": script.id,
             "visual_bible_version_id": visual_bible.id,
             "shots": shot_payloads,
+            "storyboard_agent": agent_metadata or {"provider": "deterministic"},
             "director_intent_consumption": intent_consumption,
         }
     )
     storyboard.content_hash = content_hash(json.loads(storyboard.payload_json))
+    needs_review_count = sum(
+        1 for item in shot_payloads if item.get("review_status") == "NEEDS_REVIEW"
+    )
+    if needs_review_count:
+        storyboard.status = "NEEDS_REVIEW"
+        workflow.status = "WAITING_FOR_REVIEW"
+        workflow.current_gate = "G4_STORYBOARD"
     for confirmed_intent in director_intents.values():
         evidence = intent_evidence.get(confirmed_intent.change_set_id)
         if evidence is None or not evidence.get("shot_spec_ids"):
@@ -1889,8 +2217,16 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
         )
     )
     if root_node is not None:
-        root_node.status = "FAN_OUT_COMPLETE"
-        root_node.output_json = canonical_json({"child_job_ids": child_job_ids})
+        root_node.status = "NEEDS_REVIEW" if needs_review_count else "FAN_OUT_COMPLETE"
+        root_node.output_json = canonical_json(
+            {
+                "child_job_ids": child_job_ids,
+                "needs_review_count": needs_review_count,
+            }
+        )
+        root_node.error_code = (
+            "SHOT_SPEC_NEEDS_REVIEW" if needs_review_count else None
+        )
         root_node.updated_at = now
     append_event(
         session,
@@ -1901,6 +2237,7 @@ def create_dynamic_storyboard(session: Session, job: Job) -> tuple[StoryboardVer
             "storyboard_version_id": storyboard.id,
             "shot_count": len(shot_payloads),
             "child_job_ids": child_job_ids,
+            "needs_review_count": needs_review_count,
         },
     )
     session.flush()
@@ -2260,6 +2597,7 @@ def regenerate_storyboard_shot(
                 "message": "第 4 阶段已批准，无法再重生成分镜",
             },
         )
+    ensure_shot_spec_generation_ready(spec)
     if storyboard.status not in {"READY_FOR_REVIEW", "ANIMATIC_RUNNING", "TAKES_RUNNING"}:
         raise HTTPException(
             status_code=409,
@@ -2695,7 +3033,11 @@ def storyboard_workspace(session: Session, project_id: str) -> dict[str, object]
             prompt_payload = json.loads(spec.prompt_json or "{}")
         except json.JSONDecodeError:
             prompt_payload = {}
-        image_prompt = ""
+        structured_contract = load_shot_spec_contract(session, spec)
+        validation_report = _json_object(spec.validation_report_json)
+        lock_snapshot = _json_object(spec.lock_snapshot_json)
+        migration_provenance = _json_object(spec.migration_provenance_json)
+        image_prompt = spec.prompt_compiled or ""
         delivery = None
         render_mode = "IMAGE"
         audio_cues: list[str] = []
@@ -2703,7 +3045,7 @@ def storyboard_workspace(session: Session, project_id: str) -> dict[str, object]
         timeline_notes: list[str] = []
         if isinstance(prompt_payload, dict):
             raw_prompt = prompt_payload.get("image_prompt")
-            if isinstance(raw_prompt, str):
+            if not image_prompt and isinstance(raw_prompt, str):
                 image_prompt = raw_prompt
             raw_delivery = prompt_payload.get("delivery")
             if raw_delivery in {"ACTION", "VOICE_OVER", "DIALOGUE"}:
@@ -2723,6 +3065,8 @@ def storyboard_workspace(session: Session, project_id: str) -> dict[str, object]
             {
                 "shot_spec_id": spec.id,
                 "shot_id": spec.shot_id,
+                "scene_id": shot.scene_id if shot else None,
+                "shot_lock_version": shot.lock_version if shot else 1,
                 "code": shot.code if shot else f"S{spec.ordinal:02d}",
                 "title": shot.title if shot else "",
                 "description": spec.description,
@@ -2736,6 +3080,17 @@ def storyboard_workspace(session: Session, project_id: str) -> dict[str, object]
                 "status": spec.status,
                 "image_url": f"/api/v1/assets/{take.asset_id}/content" if take else None,
                 "content_hash": spec.content_hash,
+                "shot_spec": structured_contract.model_dump(mode="json"),
+                "prompt_compiled": spec.prompt_compiled,
+                "prompt_adapter": spec.prompt_adapter,
+                "compiler_version": spec.compiler_version,
+                "compiler_input_hash": spec.compiler_input_hash,
+                "prompt_compiled_hash": spec.prompt_compiled_hash,
+                "review_status": spec.review_status,
+                "repair_attempts": spec.repair_attempts,
+                "validation_report": validation_report,
+                "lock_snapshot": lock_snapshot,
+                "migration_provenance": migration_provenance,
                 "image_prompt": image_prompt,
                 "delivery": delivery,
                 "render_mode": render_mode,
@@ -2836,6 +3191,24 @@ def approve_storyboard(
     project = project_or_404(session, storyboard.project_id)
     if project.lock_version != expected_version:
         raise version_conflict(project, expected_version)
+    needs_review_ids = list(
+        session.scalars(
+            select(ShotSpec.id).where(
+                ShotSpec.storyboard_version_id == storyboard.id,
+                ShotSpec.review_status == "NEEDS_REVIEW",
+            )
+        ).all()
+    )
+    if needs_review_ids:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "SHOT_SPEC_NEEDS_REVIEW",
+                "message": "分镜中仍有未通过导演级校验的镜头，不能批准",
+                "details": {"shot_spec_ids": needs_review_ids},
+                "user_action": "展开镜头修正结构化字段并重新保存",
+            },
+        )
     if project.status != "STORYBOARD_READY" or storyboard.status != "READY_FOR_REVIEW":
         raise HTTPException(
             status_code=409,

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowLeft, Ban, Check, Film, GitBranch, LoaderCircle, LockKeyhole, Maximize2, RefreshCw, Sparkles, ZoomIn, ZoomOut } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, Ban, Check, Eye, Film, GitBranch, LoaderCircle, LockKeyhole, Maximize2, RefreshCw, Save, Sparkles, UnlockKeyhole, ZoomIn, ZoomOut } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router'
 import {
   approveStoryboardVersion,
@@ -7,6 +7,11 @@ import {
   fetchProject,
   fetchStoryboardWorkspace,
   regenerateStoryboardShot,
+  updateShotLock,
+  updateStructuredShotSpec,
+  type ShotLockScope,
+  type ShotPromptAdapter,
+  type StructuredShotSpec,
   type StoryboardWorkspace,
 } from '../api/client'
 import { Button, EmptyState, Modal, PageHeader, StatusBadge, Surface } from '../components/ui'
@@ -106,6 +111,289 @@ function openShotDetail(
   }
 }
 
+const STRUCTURED_SECTION_FIELDS = [
+  ['visual_content', '画面内容'],
+  ['start_state', '起始状态'],
+  ['end_state', '结束状态'],
+  ['camera', '摄影机'],
+  ['lighting', '灯光'],
+  ['art_direction', '美术指导'],
+  ['technique', '导演手法'],
+  ['performance', '表演'],
+  ['audio', '声音'],
+  ['continuity', '连续性'],
+  ['generation', '生成参数'],
+] as const
+
+type StructuredSectionField = typeof STRUCTURED_SECTION_FIELDS[number][0]
+
+function audioSummary(spec: StructuredShotSpec): string {
+  if (spec.audio.dialogue) return `对白：${spec.audio.dialogue}`
+  if (spec.audio.voice_over) return `画外音：${spec.audio.voice_over}`
+  const cues = [...spec.audio.ambience, ...spec.audio.sfx]
+  return cues.join('、') || '无对白 / 待设计'
+}
+
+function fieldValue(spec: StructuredShotSpec, fieldPath: string): unknown {
+  return spec[fieldPath as keyof StructuredShotSpec]
+}
+
+function ShotSpecEditorRow({
+  shot,
+  canEdit,
+  saving,
+  lockBusy,
+  onPreview,
+  onRegenerate,
+  onSave,
+  onToggleLock,
+}: {
+  shot: StoryboardWorkspace['shots'][number]
+  canEdit: boolean
+  saving: boolean
+  lockBusy: string | null
+  onPreview: () => void
+  onRegenerate: () => void
+  onSave: (spec: StructuredShotSpec, adapter: ShotPromptAdapter) => Promise<void>
+  onToggleLock: (
+    scope: ShotLockScope,
+    fieldPath: string,
+    value: unknown,
+    locked: boolean,
+  ) => Promise<void>
+}) {
+  const [draft, setDraft] = useState<StructuredShotSpec>(() => structuredClone(shot.shotSpec))
+  const [jsonDrafts, setJsonDrafts] = useState<Record<StructuredSectionField, string>>(
+    () => Object.fromEntries(
+      STRUCTURED_SECTION_FIELDS.map(([field]) => [
+        field,
+        JSON.stringify(shot.shotSpec[field], null, 2),
+      ]),
+    ) as Record<StructuredSectionField, string>,
+  )
+  const [adapter, setAdapter] = useState<ShotPromptAdapter>(shot.promptAdapter)
+  const [dirty, setDirty] = useState(false)
+  const [editorError, setEditorError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (dirty) return
+    setDraft(structuredClone(shot.shotSpec))
+    setJsonDrafts(Object.fromEntries(
+      STRUCTURED_SECTION_FIELDS.map(([field]) => [
+        field,
+        JSON.stringify(shot.shotSpec[field], null, 2),
+      ]),
+    ) as Record<StructuredSectionField, string>)
+    setAdapter(shot.promptAdapter)
+  }, [dirty, shot.promptAdapter, shot.shotSpec])
+
+  const effectiveLocks = shot.lockSnapshot.effective_fields ?? {}
+  const allLocks = shot.lockSnapshot.field_locks ?? []
+
+  function lockFor(scope: ShotLockScope, fieldPath: string) {
+    return allLocks.find((item) => item.scope === scope && item.field_path === fieldPath)
+  }
+
+  function lockControls(fieldPath: string, value: unknown) {
+    const effective = effectiveLocks[fieldPath]
+    return (
+      <div className="shot-field-locks" aria-label={`${fieldPath} 锁定层级`}>
+        {([
+          ['PROJECT', '项目'],
+          ['SCENE', '场景'],
+          ['FIELD', '字段'],
+        ] as const).map(([scope, label]) => {
+          const existing = lockFor(scope, fieldPath)
+          const key = `${shot.shotSpecId}:${scope}:${fieldPath}`
+          const locked = Boolean(existing)
+          return (
+            <button
+              aria-pressed={locked}
+              className={locked ? 'is-locked' : ''}
+              disabled={!canEdit || Boolean(lockBusy)}
+              key={scope}
+              onClick={() => void onToggleLock(scope, fieldPath, value, locked)}
+              title={locked
+                ? `${label}锁由 ${existing?.owner ?? '未知'} 设置，点击解除`
+                : `以${label}层级锁定此字段`}
+              type="button"
+            >
+              {lockBusy === key
+                ? <LoaderCircle className="spin" size={12} />
+                : locked
+                  ? <LockKeyhole size={12} />
+                  : <UnlockKeyhole size={12} />}
+              {label}
+            </button>
+          )
+        })}
+        {effective ? <small>当前生效：{effective.scope} · {effective.owner}</small> : null}
+      </div>
+    )
+  }
+
+  async function save() {
+    setEditorError(null)
+    try {
+      const next = structuredClone(draft)
+      for (const [field] of STRUCTURED_SECTION_FIELDS) {
+        next[field] = JSON.parse(jsonDrafts[field]) as never
+      }
+      next.generation.adapter = adapter
+      await onSave(next, adapter)
+      setDirty(false)
+    } catch (reason) {
+      setEditorError(reason instanceof Error ? reason.message : '结构化字段 JSON 格式不正确')
+    }
+  }
+
+  const blockingIssues = shot.validationReport.issues.filter(
+    (item) => item.severity === 'BLOCKER',
+  )
+  const warningIssues = shot.validationReport.issues.filter(
+    (item) => item.severity === 'WARNING',
+  )
+
+  return (
+    <details className="director-shot-row">
+      <summary>
+        <span className="director-shot-row__code">
+          <strong>{shot.code}</strong>
+          <StatusBadge status={shot.reviewStatus === 'NEEDS_REVIEW' ? 'NEEDS_REVIEW' : shot.status} />
+        </span>
+        <span>{shot.shotSpec.duration_sec.toFixed(1)} 秒</span>
+        <span>{shot.shotSpec.visual_content.description}</span>
+        <span>{shot.shotSpec.lighting.style}</span>
+        <span>{localizeDisplayText(shot.shotSpec.camera.movement)}</span>
+        <span>{shot.shotSpec.art_direction.visual_style}</span>
+        <span>{shot.shotSpec.technique.pacing}</span>
+        <span>{audioSummary(shot.shotSpec)}</span>
+      </summary>
+      <div className="director-shot-editor">
+        <div className="director-shot-editor__toolbar">
+          <div>
+            <strong>{displayShotTitle(shot.title, shot.code)}</strong>
+            <small>
+              ShotSpec 是唯一事实源 · {shot.compilerVersion} · {shot.promptAdapter}
+            </small>
+          </div>
+          <div>
+            <Button onClick={onPreview} size="sm" variant="secondary">
+              <Eye size={14} />查看画面
+            </Button>
+            {canEdit ? (
+              <Button onClick={onRegenerate} size="sm" variant="secondary">
+                <RefreshCw size={14} />重生成
+              </Button>
+            ) : null}
+          </div>
+        </div>
+
+        {blockingIssues.length || warningIssues.length ? (
+          <div className={[
+            'shot-validation-report',
+            blockingIssues.length ? 'is-blocking' : '',
+          ].filter(Boolean).join(' ')}>
+            <strong><AlertTriangle size={15} />ShotValidator</strong>
+            {[...blockingIssues, ...warningIssues].map((issue) => (
+              <p key={`${issue.code}:${issue.field_path}`}>
+                <span>{issue.severity === 'BLOCKER' ? '阻断' : '提醒'}</span>
+                {issue.message}
+                <code>{issue.field_path}</code>
+              </p>
+            ))}
+          </div>
+        ) : null}
+
+        <div className="structured-shot-form">
+          <label>
+            <span>时长（秒）</span>
+            {lockControls('duration_sec', draft.duration_sec)}
+            <input
+              disabled={!canEdit || Boolean(effectiveLocks.duration_sec)}
+              min="0.5"
+              onChange={(event) => {
+                setDraft((current) => ({
+                  ...current,
+                  duration_sec: Number(event.target.value),
+                }))
+                setDirty(true)
+              }}
+              step="0.5"
+              type="number"
+              value={draft.duration_sec}
+            />
+          </label>
+          <label className="structured-shot-form__wide">
+            <span>叙事目标</span>
+            {lockControls('narrative_goal', draft.narrative_goal)}
+            <textarea
+              disabled={!canEdit || Boolean(effectiveLocks.narrative_goal)}
+              onChange={(event) => {
+                setDraft((current) => ({
+                  ...current,
+                  narrative_goal: event.target.value,
+                }))
+                setDirty(true)
+              }}
+              rows={3}
+              value={draft.narrative_goal}
+            />
+          </label>
+          {STRUCTURED_SECTION_FIELDS.map(([field, label]) => (
+            <label className="structured-shot-form__json" key={field}>
+              <span>{label}</span>
+              {lockControls(field, fieldValue(draft, field))}
+              <textarea
+                aria-label={`${shot.code} ${label}`}
+                disabled={!canEdit || Boolean(effectiveLocks[field])}
+                onChange={(event) => {
+                  setJsonDrafts((current) => ({ ...current, [field]: event.target.value }))
+                  setDirty(true)
+                }}
+                rows={field === 'visual_content' ? 10 : 8}
+                spellCheck={false}
+                value={jsonDrafts[field]}
+              />
+            </label>
+          ))}
+        </div>
+
+        <div className="structured-shot-compile">
+          <label>
+            <span>Prompt Adapter</span>
+            <select
+              disabled={!canEdit}
+              onChange={(event) => {
+                setAdapter(event.target.value as ShotPromptAdapter)
+                setDirty(true)
+              }}
+              value={adapter}
+            >
+              <option value="generic">Generic</option>
+              <option value="veo">Veo</option>
+              <option value="kling">Kling</option>
+              <option value="seedance">Seedance</option>
+            </select>
+          </label>
+          <div>
+            <span>可重新生成的 Prompt 缓存</span>
+            <pre>{shot.promptCompiled || '保存 ShotSpec 后自动编译'}</pre>
+            <small>输入哈希 {shot.compilerInputHash || '—'} · Prompt 哈希 {shot.promptCompiledHash || '—'}</small>
+          </div>
+        </div>
+        {editorError ? <p className="brief-save-message brief-save-message--error" role="alert">{editorError}</p> : null}
+        <div className="director-shot-editor__actions">
+          <Button disabled={!canEdit || !dirty || saving} onClick={() => void save()}>
+            {saving ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}
+            保存并重新编译 Prompt
+          </Button>
+        </div>
+      </div>
+    </details>
+  )
+}
+
 export function StoryboardPage() {
   const { projectId } = useParams()
   const navigate = useNavigate()
@@ -116,6 +404,8 @@ export function StoryboardPage() {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [regenBusyId, setRegenBusyId] = useState<string | null>(null)
+  const [saveBusyId, setSaveBusyId] = useState<string | null>(null)
+  const [lockBusy, setLockBusy] = useState<string | null>(null)
   const [animaticCancelBusy, setAnimaticCancelBusy] = useState(false)
   const [approveOpen, setApproveOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -231,6 +521,66 @@ export function StoryboardPage() {
     }
   }
 
+  async function saveStructuredShot(
+    shot: StoryboardWorkspace['shots'][number],
+    spec: StructuredShotSpec,
+    adapter: ShotPromptAdapter,
+  ) {
+    if (saveBusyId) return
+    setSaveBusyId(shot.shotSpecId)
+    setError(null)
+    try {
+      await updateStructuredShotSpec(
+        shot.shotSpecId,
+        shot.shotLockVersion,
+        spec,
+        adapter,
+      )
+      notify(`${shot.code} 已保存，Prompt 已按 ${adapter} 重新编译。`)
+      await refresh()
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : '结构化镜头保存失败'
+      setError(message)
+      throw reason
+    } finally {
+      setSaveBusyId(null)
+    }
+  }
+
+  async function toggleShotLock(
+    shot: StoryboardWorkspace['shots'][number],
+    scope: ShotLockScope,
+    fieldPath: string,
+    value: unknown,
+    locked: boolean,
+  ) {
+    if (!project || lockBusy) return
+    const targetId = scope === 'PROJECT'
+      ? project.id
+      : scope === 'SCENE'
+        ? shot.sceneId
+        : shot.shotSpecId
+    const key = `${shot.shotSpecId}:${scope}:${fieldPath}`
+    setLockBusy(key)
+    setError(null)
+    try {
+      await updateShotLock(project.id, project.lockVersion, {
+        scope,
+        targetId,
+        fieldPath,
+        locked: !locked,
+        value,
+      })
+      notify(`${fieldPath} 已${locked ? '解除' : '设置'}${scope === 'PROJECT' ? '项目' : scope === 'SCENE' ? '场景' : '字段'}锁。`)
+      await refresh()
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : '镜头字段锁更新失败'
+      setError(message)
+    } finally {
+      setLockBusy(null)
+    }
+  }
+
   async function stopAnimatic() {
     if (!activeAnimaticJob || animaticCancelBusy) return
     setAnimaticCancelBusy(true)
@@ -259,6 +609,9 @@ export function StoryboardPage() {
   const canRegenerate =
     workspace.storyboard.status !== 'APPROVED'
     && project.status !== 'STORYBOARD_APPROVED'
+  const hasNeedsReview = workspace.shots.some(
+    (shot) => shot.reviewStatus === 'NEEDS_REVIEW',
+  )
 
   return <div className="page page--storyboard" data-aspect={project.aspectRatio}>
     <PageHeader
@@ -272,7 +625,7 @@ export function StoryboardPage() {
           <Button onClick={() => void refresh()} variant="secondary">
             <RefreshCw size={16} />刷新
           </Button>
-          <Button disabled={busy || project.status !== 'STORYBOARD_READY'} onClick={() => setApproveOpen(true)}>
+          <Button disabled={busy || hasNeedsReview || project.status !== 'STORYBOARD_READY'} onClick={() => setApproveOpen(true)}>
             {busy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}
             批准第 4 阶段
           </Button>
@@ -280,98 +633,52 @@ export function StoryboardPage() {
       }
     />
     {error ? <div className="brief-save-message brief-save-message--error" role="alert">{error}</div> : null}
+    {hasNeedsReview ? (
+      <div className="brief-save-message brief-save-message--error" role="alert">
+        有镜头未通过 ShotValidator。修正阻断项并保存后，才能批准第 4 阶段。
+      </div>
+    ) : null}
     <section className="story-gate-summary"><div><span>分镜</span><strong>第 {workspace.storyboard.version} 版</strong></div><div><span>镜头</span><strong>{workspace.shots.length}</strong></div><div><span>总时长</span><strong>{Math.round(workspace.shots.reduce((sum, shot) => sum + shot.durationMs, 0) / 1000)} 秒</strong></div><div><span>审批阶段</span><StatusBadge status={workspace.gate?.status ?? workspace.storyboard.status} /></div></section>
     <div className="storyboard-layout">
-      <Surface className="story-section storyboard-board"><div className="section-heading"><div><p className="eyebrow">镜头规格</p><h2>剧本驱动的镜头序列</h2></div></div><div className="storyboard-shot-grid">{workspace.shots.map((shot) => {
-            const regenerating = shot.status === 'QUEUED' || regenBusyId === shot.shotSpecId
-            const failed = shot.status === 'FAILED'
-            const openDetail = () => {
-              setPreviewShot(openShotDetail(shot))
-              setPreviewZoom(100)
-            }
-            return (
-            <article
-              aria-label={`查看 ${shot.code} 分镜详情`}
-              className={[
-                'storyboard-shot-card',
-                regenerating ? 'is-generating' : '',
-                failed ? 'is-failed' : '',
-              ].filter(Boolean).join(' ')}
+      <Surface className="story-section storyboard-board">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">导演级分镜表</p>
+            <h2>ShotSpec 镜头序列</h2>
+            <p>默认查看导演决策；展开任一镜头可编辑全部结构化字段、管理三层锁并重新编译 Prompt。</p>
+          </div>
+        </div>
+        <div className="director-shot-table">
+          <div className="director-shot-table__head" aria-hidden>
+            <span>镜头</span>
+            <span>时长</span>
+            <span>画面内容</span>
+            <span>灯光</span>
+            <span>运镜</span>
+            <span>画风</span>
+            <span>手法</span>
+            <span>声音</span>
+          </div>
+          {workspace.shots.map((shot) => (
+            <ShotSpecEditorRow
+              canEdit={canRegenerate}
               key={shot.shotSpecId}
-              onClick={openDetail}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' || event.key === ' ') {
-                  event.preventDefault()
-                  openDetail()
-                }
+              lockBusy={lockBusy}
+              onPreview={() => {
+                setPreviewShot(openShotDetail(shot))
+                setPreviewZoom(100)
               }}
-              role="button"
-              tabIndex={0}
-              title={shot.contentHash}
-            >
-              {shot.imageUrl ? (
-                <div className="storyboard-shot-card__media-wrap">
-                  <div aria-hidden className="storyboard-shot-card__media">
-                    <img alt="" src={shot.imageUrl} />
-                  </div>
-                  {regenerating ? (
-                    <div className="storyboard-shot-card__generating-overlay" aria-busy="true">
-                      <span className="storyboard-placeholder__aurora" aria-hidden />
-                      <span className="storyboard-placeholder__sheen" aria-hidden />
-                      <span className="storyboard-placeholder__status">
-                        <LoaderCircle className="spin" size={14} strokeWidth={1.5} />
-                        绘制分镜
-                      </span>
-                    </div>
-                  ) : null}
-                </div>
-              ) : regenerating ? (
-                <div className="storyboard-placeholder storyboard-placeholder--generating" aria-busy="true" aria-label={`${shot.code} 正在生成分镜`}>
-                  <span className="storyboard-placeholder__aurora" aria-hidden />
-                  <span className="storyboard-placeholder__sheen" aria-hidden />
-                  <span className="storyboard-placeholder__frame" aria-hidden />
-                  <span className="storyboard-placeholder__status">
-                    <LoaderCircle className="spin" size={14} strokeWidth={1.5} />
-                    绘制分镜
-                  </span>
-                </div>
-              ) : (
-                <div className="storyboard-placeholder storyboard-placeholder--failed">
-                  <span className="storyboard-placeholder__status">生成失败</span>
-                </div>
+              onRegenerate={() => openRegen(openShotDetail(shot))}
+              onSave={(spec, adapter) => saveStructuredShot(shot, spec, adapter)}
+              onToggleLock={(scope, fieldPath, value, locked) => (
+                toggleShotLock(shot, scope, fieldPath, value, locked)
               )}
-              <div className="storyboard-shot-card__body">
-                <header>
-                  <div className="storyboard-shot-card__heading">
-                    <strong>{shot.code}</strong>
-                    <span>{displayShotTitle(shot.title, shot.code)}</span>
-                  </div>
-                  <small>{(shot.durationMs / 1000).toFixed(1)} 秒</small>
-                </header>
-                <p>{shot.description}</p>
-                {shot.dialogue ? <blockquote>{shot.dialogue}</blockquote> : null}
-                <footer>
-                  <span>{localizeDisplayText(shot.shotSize)}</span>
-                  <span>{localizeDisplayText(shot.cameraMovement)}</span>
-                  {canRegenerate ? (
-                    <Button
-                      disabled={Boolean(regenBusyId) || regenerating}
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        openRegen(openShotDetail(shot))
-                      }}
-                      size="sm"
-                      variant="secondary"
-                    >
-                      {regenerating ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />}
-                      {regenerating ? '生成中' : failed ? '重试' : '重生成'}
-                    </Button>
-                  ) : null}
-                </footer>
-              </div>
-            </article>
-            )
-          })}</div></Surface>
+              saving={saveBusyId === shot.shotSpecId}
+              shot={shot}
+            />
+          ))}
+        </div>
+      </Surface>
       <aside>
         <Surface className="approval-card">
           <p className="eyebrow">节奏样片</p>

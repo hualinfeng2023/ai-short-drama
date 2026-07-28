@@ -736,6 +736,119 @@ export interface CharacterVisualWorkspace {
   characters: CharacterVisualRecord[]
 }
 
+export type ShotPromptAdapter = 'generic' | 'veo' | 'kling' | 'seedance'
+export type ShotLockScope = 'PROJECT' | 'SCENE' | 'FIELD'
+
+export interface StructuredShotSpec {
+  schema_version: 'shot-spec-v1'
+  duration_sec: number
+  narrative_goal: string
+  visual_content: {
+    description: string
+    subjects: string[]
+    action: string
+    environment: string
+    composition: string
+    visible_props: string[]
+  }
+  start_state: Record<string, unknown>
+  end_state: Record<string, unknown>
+  camera: {
+    shot_size: string
+    movement: string
+    angle: string
+    framing: string
+    lens_mm: number
+    focus: string
+    axis_id: string
+    axis_side: string
+  }
+  lighting: {
+    style: string
+    key_light: string
+    fill_light: string
+    color_temperature: string
+    contrast: string
+    atmosphere: string
+  }
+  art_direction: {
+    visual_style: string
+    palette: string[]
+    texture: string
+    production_design: string
+    wardrobe: string
+    references: string[]
+  }
+  technique: {
+    pacing: string
+    transition_in: string
+    transition_out: string
+    practical_effects: string[]
+    vfx: string[]
+    notes: string
+  }
+  performance: Record<string, unknown>
+  audio: {
+    dialogue: string
+    voice_over: string
+    ambience: string[]
+    sfx: string[]
+    music: string
+    sync_notes: string
+  }
+  continuity: Record<string, unknown>
+  generation: {
+    adapter: ShotPromptAdapter
+    model: string
+    aspect_ratio: string
+    resolution: string
+    fps: number
+    negative_prompt: string
+    reference_asset_ids: string[]
+    risk_flags: string[]
+    model_parameters: Record<string, string | number | boolean>
+  }
+  source: Record<string, unknown>
+}
+
+export interface ShotValidationIssue {
+  code: string
+  severity: 'BLOCKER' | 'WARNING'
+  field_path: string
+  message: string
+  repairable: boolean
+  details: Record<string, unknown>
+}
+
+export interface ShotValidationReport {
+  valid: boolean
+  needs_review: boolean
+  total_duration_sec: number
+  issues: ShotValidationIssue[]
+}
+
+export interface ShotLockSnapshot {
+  project?: Record<string, unknown>
+  scene?: Record<string, unknown>
+  character_locks?: Array<Record<string, unknown>>
+  field_locks?: Array<{
+    id: string
+    scope: ShotLockScope
+    target_id: string
+    field_path: string
+    value: unknown
+    owner: string
+    version: number
+    effective: boolean
+  }>
+  effective_fields?: Record<string, {
+    scope: ShotLockScope
+    owner: string
+    lock_id: string
+  }>
+  content_hash?: string
+}
+
 export interface StoryboardWorkspace {
   storyboard: null | {
     id: string
@@ -750,6 +863,8 @@ export interface StoryboardWorkspace {
   shots: Array<{
     shotSpecId: string
     shotId: string
+    sceneId: string
+    shotLockVersion: number
     code: string
     title: string
     description: string
@@ -763,7 +878,22 @@ export interface StoryboardWorkspace {
     status: string
     imageUrl?: string
     imagePrompt?: string
+    shotSpec: StructuredShotSpec
+    promptCompiled: string
+    promptAdapter: ShotPromptAdapter
+    compilerVersion: string
+    compilerInputHash: string
+    promptCompiledHash: string
+    reviewStatus: string
+    repairAttempts: number
+    validationReport: ShotValidationReport
+    lockSnapshot: ShotLockSnapshot
+    migrationProvenance: Record<string, unknown>
     delivery?: string
+    renderMode?: string
+    audioCues: string[]
+    cameraNotes: string[]
+    timelineNotes: string[]
     contentHash: string
   }>
   workflow: null | {
@@ -5003,6 +5133,8 @@ export async function fetchStoryboardWorkspace(
     shots: Array<{
       shot_spec_id: string
       shot_id: string
+      scene_id: string
+      shot_lock_version: number
       code: string
       title: string
       description: string
@@ -5016,6 +5148,17 @@ export async function fetchStoryboardWorkspace(
       status: string
       image_url: string | null
       image_prompt?: string | null
+      shot_spec: StructuredShotSpec
+      prompt_compiled: string
+      prompt_adapter: ShotPromptAdapter
+      compiler_version: string
+      compiler_input_hash: string
+      prompt_compiled_hash: string
+      review_status: string
+      repair_attempts: number
+      validation_report: ShotValidationReport
+      lock_snapshot: ShotLockSnapshot
+      migration_provenance: Record<string, unknown>
       delivery?: string | null
       render_mode?: string | null
       audio_cues?: string[]
@@ -5055,6 +5198,8 @@ export async function fetchStoryboardWorkspace(
     shots: data.shots.map((item) => ({
       shotSpecId: item.shot_spec_id,
       shotId: item.shot_id,
+      sceneId: item.scene_id,
+      shotLockVersion: item.shot_lock_version,
       code: item.code,
       title: item.title,
       description: item.description,
@@ -5070,6 +5215,17 @@ export async function fetchStoryboardWorkspace(
       status: item.status,
       ...(item.image_url === null ? {} : { imageUrl: item.image_url }),
       ...(item.image_prompt ? { imagePrompt: item.image_prompt } : {}),
+      shotSpec: item.shot_spec,
+      promptCompiled: item.prompt_compiled,
+      promptAdapter: item.prompt_adapter,
+      compilerVersion: item.compiler_version,
+      compilerInputHash: item.compiler_input_hash,
+      promptCompiledHash: item.prompt_compiled_hash,
+      reviewStatus: item.review_status,
+      repairAttempts: item.repair_attempts,
+      validationReport: item.validation_report,
+      lockSnapshot: item.lock_snapshot,
+      migrationProvenance: item.migration_provenance,
       ...(item.delivery ? { delivery: item.delivery } : {}),
       ...(item.render_mode ? { renderMode: item.render_mode } : {}),
       audioCues: item.audio_cues ?? [],
@@ -5139,6 +5295,60 @@ export async function regenerateStoryboardShot(
     },
   )
   return mapJob(result.job)
+}
+
+export async function updateStructuredShotSpec(
+  shotSpecId: string,
+  expectedVersion: number,
+  shotSpec: StructuredShotSpec,
+  promptAdapter: ShotPromptAdapter,
+): Promise<void> {
+  await requestJson<{ shot: unknown }>(
+    `/api/v1/shot-specs/${shotSpecId}`,
+    {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': crypto.randomUUID(),
+      },
+      body: JSON.stringify({
+        expected_version: expectedVersion,
+        actor: '创作者',
+        shot_spec: shotSpec,
+        prompt_adapter: promptAdapter,
+      }),
+    },
+  )
+}
+
+export async function updateShotLock(
+  projectId: string,
+  expectedVersion: number,
+  input: {
+    scope: ShotLockScope
+    targetId: string
+    fieldPath: string
+    locked: boolean
+    value?: unknown
+  },
+): Promise<number> {
+  const result = await requestJson<{ project_lock_version: number }>(
+    `/api/v1/projects/${projectId}/shot-locks`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        expected_version: expectedVersion,
+        scope: input.scope,
+        target_id: input.targetId,
+        field_path: input.fieldPath,
+        locked: input.locked,
+        ...(input.locked ? { value: input.value } : {}),
+        actor: '创作者',
+      }),
+    },
+  )
+  return result.project_lock_version
 }
 
 export async function fetchAudioWorkspace(

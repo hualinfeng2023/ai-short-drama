@@ -14,7 +14,7 @@ from app.db.session import get_engine
 from app.services.media_staging import media_staging_configured, media_staging_enabled
 
 router = APIRouter(tags=["health"])
-EXPECTED_REVISION = "0029_legacy_take_provenance"
+EXPECTED_REVISION = "0030_structured_shot_specs"
 
 
 @router.get("/health/live")

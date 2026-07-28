@@ -31,6 +31,7 @@ from app.services.jobs import enqueue_job
 from app.services.media_staging import seedream_fast_path_expires_at
 from app.services.projects import canonical_json, version_conflict
 from app.services.shot_frames import RENDER_MODE_BLACK_FRAME
+from app.services.shot_specs import compile_shot_spec, ensure_shot_spec_generation_ready
 from app.services.video_provider import GeneratedVideo
 from app.services.videos import materialize_generated_video
 from app.services.workspace import project_or_404
@@ -74,6 +75,8 @@ def _shot_spec_render_mode(spec: ShotSpec) -> str:
 
 
 def _shot_spec_image_prompt(spec: ShotSpec) -> str:
+    if spec.prompt_compiled:
+        return spec.prompt_compiled
     try:
         payload = json.loads(spec.prompt_json or "{}")
     except json.JSONDecodeError:
@@ -107,13 +110,20 @@ def start_media_production(session: Session, job: Job) -> list[str]:
     )
     child_ids: list[str] = []
     for spec in specs:
+        ensure_shot_spec_generation_ready(spec)
+        _resolved, _report, keyframe_compiled, _snapshot = compile_shot_spec(
+            session,
+            spec,
+            adapter_name="generic",
+            store=True,
+        )
         candidate_count = 2 if spec.ordinal in {1, len(specs)} else 1
         storyboard_take = session.scalar(
             select(Take).where(Take.shot_id == spec.shot_id, Take.kind == "STORYBOARD")
         )
         reference_asset_ids = [storyboard_take.asset_id] if storyboard_take else []
         render_mode = _shot_spec_render_mode(spec)
-        image_prompt = _shot_spec_image_prompt(spec)
+        image_prompt = keyframe_compiled.prompt
         # 黑场不传分镜参考，避免无关画面诱导模型
         if render_mode == RENDER_MODE_BLACK_FRAME:
             reference_asset_ids = []
@@ -454,6 +464,13 @@ def _maybe_enqueue_video(
     if asset is None:
         return None
     metadata = json.loads(asset.metadata_json or "{}")
+    ensure_shot_spec_generation_ready(spec)
+    _resolved, _report, compiled, _snapshot = compile_shot_spec(
+        session,
+        spec,
+        adapter_name="seedance",
+        store=True,
+    )
     next_job, replayed = enqueue_job(
         session,
         project_id=job.project_id,
@@ -471,10 +488,7 @@ def _maybe_enqueue_video(
             "source_url": metadata.get("source_url"),
             "source_url_kind": metadata.get("source_url_kind", "seedream-original"),
             "source_url_fast_path_expires_at": metadata.get("source_url_fast_path_expires_at"),
-            "prompt": (
-                f"{spec.description}。保持人物、服装、场景、道具和构图稳定，"
-                "生成自然连续的细微运动，避免闪烁和新增主体。"
-            ),
+            "prompt": compiled.prompt,
             "duration": shot.duration_sec,
             "take_version": 1,
         },

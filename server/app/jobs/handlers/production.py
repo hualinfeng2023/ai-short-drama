@@ -40,8 +40,10 @@ from app.services.production import (
 )
 from app.services.projects import canonical_json
 from app.services.shot_frames import RENDER_MODE_BLACK_FRAME
+from app.services.storyboard_agent import generate_storyboard_shot_specs
 from app.services.storyboards_v2 import (
     animatic_inputs,
+    build_storyboard_agent_drafts,
     create_dynamic_storyboard,
     materialize_storyboard_take,
     reference_data_urls,
@@ -371,13 +373,36 @@ async def generate_storyboard_v2(
     job: Job,
     _payload: dict[str, object],
 ) -> dict[str, object]:
-    await context.checkpoint(session, job, 20, "从批准剧本动态拆分镜头规格")
-    storyboard, child_job_ids = create_dynamic_storyboard(session, job)
+    await context.checkpoint(session, job, 12, "从批准剧本构建结构化 ShotSpec 草案")
+    drafts = build_storyboard_agent_drafts(session, job)
+    await context.checkpoint(session, job, 28, "Storyboard Agent 正在生成严格 ShotSpec JSON")
+    agent_result = await generate_storyboard_shot_specs(context.settings, drafts)
+    await context.checkpoint(session, job, 62, "校验 ShotSpec、连续性与生成风险")
+    storyboard, child_job_ids = create_dynamic_storyboard(
+        session,
+        job,
+        planned_shot_specs=agent_result.shots,
+        agent_needs_review=agent_result.needs_review,
+        agent_metadata={
+            "provider": agent_result.provider,
+            "model": agent_result.model,
+            "request_id": agent_result.request_id,
+            "repair_attempts": agent_result.repair_attempts,
+            "diagnostics": agent_result.diagnostics,
+        },
+    )
     await context.checkpoint(session, job, 90, "分镜拆分任务已登记到工作流依赖图")
     return {
         "storyboard_version_id": storyboard.id,
-        "shot_count": len(child_job_ids),
+        "shot_count": len(agent_result.shots),
         "child_job_ids": child_job_ids,
+        "storyboard_agent": {
+            "provider": agent_result.provider,
+            "model": agent_result.model,
+            "request_id": agent_result.request_id,
+            "repair_attempts": agent_result.repair_attempts,
+            "needs_review": agent_result.needs_review,
+        },
     }
 
 
@@ -510,7 +535,12 @@ async def generate_animatic(
                 await asyncio.wait_for(asyncio.shield(media_task), timeout=2)
             except TimeoutError:
                 progress = min(82, progress + 8)
-                await context.checkpoint(session, job, progress, "FFmpeg 正在组装带临时声音的节奏样片")
+                await context.checkpoint(
+                    session,
+                    job,
+                    progress,
+                    "FFmpeg 正在组装带临时声音的节奏样片",
+                )
                 context.heartbeat(session, "RUNNING", job.id)
         files = await media_task
     except JobCancelled:
