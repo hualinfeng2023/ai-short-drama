@@ -3992,6 +3992,16 @@ p {
   font: inherit;
   line-height: 1.5;
 }
+.storyboard-regen-note > small {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-caption);
+}
+.storyboard-regen-note__error {
+  margin: 0;
+  color: var(--color-state-danger);
+  font-size: var(--font-size-caption);
+  line-height: 1.45;
+}
 .workflow-node-list { display: grid; gap: var(--space-2); margin-top: var(--space-3); }
 .workflow-node-list > div { display: grid; grid-template-columns: 1fr auto; gap: var(--space-1) var(--space-2); padding: var(--space-2); background: var(--color-action-primary-soft); border: 1px solid var(--color-border); border-radius: var(--radius-control-sm); }
 .workflow-node-list span { font: 700 var(--font-size-caption)/1.2 var(--font-family-mono); }

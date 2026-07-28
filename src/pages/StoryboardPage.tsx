@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeft, Ban, Check, Film, GitBranch, LoaderCircle, LockKeyhole, Maximize2, RefreshCw, Sparkles, ZoomIn, ZoomOut } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router'
 import {
@@ -24,6 +24,9 @@ const ACTIVE_JOB_STATUSES = new Set<JobStatus>([
   'RUNNING',
   'CANCEL_REQUESTED',
 ])
+
+/** 与后端 StoryboardShotRegenerateRequest.note max_length 对齐 */
+const REGEN_NOTE_MAX = 500
 
 function workflowNodeLabel(value: string): string {
   if (value === 'storyboard.plan') return '分镜规划'
@@ -62,6 +65,10 @@ type DetailShotState = {
   imageUrl: string
   imagePrompt: string
   delivery: string
+  renderMode: string
+  audioCues: string[]
+  cameraNotes: string[]
+  timelineNotes: string[]
 }
 
 function deliveryLabel(value: string): string {
@@ -69,6 +76,11 @@ function deliveryLabel(value: string): string {
   if (value === 'VOICE_OVER') return '画外音'
   if (value === 'DIALOGUE') return '对白'
   return value
+}
+
+function renderModeLabel(value: string): string {
+  if (value === 'BLACK_FRAME') return '黑场（本地合成）'
+  return '生图'
 }
 
 function openShotDetail(
@@ -87,6 +99,10 @@ function openShotDetail(
     imageUrl: shot.imageUrl ?? '',
     imagePrompt: shot.imagePrompt ?? '',
     delivery: shot.delivery ?? '',
+    renderMode: shot.renderMode ?? 'IMAGE',
+    audioCues: shot.audioCues ?? [],
+    cameraNotes: shot.cameraNotes ?? [],
+    timelineNotes: shot.timelineNotes ?? [],
   }
 }
 
@@ -107,6 +123,18 @@ export function StoryboardPage() {
   const [previewZoom, setPreviewZoom] = useState(100)
   const [regenTarget, setRegenTarget] = useState<DetailShotState | null>(null)
   const [regenNote, setRegenNote] = useState('')
+  const [regenError, setRegenError] = useState<string | null>(null)
+  const regenOpenRef = useRef(false)
+  regenOpenRef.current = regenTarget !== null
+
+  function openRegen(shot: DetailShotState) {
+    // 避免与详情弹窗双 dialog 叠层：下层弹窗会拦截确认按钮点击
+    setPreviewShot(null)
+    setPreviewZoom(100)
+    setRegenError(null)
+    setRegenTarget(shot)
+    setRegenNote('')
+  }
 
   const activeAnimaticJob = useMemo(() => {
     if (!projectId) return null
@@ -146,7 +174,8 @@ export function StoryboardPage() {
     const load = async () => {
       try {
         await refresh()
-        if (active) setError(null)
+        // 重生成弹窗打开时保留错误提示，避免 3s 轮询清掉失败原因
+        if (active && !regenOpenRef.current) setError(null)
       } catch (reason) {
         if (active) setError(reason instanceof Error ? reason.message : '分镜读取失败')
       } finally {
@@ -176,17 +205,27 @@ export function StoryboardPage() {
 
   async function confirmRegenerate() {
     if (!project || !regenTarget || regenBusyId) return
-    setRegenBusyId(regenTarget.shotSpecId)
+    const note = regenNote.trim()
+    if (note.length > REGEN_NOTE_MAX) {
+      setRegenError(`修改意见最多 ${REGEN_NOTE_MAX} 字，当前 ${note.length} 字`)
+      return
+    }
+    const target = regenTarget
+    setRegenBusyId(target.shotSpecId)
+    setRegenError(null)
     setError(null)
     try {
-      await regenerateStoryboardShot(regenTarget.shotSpecId, project.lockVersion, regenNote)
+      await regenerateStoryboardShot(target.shotSpecId, project.lockVersion, note || undefined)
       setRegenTarget(null)
       setRegenNote('')
       setPreviewShot(null)
-      notify(`${regenTarget.code} 已开始重生成，完成后会自动刷新节奏样片。`)
+      notify(`${target.code} 已开始重生成，完成后会自动刷新节奏样片。`)
       await refresh()
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '分镜重生成失败')
+      const message = reason instanceof Error ? reason.message : '分镜重生成失败'
+      setRegenError(message)
+      setError(message)
+      notify(message, 'error')
     } finally {
       setRegenBusyId(null)
     }
@@ -319,8 +358,7 @@ export function StoryboardPage() {
                       disabled={Boolean(regenBusyId) || regenerating}
                       onClick={(event) => {
                         event.stopPropagation()
-                        setRegenTarget(openShotDetail(shot))
-                        setRegenNote('')
+                        openRegen(openShotDetail(shot))
                       }}
                       size="sm"
                       variant="secondary"
@@ -395,8 +433,7 @@ export function StoryboardPage() {
           <Button
             disabled={Boolean(regenBusyId)}
             onClick={() => {
-              setRegenTarget(previewShot)
-              setRegenNote('')
+              if (previewShot) openRegen(previewShot)
             }}
             variant="secondary"
           >
@@ -444,6 +481,7 @@ export function StoryboardPage() {
               <div><dt>时长</dt><dd>{(previewShot.durationMs / 1000).toFixed(1)} 秒</dd></div>
               <div><dt>景别</dt><dd>{localizeDisplayText(previewShot.shotSize)}</dd></div>
               <div><dt>运镜</dt><dd>{localizeDisplayText(previewShot.cameraMovement)}</dd></div>
+              <div><dt>出图方式</dt><dd>{renderModeLabel(previewShot.renderMode)}</dd></div>
               {previewShot.delivery ? (
                 <div><dt>交付</dt><dd>{deliveryLabel(previewShot.delivery)}</dd></div>
               ) : null}
@@ -459,9 +497,29 @@ export function StoryboardPage() {
                 <blockquote>{previewShot.dialogue}</blockquote>
               </div>
             ) : null}
+            {previewShot.audioCues.length > 0 ? (
+              <div>
+                <span>声音线索（不进生图）</span>
+                <p>{previewShot.audioCues.join('；')}</p>
+              </div>
+            ) : null}
+            {previewShot.cameraNotes.length > 0 ? (
+              <div>
+                <span>运镜衔接（不进生图）</span>
+                <p>{previewShot.cameraNotes.join('；')}</p>
+              </div>
+            ) : null}
+            {previewShot.timelineNotes.length > 0 ? (
+              <div>
+                <span>时间轴备注（不进生图）</span>
+                <p>{previewShot.timelineNotes.join('；')}</p>
+              </div>
+            ) : null}
             <div className="storyboard-shot-detail__prompt">
               <span>生图提示词</span>
-              {previewShot.imagePrompt ? (
+              {previewShot.renderMode === 'BLACK_FRAME' ? (
+                <p>黑场镜头：不调用生图模型，本地合成纯黑静帧。</p>
+              ) : previewShot.imagePrompt ? (
                 <pre>{previewShot.imagePrompt}</pre>
               ) : (
                 <p>暂无记录。重新生成此镜后可查看实际出图提示词。</p>
@@ -473,15 +531,15 @@ export function StoryboardPage() {
     </Modal>
 
     <Modal
-      description={regenTarget ? `${regenTarget.title} · 将保留镜头时长与台词，按新种子与身份参考重绘画面` : undefined}
+      description={regenTarget ? `${displayShotTitle(regenTarget.title, regenTarget.code)} · ${regenTarget.code} · 将保留镜头时长与台词，按新种子与身份参考重绘画面` : undefined}
       footer={<>
-        <Button disabled={Boolean(regenBusyId)} onClick={() => { setRegenTarget(null); setRegenNote('') }} variant="secondary">取消</Button>
+        <Button disabled={Boolean(regenBusyId)} onClick={() => { setRegenTarget(null); setRegenNote(''); setRegenError(null) }} variant="secondary">取消</Button>
         <Button disabled={Boolean(regenBusyId)} onClick={() => void confirmRegenerate()}>
           {regenBusyId ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}
           确认重生成
         </Button>
       </>}
-      onClose={() => { if (!regenBusyId) { setRegenTarget(null); setRegenNote('') } }}
+      onClose={() => { if (!regenBusyId) { setRegenTarget(null); setRegenNote(''); setRegenError(null) } }}
       open={regenTarget !== null}
       title={regenTarget ? `重生成 ${regenTarget.code}` : '重生成分镜'}
     >
@@ -489,11 +547,17 @@ export function StoryboardPage() {
         <label className="storyboard-regen-note">
           <span>修改意见（可选）</span>
           <textarea
-            onChange={(event) => setRegenNote(event.target.value)}
+            maxLength={REGEN_NOTE_MAX}
+            onChange={(event) => {
+              setRegenNote(event.target.value)
+              if (regenError) setRegenError(null)
+            }}
             placeholder="例如：必须与锁定女主同一张脸；减少路人；更近景看清表情"
             rows={4}
             value={regenNote}
           />
+          <small>{regenNote.trim().length}/{REGEN_NOTE_MAX} · 可留空</small>
+          {regenError ? <p className="storyboard-regen-note__error" role="alert">{regenError}</p> : null}
         </label>
       ) : null}
     </Modal>

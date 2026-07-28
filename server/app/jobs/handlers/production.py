@@ -15,12 +15,13 @@ from app.services.character_visuals import (
     materialize_identity_asset,
     materialize_visual_candidate,
 )
-from app.services.image_provider import ImageProviderError
-from app.services.media import build_preview_files
+from app.services.image_provider import GeneratedImage, ImageProviderError
+from app.services.media import build_preview_files, solid_png_bytes
 from app.services.media_production_v2 import (
     elapsed_ms,
     generation_started_at,
     materialize_keyframe,
+    resolve_keyframe_image_prompt,
     start_media_production,
 )
 from app.services.media_staging import seedream_fast_path_expires_at
@@ -38,6 +39,7 @@ from app.services.production import (
     register_preview,
 )
 from app.services.projects import canonical_json
+from app.services.shot_frames import RENDER_MODE_BLACK_FRAME
 from app.services.storyboards_v2 import (
     animatic_inputs,
     create_dynamic_storyboard,
@@ -398,6 +400,36 @@ async def generate_storyboard_take(
         "seed": seed,
     }
     job.input_json = canonical_json(resolved_payload)
+    render_mode = str(payload.get("render_mode") or "")
+    if render_mode == RENDER_MODE_BLACK_FRAME:
+        # 黑场不调用生图模型，本地合成纯黑静帧并走同一登记路径
+        await context.checkpoint(session, job, 58, "正在合成黑场静帧")
+        width, height = (720, 1280)
+        image = GeneratedImage(
+            content=solid_png_bytes(width, height, rgb=(0, 0, 0)),
+            mime="image/png",
+            width=width,
+            height=height,
+            model="local-black-frame",
+            request_id=None,
+            source_url=None,
+        )
+        await context.checkpoint(session, job, 84, "登记黑场分镜版本")
+        asset, take, next_job = materialize_storyboard_take(
+            session,
+            context.settings,
+            job,
+            image,
+        )
+        return {
+            "asset_id": asset.id,
+            "take_id": take.id,
+            "next_job_id": next_job.id if next_job else None,
+            "model": image.model,
+            "reference_asset_count": 0,
+            "render_mode": RENDER_MODE_BLACK_FRAME,
+        }
+
     references = reference_data_urls(
         session,
         context.settings,
@@ -525,35 +557,50 @@ async def generate_keyframe_take(
     payload: dict[str, object],
 ) -> dict[str, object]:
     await context.checkpoint(session, job, 12, "组装正式关键帧多参考输入")
+    prompt = resolve_keyframe_image_prompt(payload)
     reference_asset_ids = [
         item for item in payload.get("reference_asset_ids", []) if isinstance(item, str)
     ]
-    references = reference_data_urls(session, context.settings, reference_asset_ids)
+    render_mode = str(payload.get("render_mode") or "")
     started = generation_started_at()
-    generation = asyncio.create_task(
-        context.generate_image(
-            context.settings,
-            str(payload["prompt"]),
-            model=context.settings.ark_image_model,
-            size="2K",
-            reference_images=references,
-            seed=int(payload["seed"]),
+    if render_mode == RENDER_MODE_BLACK_FRAME or not prompt.strip():
+        await context.checkpoint(session, job, 58, "正在合成黑场正式关键帧")
+        width, height = (720, 1280)
+        image = GeneratedImage(
+            content=solid_png_bytes(width, height, rgb=(0, 0, 0)),
+            mime="image/png",
+            width=width,
+            height=height,
+            model="local-black-frame",
+            request_id=None,
+            source_url=None,
         )
-    )
-    try:
-        while not generation.done():
-            done, _pending = await asyncio.wait({generation}, timeout=4)
-            if done:
-                break
-            await context.checkpoint(session, job, 58, "正在生成正式关键帧")
-            context.heartbeat(session, "RUNNING", job.id)
+    else:
+        references = reference_data_urls(session, context.settings, reference_asset_ids)
+        generation = asyncio.create_task(
+            context.generate_image(
+                context.settings,
+                prompt,
+                model=context.settings.ark_image_model,
+                size="2K",
+                reference_images=references,
+                seed=int(payload["seed"]),
+            )
+        )
         try:
-            image = await generation
-        except ImageProviderError as exc:
-            raise JobExecutionError(exc.code, exc.message, retryable=exc.retryable) from exc
-    finally:
-        if not generation.done():
-            generation.cancel()
+            while not generation.done():
+                done, _pending = await asyncio.wait({generation}, timeout=4)
+                if done:
+                    break
+                await context.checkpoint(session, job, 58, "正在生成正式关键帧")
+                context.heartbeat(session, "RUNNING", job.id)
+            try:
+                image = await generation
+            except ImageProviderError as exc:
+                raise JobExecutionError(exc.code, exc.message, retryable=exc.retryable) from exc
+        finally:
+            if not generation.done():
+                generation.cancel()
     await context.checkpoint(session, job, 80, "执行通用图片质量检查与审核路由")
     asset, take, next_job = materialize_keyframe(
         session,

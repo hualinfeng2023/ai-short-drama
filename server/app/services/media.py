@@ -60,6 +60,23 @@ def deterministic_png_bytes(width: int, height: int, seed: str) -> bytes:
     )
 
 
+def solid_png_bytes(
+    width: int,
+    height: int,
+    *,
+    rgb: tuple[int, int, int] = (0, 0, 0),
+) -> bytes:
+    """合成纯色 PNG（用于黑场等不调用生图模型的镜头）。"""
+    row = bytes((0, *rgb * width))
+    rows = row * height
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + _png_chunk(b"IDAT", zlib.compress(rows, level=9))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
 def write_deterministic_png(path: Path, width: int, height: int, seed: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(deterministic_png_bytes(width, height, seed))

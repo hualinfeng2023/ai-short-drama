@@ -19,6 +19,14 @@ def _characters() -> dict[str, SimpleNamespace]:
     return {
         "protagonist": SimpleNamespace(name="林悦", visual_brief="短发亚洲女性"),
         "witness": SimpleNamespace(name="周启", visual_brief="中年男性"),
+        "spouse_wife": SimpleNamespace(
+            name="妻子",
+            visual_brief="穿深灰简约素色服装，外表年轻温和",
+        ),
+        "spouse_husband": SimpleNamespace(
+            name="丈夫",
+            visual_brief="穿和妻子同色系深灰服装，肩部宽厚",
+        ),
         "child": SimpleNamespace(
             name="孩子",
             visual_brief="刚出生包裹在米白色柔软襁褓中，仅露出小手，不露出可识别身份的面部特征",
@@ -107,16 +115,47 @@ def test_dialogue_mentioning_child_does_not_bind_child_character() -> None:
         "VOICE_OVER",
     )
 
-    assert (
-        _line_character_keys(
-            line,
-            characters_by_key=characters,  # type: ignore[arg-type]
-            scene_character_keys=["doctor", "child"],
-            delivery="VOICE_OVER",
-            visual_anchor_text="正面完全对称广角镜头，空荡产房中央金属桌，夫妻分坐两端",
-        )
-        == []
+    assert _line_character_keys(
+        line,
+        characters_by_key=characters,  # type: ignore[arg-type]
+        scene_character_keys=["doctor", "child"],
+        delivery="VOICE_OVER",
+        visual_anchor_text="正面完全对称广角镜头，空荡产房中央金属桌，夫妻分坐两端",
+    ) == ["spouse_wife", "spouse_husband"]
+
+
+def test_action_couple_alias_and_glove_hands_bind_locked_cast() -> None:
+    characters = _characters()
+    line = _line(
+        "scene_action",
+        "正面完全对称广角镜头，空荡产房中央金属桌，夫妻分坐两端，"
+        "一双戴无菌白手套的手从镜头下方伸出，将两枚黑色生物识别器推到夫妻面前",
+        "ACTION",
     )
+
+    assert _line_character_keys(
+        line,
+        characters_by_key=characters,  # type: ignore[arg-type]
+        scene_character_keys=["doctor", "child"],
+        delivery="ACTION",
+    ) == ["spouse_wife", "spouse_husband", "doctor"]
+
+
+def test_scene_cast_ignores_voice_over_name_mentions() -> None:
+    characters = _characters()
+    lines = [
+        _line(
+            "scene_action",
+            "正面完全对称广角镜头，空荡产房中央金属桌，夫妻分坐两端",
+            "ACTION",
+        ),
+        _line("doctor", "一个孩子出生，一个永生者今晚老去。", "VOICE_OVER"),
+    ]
+
+    assert _scene_character_keys(lines, characters) == [  # type: ignore[arg-type]
+        "spouse_wife",
+        "spouse_husband",
+    ]
 
 
 def test_face_hidden_dialogue_is_treated_as_voice_over_delivery() -> None:
@@ -201,7 +240,8 @@ def test_storyboard_take_prompt_locks_character_identity() -> None:
     assert "林悦" in prompt
     assert "短发亚洲女性" in prompt
     assert "禁止换脸" in prompt
-    assert "写实都市夜戏" in prompt
+    # 项目风格进入 Creative Bible，不进入 image prompt
+    assert "写实都市夜戏" not in prompt
     assert "电影剧照" in prompt
     assert "塑料皮肤" in prompt
     assert "{" not in prompt
@@ -240,8 +280,61 @@ def test_voice_over_prompt_uses_offscreen_audio_not_lip_sync() -> None:
     assert "画外音：" not in prompt
     assert "人物正在说" not in prompt
     assert "胚胎舱表面" in prompt
-    assert "严格服从上述隐面" in prompt or "隐面/局部出镜" in prompt
+    # VO 不写角色视觉描述 / 身份模板
+    assert "医生" not in prompt
+    assert "角色身份锁定" not in prompt
     assert "唇形、发型核心特征" not in prompt
+    assert "脸型、五官比例" not in prompt
+    assert "画面中不出现任何人物" in prompt
+
+
+def test_storyboard_prompt_keeps_creative_bible_out_of_image_prompt() -> None:
+    from app.services.storyboards_v2 import assemble_shot_prompt
+
+    idea = (
+        "核心设定：\n"
+        "在人类实现永生后，为了维持人口总量，《人口守恒法》规定："
+        "每诞生一个孩子，就必须有一名永生者自愿交还永生。\n\n"
+        "故事梗概：\n"
+        "一对拥有永恒生命的夫妻，将生育的决定推迟了三百一十二年。"
+        "当世界上最后一个人类胚胎即将被销毁，他们必须在六十秒内决定。\n\n"
+        "整体视觉：\n"
+        "前半段以冷青色、银灰色和深黑色为主，表现永生世界的冰冷、停滞与空洞。"
+    )
+    project = SimpleNamespace(
+        style="realistic_cinematic",
+        aspect_ratio="9:16",
+        genre="sci_fi",
+        idea=idea,
+    )
+    characters = [
+        SimpleNamespace(
+            name="医生",
+            role="规则执行者",
+            visual_brief="全程不露出面部，仅出现戴无菌白手套的双手",
+        )
+    ]
+
+    assembled = assemble_shot_prompt(
+        project,  # type: ignore[arg-type]
+        description="极微距镜头拍摄胚胎舱表面，冰霜覆盖玻璃",
+        dialogue="",
+        location="废弃人类胚胎储存产房",
+        time_of_day="午夜",
+        shot_size="CU",
+        camera_movement="STATIC",
+        characters=characters,  # type: ignore[arg-type]
+        delivery="ACTION",
+    )
+    prompt = assembled.image_prompt
+
+    assert "时代与世界观" not in prompt
+    assert "人口守恒法" not in prompt
+    assert "三百一十二" not in prompt
+    assert "人口守恒" not in prompt
+    assert assembled.creative_bible.get("worldview")
+    assert "人口守恒" in assembled.creative_bible.get("worldview", "")
+    assert any(item.field == "global_creative_bible" for item in assembled.debug.removed)
 
 
 def test_compile_single_frame_strips_audio_and_splits_pull_focus() -> None:

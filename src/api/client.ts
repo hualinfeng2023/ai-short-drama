@@ -5017,6 +5017,10 @@ export async function fetchStoryboardWorkspace(
       image_url: string | null
       image_prompt?: string | null
       delivery?: string | null
+      render_mode?: string | null
+      audio_cues?: string[]
+      camera_notes?: string[]
+      timeline_notes?: string[]
       content_hash: string
     }>
     workflow: null | {
@@ -5067,6 +5071,10 @@ export async function fetchStoryboardWorkspace(
       ...(item.image_url === null ? {} : { imageUrl: item.image_url }),
       ...(item.image_prompt ? { imagePrompt: item.image_prompt } : {}),
       ...(item.delivery ? { delivery: item.delivery } : {}),
+      ...(item.render_mode ? { renderMode: item.render_mode } : {}),
+      audioCues: item.audio_cues ?? [],
+      cameraNotes: item.camera_notes ?? [],
+      timelineNotes: item.timeline_notes ?? [],
       contentHash: item.content_hash,
     })),
     workflow: data.workflow === null ? null : {
