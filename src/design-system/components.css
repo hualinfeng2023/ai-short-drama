@@ -133,6 +133,13 @@
 .button.button--ai.button--sm { min-height: var(--control-height-sm); }
 .button.button--ai.button--md { min-height: var(--control-height-md); }
 
+@media (min-width: 641px) {
+  .brief-field__actions .button.button--ai.button--sm {
+    height: var(--brief-field-action-height);
+    min-height: var(--brief-field-action-height);
+  }
+}
+
 .hint-tooltip {
   position: relative;
   display: inline-flex;

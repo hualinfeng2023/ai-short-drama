@@ -431,7 +431,7 @@ def _expanded_negative_terms(values: list[str]) -> list[str]:
             )
         else:
             result.append(stripped or text)
-    return _dedupe_specific(result)
+    return _dedupe_text(result)
 
 
 def _visible_physical_responses(ir: PromptIR) -> list[str]:
@@ -469,10 +469,6 @@ def _visible_physical_responses(ir: PromptIR) -> list[str]:
             "积灰、磨损与触碰痕迹只出现在符合使用逻辑的边缘、接缝和接触面",
         ),
         (
-            ("皮肤", "面部", "双手"),
-            "可见皮肤保留毛孔、细纹和自然色差，不过度磨皮",
-        ),
-        (
             ("织物", "风衣", "制服", "衣服"),
             "织物褶皱、张力与磨损服从人物姿态和面料重量",
         ),
@@ -480,6 +476,11 @@ def _visible_physical_responses(ir: PromptIR) -> list[str]:
     for markers, response in rules:
         if any(marker in corpus for marker in markers):
             responses.append(response)
+    skin_is_visible = any(marker in corpus for marker in ("皮肤", "面部")) or (
+        "双手" in corpus and "手套" not in corpus
+    )
+    if skin_is_visible:
+        responses.append("可见皮肤保留毛孔、细纹和自然色差，不过度磨皮")
     return _dedupe_specific(responses, limit=6)
 
 
